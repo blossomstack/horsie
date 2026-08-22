@@ -9,13 +9,13 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use uuid::Uuid;
 
-/// Name of the builtin terminal tool an agent calls to finish its turn — either
-/// delivering its structured output or asking the user a question.
-/// The subset of an agent's configuration that [`ToolboxFactory::for_agent`] and
-/// [`AgentParams::from_def`](crate::agent_loop::AgentParams::from_def) actually need: tool
-/// shape and turn-shape, and nothing about *where this agent sits*. A workflow
-/// step builds one from its definition and preset; an interactive session
-/// builds one from its settings.
+/// Name of the builtin terminal tool an agent calls to finish its turn —
+/// either delivering its structured output or asking the user a question. The
+/// subset of an agent's configuration that [`ToolboxFactory::for_agent`] and
+/// [`AgentParams::from_def`](crate::agent_loop::AgentParams::from_def)
+/// actually need: tool shape and turn-shape, and nothing about *where this
+/// agent sits*. A workflow step builds one from its definition and preset; an
+/// interactive session builds one from its settings.
 #[derive(Debug, Clone, Default)]
 pub struct AgentRunDef {
     pub system_prompt: Option<String>,
@@ -24,13 +24,14 @@ pub struct AgentRunDef {
     pub allowed_tools: Option<Vec<String>>,
 }
 
-/// Name of the builtin tool an agent calls to load a skill's full instructions on
-/// demand (progressive disclosure). Always advertised; re-scans the workspace live.
+/// Name of the builtin tool an agent calls to load a skill's full instructions
+/// on demand (progressive disclosure). Always advertised; re-scans the
+/// workspace live.
 pub const SKILL_TOOL: &str = "skill";
 
-/// Name of the builtin tool that re-scans the workspace(s) and returns the current
-/// catalog (path, git status, instruction presence, skills). Always advertised, like
-/// `skill`. Replaces the former `list_skills`.
+/// Name of the builtin tool that re-scans the workspace(s) and returns the
+/// current catalog (path, git status, instruction presence, skills). Always
+/// advertised, like `skill`. Replaces the former `list_skills`.
 pub const INSPECT_WORKSPACE_TOOL: &str = "inspect_workspace";
 
 /// One question an agent parked on, and the call that asked it.
@@ -44,8 +45,9 @@ pub struct AskedQuestion {
     pub question: String,
 }
 
-/// A terminal outcome an [`AgentActor`](crate::agent_loop::AgentActor) reports to whoever
-/// spawned it — the workflow that orchestrates it, or an interactive session.
+/// A terminal outcome an [`AgentActor`](crate::agent_loop::AgentActor) reports
+/// to whoever spawned it — the workflow that orchestrates it, or an
+/// interactive session.
 ///
 /// Every variant names the agent that reported it, because one owner hosts
 /// many: a session's sink receives from its main agent, from every subagent
@@ -57,9 +59,9 @@ pub enum AgentOutcome {
     /// The agent started a turn off its own queue.
     ///
     /// Not a terminal outcome, and the one report that flows *before* the work
-    /// rather than after it. It exists because the agent, not its owner, decides
-    /// when its queue becomes a turn — so the owner can no longer learn that a
-    /// turn began by being the thing that began it.
+    /// rather than after it. It exists because the agent, not its owner,
+    /// decides when its queue becomes a turn — so the owner can no longer
+    /// learn that a turn began by being the thing that began it.
     Started { agent: Uuid },
     /// A turn the process died inside, found at recovery and reported by the
     /// only thing that can tell: the agent whose turn it was.
@@ -100,27 +102,27 @@ pub enum AgentOutcome {
         agent: Uuid,
         usage_total: UsageTotal,
     },
-    /// A `/summary-n-fork` turn produced the summary the forks branching off
-    /// this agent are waiting on.
+    /// A `/summary-n-fork` turn produced the summary the sub sessions
+    /// branching off this agent are waiting on.
     ///
-    /// Not a terminal outcome, and not about this agent at all: its own history
-    /// is untouched, and this turn still ends however it was going to. Delivered
-    /// as its own report because the summary belongs to a *different*
-    /// conversation, and the owner is the only thing that can reach it.
+    /// Not a terminal outcome, and not about this agent at all: its own
+    /// history is untouched, and this turn still ends however it was going to.
+    /// Delivered as its own report because the summary belongs to a
+    /// *different* session, and the owner is the only thing that can reach it.
     ///
-    /// `forks` is a list because forks queued into one turn share a branch
-    /// point, so one provider call serves all of them.
-    ForkSummary {
+    /// `sub sessions` is a list because sub sessions queued into one turn
+    /// share a branch point, so one provider call serves all of them.
+    SeedSummary {
         agent: Uuid,
-        forks: Vec<Uuid>,
+        sub_sessions: Vec<Uuid>,
         result: Result<String, String>,
     },
 }
 
-/// Where an [`AgentActor`](crate::agent_loop::AgentActor) delivers its [`AgentOutcome`].
-/// Implemented by the workflow (mapping outcomes into its own commands) and by
-/// the session server; keeps the agent decoupled from any one parent's command
-/// enum.
+/// Where an [`AgentActor`](crate::agent_loop::AgentActor) delivers its
+/// [`AgentOutcome`]. Implemented by the workflow (mapping outcomes into its
+/// own commands) and by the session server; keeps the agent decoupled from any
+/// one parent's command enum.
 #[async_trait]
 pub trait AgentOutcomeSink: Send + Sync {
     async fn deliver(&self, outcome: AgentOutcome);
@@ -129,8 +131,8 @@ pub trait AgentOutcomeSink: Send + Sync {
 /// The per-run contexts an agent run executes within — the provider it calls,
 /// the toolbox it acts through, and the system prompt that frames it. Produced
 /// fresh by [`ContextProvider::provide`] at the top of every run. The timer /
-/// `task_list` wrappers are layered on by the [`AgentActor`](crate::agent_loop::AgentActor)
-/// itself, not here.
+/// `task_list` wrappers are layered on by the
+/// [`AgentActor`](crate::agent_loop::AgentActor) itself, not here.
 pub struct Contexts {
     pub provider: Arc<dyn LlmProvider>,
     /// The agent's tools, already composed but **not** narrowed: the selection
@@ -166,9 +168,9 @@ pub struct Contexts {
 /// What a run's pre-start hooks need to know about the turn about to begin.
 ///
 /// Split across the two layers that each hold half the answer: the agent actor
-/// knows whether this load has already fired its start hook and whether the turn
-/// begins on a user message; the provider knows whether this agent is a session
-/// or a subagent, and so which event that start actually is.
+/// knows whether this load has already fired its start hook and whether the
+/// turn begins on a user message; the provider knows whether this agent is a
+/// session or a subagent, and so which event that start actually is.
 #[derive(Debug, Clone)]
 pub struct StartTurn {
     /// `Some(source)` when this agent load has not yet fired its start hook.
@@ -179,15 +181,16 @@ pub struct StartTurn {
     pub prompt: Option<String>,
 }
 
-/// Provides the per-run [`Contexts`] an [`AgentActor`](crate::agent_loop::AgentActor) needs.
+/// Provides the per-run [`Contexts`] an
+/// [`AgentActor`](crate::agent_loop::AgentActor) needs.
 ///
-/// `provide` is called on the run's *spawned task* — never an actor mailbox — at
-/// the top of every run path (fresh input, resume, timer wake). Implementations
-/// do their heavy, idempotent setup here (rehydrate a suspended runtime,
-/// reconnect a dropped MCP, scan the workspace); it must be cheap when
-/// everything is already live. Spawning an agent does *not* call `provide`, so an
-/// agent can be recovered purely to answer read queries without touching any
-/// runtime.
+/// `provide` is called on the run's *spawned task* — never an actor mailbox —
+/// at the top of every run path (fresh input, resume, timer wake).
+/// Implementations do their heavy, idempotent setup here (rehydrate a
+/// suspended runtime, reconnect a dropped MCP, scan the workspace); it must be
+/// cheap when everything is already live. Spawning an agent does *not* call
+/// `provide`, so an agent can be recovered purely to answer read queries
+/// without touching any runtime.
 #[async_trait]
 pub trait ContextProvider: Send + Sync {
     async fn provide(&self) -> Result<Contexts, ContextError>;
@@ -208,12 +211,12 @@ pub trait ContextProvider: Send + Sync {
     /// runs before the snapshot because that is the only place a record can
     /// land early enough to reach the very first turn's prompt: `provide` runs
     /// after it, which is why the context these hooks inject used to bypass the
-    /// conversation entirely.
+    /// session entirely.
     ///
-    /// Returns the records to journal, and optionally a rewritten prompt. Their
-    /// consequences are read off them by the caller — the agent translates the
-    /// context and [`crate::agent_loop::start_blocked`] reads a refusal — so this never
-    /// decides anything itself.
+    /// Returns the records to journal, and optionally a rewritten prompt.
+    /// Their consequences are read off them by the caller — the agent
+    /// translates the context and [`crate::agent_loop::start_blocked`] reads a
+    /// refusal — so this never decides anything itself.
     async fn start_hooks(&self, turn: StartTurn) -> Result<TurnPreparation, ContextError> {
         let _ = turn;
         Ok(TurnPreparation::default())
@@ -324,17 +327,18 @@ impl ContextProvider for FixedContextProvider {
             toolbox: self.toolbox.clone(),
             tool_narrowing: None,
             system_prompt: None,
-            // A fixed-context agent is a workflow step or a test fixture; it has
-            // no model card to read a window from and never auto-compacts.
+            // A fixed-context agent is a workflow step or a test fixture; it
+            // has no model card to read a window from and never auto-compacts.
             context_window: None,
         })
     }
 }
 
-/// Resources injected into an [`AgentActor`](crate::agent_loop::AgentActor) at spawn. Holds
-/// only cheap, stable wiring — the volatile per-run contexts (provider, toolbox,
-/// prompt) are obtained lazily via [`ContextProvider::provide`], so spawning is
-/// free of any runtime/MCP/scan work.
+/// Resources injected into an [`AgentActor`](crate::agent_loop::AgentActor) at
+/// spawn. Holds only cheap, stable wiring — the volatile per-run contexts
+/// (provider, toolbox, prompt) are obtained lazily via
+/// [`ContextProvider::provide`], so spawning is free of any runtime/MCP/scan
+/// work.
 #[derive(Clone)]
 pub struct AgentRuntimeContext {
     /// Per-run context supplier; see [`ContextProvider`].
@@ -359,10 +363,11 @@ pub struct AgentRuntimeContext {
     /// Whether the session this agent belongs to has a runtime to run on, as of
     /// this spawn.
     ///
-    /// The one input the agent's drain gate cannot derive: it can see that it is
-    /// running and that it is parked, but a sandbox still being built is its
-    /// owner's business entirely. Starting a turn without one asks a vendor for
-    /// a runtime it has never heard of, and the vendor's answer is terminal.
+    /// The one input the agent's drain gate cannot derive: it can see that it
+    /// is running and that it is parked, but a sandbox still being built is
+    /// its owner's business entirely. Starting a turn without one asks a
+    /// vendor for a runtime it has never heard of, and the vendor's answer is
+    /// terminal.
     ///
     /// Only the *starting* value. Changes arrive as
     /// [`LifecycleEvent::Runtime`](horsie_agentcore::LifecycleEvent::Runtime)
@@ -378,10 +383,10 @@ pub struct AgentRuntimeContext {
 /// server-side MCP ones, and nothing about how its turn ends — a tool that ends
 /// a run says so itself, and the layer adding one is stacked by the caller.
 ///
-/// Takes no `AgentRunDef`: what an agent may *call* is decided once, outermost,
-/// by [`FilteredToolbox`]. A factory that narrowed here could only ever narrow
-/// its own layer, which is the bug that made a tool selection mean two different
-/// things depending on which tool you asked about.
+/// Takes no `AgentRunDef`: what an agent may *call* is decided once,
+/// outermost, by [`FilteredToolbox`]. A factory that narrowed here could only
+/// ever narrow its own layer, which is the bug that made a tool selection mean
+/// two different things depending on which tool you asked about.
 pub trait ToolboxFactory: Send + Sync + 'static {
     fn for_agent(
         &self,
@@ -432,24 +437,25 @@ impl ToolboxFactory for DefaultToolboxFactory {
     }
 }
 
-/// A toolbox = a base (permitted runtime tools) plus the always-present `skill`
-/// and `inspect_workspace` tools. Those two re-scan the workspace live on each
-/// call (no cached skill set), so a skill added mid-run is immediately loadable,
-/// and both bypass the allowlist.
+/// A toolbox = a base (permitted runtime tools) plus the always-present
+/// `skill` and `inspect_workspace` tools. Those two re-scan the workspace live
+/// on each call (no cached skill set), so a skill added mid-run is immediately
+/// loadable, and both bypass the allowlist.
 struct AgentToolbox {
     base: Arc<dyn Toolbox>,
     runtime_client: RuntimeClient,
     /// Names of the job's workspaces (stable for the job); used to apply the
-    /// "optional iff single" rule and to list valid names in errors. The runtime owns
-    /// the actual name→path resolution.
+    /// "optional iff single" rule and to list valid names in errors. The
+    /// runtime owns the actual name→path resolution.
     workspace_names: Vec<String>,
     /// Whether this agent may see the shared plugin library (`horsie_shared`).
     use_plugins: bool,
 }
 
 impl AgentToolbox {
-    /// Resolve the optional `workspace` argument of a skill-side tool to a concrete
-    /// name. `None` is allowed only when there is exactly one workspace.
+    /// Resolve the optional `workspace` argument of a skill-side tool to a
+    /// concrete name. `None` is allowed only when there is exactly one
+    /// workspace.
     fn resolve_workspace(&self, requested: Option<&str>) -> Result<String, ToolCallError> {
         match requested {
             Some(name) => {
@@ -518,8 +524,9 @@ impl Toolbox for AgentToolbox {
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             let requested_ws = input.get("workspace").and_then(Value::as_str);
-            // Shared plugin library: addressed by the reserved `horsie_shared` name,
-            // resolved against the shared skill set (not a job workspace).
+            // Shared plugin library: addressed by the reserved `horsie_shared`
+            // name, resolved against the shared skill set (not a job
+            // workspace).
             if requested_ws == Some(crate::agent_loop::workspace::SHARED_WORKSPACE) {
                 if !self.use_plugins {
                     return Err(ToolCallError::InvalidInput(
@@ -579,7 +586,8 @@ impl Toolbox for AgentToolbox {
             let (ws, shared) =
                 crate::agent_loop::workspace::scan(&self.runtime_client, filter.clone()).await;
             let mut out = crate::agent_loop::workspace::inspect_result(&ws);
-            // Append the shared library when listing everything for an opted-in agent.
+            // Append the shared library when listing everything for an
+            // opted-in agent.
             if self.use_plugins && filter.is_none() {
                 out.push_str("\n\n");
                 out.push_str(&crate::agent_loop::workspace::shared_inspect(
@@ -593,11 +601,11 @@ impl Toolbox for AgentToolbox {
     }
 }
 
-/// A skill's body plus, when its directory is known, a hint pointing at it so the
-/// agent can read sibling resources with the filesystem tools. The path is
-/// absolute because that is the only addressing those tools take — and because a
-/// shared skill's directory is not under any workspace, so nothing else would
-/// resolve it.
+/// A skill's body plus, when its directory is known, a hint pointing at it so
+/// the agent can read sibling resources with the filesystem tools. The path is
+/// absolute because that is the only addressing those tools take — and because
+/// a shared skill's directory is not under any workspace, so nothing else
+/// would resolve it.
 fn skill_body(skill: &crate::agent_loop::workspace::Skill) -> String {
     match &skill.dir {
         Some(dir) => format!(
@@ -614,15 +622,15 @@ fn skill_body(skill: &crate::agent_loop::workspace::Skill) -> String {
 ///
 /// Applied once, outermost, so it reaches every layer — the runtime tools, the
 /// timers, the subagent and workflow tools, the session's own. It used to sit
-/// three layers down, which is why a selection could only ever speak for runtime
-/// and MCP tools.
+/// three layers down, which is why a selection could only ever speak for
+/// runtime and MCP tools.
 ///
 /// It filters by *two* sets, not one. `governed` is every name
-/// [`crate::tools::catalog`] knows; a tool outside it is passed through whatever
-/// the selection says. That is deliberate and load-bearing — MCP tools, a
-/// plugin's MCP tools, `memory_*` and `submit_result` all have names that no
-/// saved selection could have known, and are gated by their own channels. See
-/// [`crate::tools`] for why each one.
+/// [`crate::tools::catalog`] knows; a tool outside it is passed through
+/// whatever the selection says. That is deliberate and load-bearing — MCP
+/// tools, a plugin's MCP tools, `memory_*` and `submit_result` all have names
+/// that no saved selection could have known, and are gated by their own
+/// channels. See [`crate::tools`] for why each one.
 pub struct FilteredToolbox {
     inner: Arc<dyn Toolbox>,
     allowed: HashSet<String>,
@@ -643,9 +651,9 @@ impl FilteredToolbox {
         }
     }
 
-    /// Wrap `inner` with the selection this agent runs under. A `None` selection
-    /// is still a filter, not a bypass: it resolves to the default set, which
-    /// excludes the control plane.
+    /// Wrap `inner` with the selection this agent runs under. A `None`
+    /// selection is still a filter, not a bypass: it resolves to the default
+    /// set, which excludes the control plane.
     #[must_use]
     pub fn apply(inner: Arc<dyn Toolbox>, selection: Option<&[String]>) -> Arc<dyn Toolbox> {
         Arc::new(Self::new(
@@ -695,8 +703,8 @@ impl Toolbox for FilteredToolbox {
 mod tests {
     use super::*;
 
-    /// The value an ordinary tool answered with. Panics on a tool that ended the
-    /// run, which no test here calls.
+    /// The value an ordinary tool answered with. Panics on a tool that ended
+    /// the run, which no test here calls.
     fn value(outcome: ToolOutcome) -> Value {
         match outcome {
             ToolOutcome::Result(v) => v,
@@ -748,9 +756,9 @@ mod tests {
         let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
         assert!(names.contains(&"bash".to_string()));
         assert!(!names.contains(&"read_file".to_string()));
-        // `skill` and `inspect_workspace` are catalogued, so leaving them out of
-        // a selection really does remove them. They used to bypass the filter by
-        // sitting above it, which made "only bash" quietly untrue.
+        // `skill` and `inspect_workspace` are catalogued, so leaving them out
+        // of a selection really does remove them. They used to bypass the
+        // filter by sitting above it, which made "only bash" quietly untrue.
         assert!(!names.contains(&SKILL_TOOL.to_string()));
     }
 
@@ -856,7 +864,8 @@ mod tests {
             false,
             crate::agent_loop::McpToolboxes::default(),
         );
-        // Omitting `workspace` with several workspaces is rejected before any scan.
+        // Omitting `workspace` with several workspaces is rejected before any
+        // scan.
         let err = tb
             .execute(SKILL_TOOL, json!({ "name": "git-bisect" }), "tc1")
             .await
@@ -907,8 +916,8 @@ mod tests {
         let body = value(body);
         let text = body.as_str().unwrap();
         assert!(text.contains("Do it."));
-        // The library is not a workspace, so the hint must be an absolute path —
-        // there is no `workspace` argument left to name it with.
+        // The library is not a workspace, so the hint must be an absolute path
+        // — there is no `workspace` argument left to name it with.
         assert!(
             text.contains("read_file(path=\"/opt/plugins/sp/skills/brainstorming/<file>\")"),
             "{text}"

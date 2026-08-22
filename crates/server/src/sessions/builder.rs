@@ -49,8 +49,9 @@ fn settings_from_wire(w: WireAgentSettings) -> AgentSettings {
         instructions: w.instructions,
         auto_compact: w.auto_compact,
         plugins: Vec::new(),
-        // Filled in by `build_session_spec` once the session's bundle names are
-        // resolved; the wire request names them beside the agent, not inside it.
+        // Filled in by `build_session_spec` once the session's bundle names
+        // are resolved; the wire request names them beside the agent, not
+        // inside it.
     }
 }
 
@@ -170,7 +171,7 @@ pub async fn build_session_spec(
     agent.plugins.clone_from(&common.plugins);
     // Resolve the effective thinking effort once, here: session choice wins,
     // else the model's configured default, else nothing. Effort is fixed for a
-    // session's lifetime (changing it mid-conversation invalidates the prompt
+    // session's lifetime (changing it mid-session invalidates the prompt
     // cache), so freezing it at creation is deliberate. A requested value must
     // be canonical AND offered by the model — otherwise it reaches the provider
     // as an opaque 400.

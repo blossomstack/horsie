@@ -25,9 +25,10 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-/// Result of a background run, sent back to the actor as [`AgentCommand::RunFinished`].
-/// Coarse events are streamed separately and incrementally via
-/// [`AgentCommand::PersistProgress`]; this carries only the terminal outcome.
+/// Result of a background run, sent back to the actor as
+/// [`AgentCommand::RunFinished`]. Coarse events are streamed separately and
+/// incrementally via [`AgentCommand::PersistProgress`]; this carries only the
+/// terminal outcome.
 pub struct RunReport {
     /// Which run this is the report of. A cancelled run is still unwinding when
     /// the next one may already have started, and a report that arrives after
@@ -35,22 +36,22 @@ pub struct RunReport {
     /// run's handle and delivering the old run's outcome as if it were its own.
     pub(super) run_id: u64,
     pub(super) outcome: RunOutcome,
-    /// A summary this run was asked to take for forks waiting on it, and how
-    /// that went.
+    /// A summary this run was asked to take for sub sessions waiting on it,
+    /// and how that went.
     ///
-    /// Beside the outcome rather than inside it because the two are independent:
-    /// a turn that summarises for a fork can still go on to answer a message
-    /// queued alongside it, exactly as a queued `/compact` does. `None` means
-    /// nothing asked.
-    pub(super) fork_summary: Option<ForkSummary>,
+    /// Beside the outcome rather than inside it because the two are
+    /// independent: a turn that summarises for a sub session can still go on
+    /// to answer a message queued alongside it, exactly as a queued `/compact`
+    /// does. `None` means nothing asked.
+    pub(super) seed_summary: Option<SeedSummary>,
 }
 
-/// What a run produced for the forks waiting on it.
+/// What a run produced for the sub sessions waiting on it.
 #[derive(Debug, Clone)]
-pub struct ForkSummary {
-    /// Every fork seeded from this one summary. They share a branch point, so
-    /// they are entitled to share the provider call.
-    pub forks: Vec<Uuid>,
+pub struct SeedSummary {
+    /// Every sub session seeded from this one summary. They share a branch
+    /// point, so they are entitled to share the provider call.
+    pub sub_sessions: Vec<Uuid>,
     pub result: Result<String, String>,
 }
 
@@ -77,7 +78,8 @@ pub(super) enum RunOutcome {
         recoverable: bool,
     },
     /// Context preparation failed and the outcome was already delivered to the
-    /// parent on the run task; the actor only needs to clear its `running` flag.
+    /// parent on the run task; the actor only needs to clear its `running`
+    /// flag.
     AlreadyReported,
 }
 
@@ -119,21 +121,21 @@ impl AgentActor {
         // agent's own identity, and only a *main* agent's identity is a session
         // id — a subagent or a workflow step carries its own uuid. Each has its
         // own history, and so its own cacheable prefix, which is exactly the
-        // granularity a provider grouping requests by conversation wants.
+        // granularity a provider grouping requests by session wants.
         let conversation_id = agent.to_string();
 
         tokio::spawn(async move {
-            // Provide this run's contexts on the spawned task (never the mailbox):
-            // rehydrate the runtime, reconnect MCP, scan the workspace. A failure
-            // here is a recoverable run failure -- report it and stop, exactly as a
-            // provider/tool error would.
+            // Provide this run's contexts on the spawned task (never the
+            // mailbox): rehydrate the runtime, reconnect MCP, scan the
+            // workspace. A failure here is a recoverable run failure -- report
+            // it and stop, exactly as a provider/tool error would.
             //
             // Cancellable, because this is the *most* likely place to hang: it
-            // awaits an MCP connect, a workspace scan and a SessionStart hook, all
-            // of which cross a process boundary. Leaving it outside the cancel
-            // path meant a stalled peer wedged the run exactly where `Stop` could
-            // not reach it — `halt()` gave up after its timeout and the task
-            // leaked for the process lifetime (#61 item 5b).
+            // awaits an MCP connect, a workspace scan and a SessionStart hook,
+            // all of which cross a process boundary. Leaving it outside the
+            // cancel path meant a stalled peer wedged the run exactly where
+            // `Stop` could not reach it — `halt()` gave up after its timeout
+            // and the task leaked for the process lifetime (#61 item 5b).
             let provided = tokio::select! {
             biased;
             () = cancel.cancelled() => {
@@ -141,7 +143,7 @@ impl AgentActor {
                     .tell(AgentCommand::Run(RunCommand::RunFinished(Box::new(RunReport {
                         run_id,
                         outcome: RunOutcome::Cancelled,
-                        fork_summary: None}))))
+                        seed_summary: None}))))
                     .await;
                 return;
             }
@@ -162,7 +164,7 @@ impl AgentActor {
                             RunReport {
                                 run_id,
                                 outcome: RunOutcome::AlreadyReported,
-                                fork_summary: None,
+                                seed_summary: None,
                             },
                         ))))
                         .await;
@@ -184,10 +186,10 @@ impl AgentActor {
             });
             // The agent's tool selection, applied once and last, so it reaches
             // every layer above — the runtime tools, the timers, `task_list`,
-            // the session's own. Applied here rather than deeper because here is
-            // the only place the stack is whole; narrowing at any inner layer is
-            // how a selection came to mean "runtime tools, and nothing else you
-            // might reasonably have meant".
+            // the session's own. Applied here rather than deeper because here
+            // is the only place the stack is whole; narrowing at any inner
+            // layer is how a selection came to mean "runtime tools, and
+            // nothing else you might reasonably have meant".
             //
             // `None` is not a bypass: it resolves to the default set, which
             // leaves the control plane out. See `crate::tools`.
@@ -206,11 +208,11 @@ impl AgentActor {
                 .system_prompt
                 .or(configured_prompt)
                 .unwrap_or_default();
-            // The sink persists each coarse event by `ask`ing this actor and awaiting
-            // the durable write, so the LLM loop has end-to-end backpressure:
-            // `emit().await` does not return until the event is journaled. Persistence
-            // still flows through the actor's single mailbox (`PersistProgress`),
-            // never the journal directly.
+            // The sink persists each coarse event by `ask`ing this actor and
+            // awaiting the durable write, so the LLM loop has end-to-end
+            // backpressure: `emit().await` does not return until the event is
+            // journaled. Persistence still flows through the actor's single
+            // mailbox (`PersistProgress`), never the journal directly.
             let sink: Arc<dyn EventSink> = Arc::new(PersistSink {
                 actor: self_ref.clone(),
             });
@@ -225,7 +227,7 @@ impl AgentActor {
                         trigger_at_percent: COMPACT_AT_PERCENT,
                         retain_percent: COMPACT_RETAIN_PERCENT,
                     });
-            let (outcome, fork_summary) = run_with_retries(
+            let (outcome, seed_summary) = run_with_retries(
                 contexts.provider,
                 toolbox,
                 sink,
@@ -250,14 +252,14 @@ impl AgentActor {
                 summarise_only,
             )
             .await;
-            // All coarse events were already persisted (each `emit` awaited its ack),
-            // so `RunFinished` lands after them in mailbox order.
+            // All coarse events were already persisted (each `emit` awaited
+            // its ack), so `RunFinished` lands after them in mailbox order.
             let _ = self_ref
                 .tell(AgentCommand::Run(RunCommand::RunFinished(Box::new(
                     RunReport {
                         run_id,
                         outcome,
-                        fork_summary,
+                        seed_summary,
                     },
                 ))))
                 .await;
@@ -292,8 +294,9 @@ impl Run {
                 match (&actor.running, ack) {
                     (Some(run), ack) => {
                         run.cancel.cancel();
-                        // Answered when the run reports back, not now: the point of
-                        // the ack is "the run is over", and it is still winding down.
+                        // Answered when the run reports back, not now: the
+                        // point of the ack is "the run is over", and it is
+                        // still winding down.
                         actor.cancel_acks.extend(ack);
                     }
                     // Nothing in flight (idle, or paused on a pending ask): the
@@ -318,10 +321,11 @@ impl Component for Run {
     /// Repair the tool call the dead process was running, report the turn it
     /// died inside, and — for an agent nobody will message — re-drive it.
     async fn on_load(actor: &mut AgentActor, state: &AgentState, ctx: &ActorContext<AgentCommand>) {
-        // A tool call the dead process was running has no result and never will.
-        // Record the repair once, here, where it still belongs at the end of the
-        // transcript — recomputing it per turn instead is what let it drift into
-        // the middle of a history nobody could then repair in place.
+        // A tool call the dead process was running has no result and never
+        // will. Record the repair once, here, where it still belongs at the
+        // end of the transcript — recomputing it per turn instead is what let
+        // it drift into the middle of a history nobody could then repair in
+        // place.
         let repairs = missing_tool_results(&state.prompt_messages(), &parked_call_ids(state));
         if !repairs.is_empty() {
             let (ack, _) = tokio::sync::oneshot::channel();
@@ -361,13 +365,15 @@ impl Component for Run {
                 .await;
         }
         // Interactive sessions never self-continue: the user's next message is
-        // the continuation. An empty history means nothing ran yet, and a parked
-        // agent is waiting for a timer — neither is an interrupted turn.
+        // the continuation. An empty history means nothing ran yet, and a
+        // parked agent is waiting for a timer — neither is an interrupted
+        // turn.
         if actor.params.interactive || state.parked || state.log.is_empty() {
             return;
         }
-        // Deliberately not persisted as a new turn boundary: if the process dies
-        // again before making progress, recovery simply re-synthesizes it.
+        // Deliberately not persisted as a new turn boundary: if the process
+        // dies again before making progress, recovery simply re-synthesizes
+        // it.
         let history = repair_unanswered_tool_calls(state.prompt_messages());
         actor.start_run(
             AgentInput::user_message(new_message_id(), "continue the interrupted task"),
@@ -449,14 +455,14 @@ pub(super) async fn run_with_retries(
     context_tokens: u32,
     summarise: Option<Summarise>,
     summarise_only: bool,
-) -> (RunOutcome, Option<ForkSummary>) {
-    // Whatever a fork is waiting on is taken first, before this turn can say
-    // anything to the model: the summary has to describe the history the branch
-    // marker was written into, not one this turn went on to extend.
-    let (compact, fork_summary) = match summarise {
+) -> (RunOutcome, Option<SeedSummary>) {
+    // Whatever a sub session is waiting on is taken first, before this turn
+    // can say anything to the model: the summary has to describe the history
+    // the branch marker was written into, not one this turn went on to extend.
+    let (compact, seed_summary) = match summarise {
         Some(Summarise::Compact(instructions)) => (Some(instructions), None),
-        Some(Summarise::Fork(forks)) => {
-            let result = summarise_for_forks(
+        Some(Summarise::SubSession(sub_sessions)) => {
+            let result = summarise_for_sub_sessions(
                 &provider,
                 &toolbox,
                 &conversation_id,
@@ -465,21 +471,27 @@ pub(super) async fn run_with_retries(
             )
             .await;
             if let Err(e) = &result {
-                tracing::warn!(error = %e, "summarising a conversation for a fork failed");
+                tracing::warn!(error = %e, "summarising a session for a sub session failed");
             }
-            (None, Some(ForkSummary { forks, result }))
+            (
+                None,
+                Some(SeedSummary {
+                    sub_sessions,
+                    result,
+                }),
+            )
         }
         None => (None, None),
     };
-    // A turn whose whole job was that summary is over: there is nothing to send.
-    // The compaction case cannot short-circuit here, because it needs the agent
-    // the loop below builds.
+    // A turn whose whole job was that summary is over: there is nothing to
+    // send. The compaction case cannot short-circuit here, because it needs
+    // the agent the loop below builds.
     if summarise_only && compact.is_none() {
         return (
             RunOutcome::Completed {
                 text: String::new(),
             },
-            fork_summary,
+            seed_summary,
         );
     }
     (
@@ -503,16 +515,16 @@ pub(super) async fn run_with_retries(
             summarise_only,
         )
         .await,
-        fork_summary,
+        seed_summary,
     )
 }
 
-/// Summarise a conversation for the forks branching off it.
+/// Summarise a session for the sub sessions branching off it.
 ///
 /// A throwaway `Agent` over the same provider and history: the summary is a
-/// *reading* of this conversation for somebody else, so nothing is journaled,
+/// *reading* of this session for somebody else, so nothing is journaled,
 /// nothing is streamed, and this agent's own history is left exactly as it was.
-pub(super) async fn summarise_for_forks(
+pub(super) async fn summarise_for_sub_sessions(
     provider: &Arc<dyn LlmProvider>,
     toolbox: &Arc<dyn Toolbox>,
     conversation_id: &str,
@@ -554,8 +566,9 @@ pub(super) async fn run_turn_attempts(
 ) -> RunOutcome {
     let mut attempt: u32 = 0;
     loop {
-        // CapturingSink wraps the PersistSink: it records events only to locate the
-        // handoff tool-call id; persistence (with backpressure) happens in PersistSink.
+        // CapturingSink wraps the PersistSink: it records events only to
+        // locate the handoff tool-call id; persistence (with backpressure)
+        // happens in PersistSink.
         let capture = CapturingSink::new(sink.clone());
         let config = AgentConfig {
             max_iterations: max_iterations.unwrap_or_else(|| AgentConfig::default().max_iterations),
@@ -611,11 +624,11 @@ pub(super) async fn run_turn_attempts(
             Err(AgentError::Cancelled) => return RunOutcome::Cancelled,
             Err(AgentError::Provider(e)) => {
                 // Whether the failed attempt already wrote something durable.
-                // `PersistSink` journals exactly the events `coarse_event` maps,
-                // so this is the same test it applied — no proxy, no guessing.
-                // `RunAborted` is the exception: it is written *by* this
-                // failure rather than by anything the attempt achieved, so
-                // counting it would make every transient error look like
+                // `PersistSink` journals exactly the events `coarse_event`
+                // maps, so this is the same test it applied — no proxy, no
+                // guessing. `RunAborted` is the exception: it is written *by*
+                // this failure rather than by anything the attempt achieved,
+                // so counting it would make every transient error look like
                 // partial progress and no attempt would ever be retried.
                 let journaled = captured.iter().any(|ev| {
                     !matches!(ev, AgentEvent::RunAborted(_)) && coarse_event(ev).is_some()
@@ -658,9 +671,10 @@ pub(super) async fn run_turn_attempts(
                     );
                 }
                 return RunOutcome::Failed {
-                    // Report the classification rather than assuming recoverable:
-                    // a permanent failure shown as transient invites the user to
-                    // retry something that can never succeed.
+                    // Report the classification rather than assuming
+                    // recoverable: a permanent failure shown as transient
+                    // invites the user to retry something that can never
+                    // succeed.
                     recoverable: e.is_transient(),
                     error: e.to_string(),
                 };
@@ -686,7 +700,7 @@ mod tests {
     use super::*;
     use crate::agent_loop::agent_actor::testing::*;
     use crate::agent_loop::context::{AgentOutcome, AgentOutcomeSink};
-    /// The one seam the conversation id can regress at silently. Everything
+    /// The one seam the session id can regress at silently. Everything
     /// downstream is typed — the field is required, so a provider cannot be
     /// handed a request without one — but *which* id `start_run` reads is a
     /// plain assignment, and getting it wrong (a fresh uuid, the run id) costs
@@ -758,7 +772,7 @@ mod tests {
             match rx.recv().await.expect("the run must report an outcome") {
                 AgentOutcome::Started { .. }
                 | AgentOutcome::UsageRecorded { .. }
-                | AgentOutcome::ForkSummary { .. } => continue,
+                | AgentOutcome::SeedSummary { .. } => continue,
                 AgentOutcome::Concluded { .. } => break,
                 other => panic!("expected the turn to conclude, got {other:?}"),
             }
@@ -994,8 +1008,8 @@ mod retry_tests {
 
     #[tokio::test]
     async fn a_sink_failure_mid_turn_is_not_retried_and_agrees_with_the_provider_path() {
-        // Let the input message and the message-start through, so the provider is
-        // genuinely engaged before the journal dies — the realistic shape.
+        // Let the input message and the message-start through, so the provider
+        // is genuinely engaged before the journal dies — the realistic shape.
         let provider = MockProvider::text("hello");
         let sink: Arc<dyn EventSink> = Arc::new(FailingEventSink::after(2, "journal write failed"));
         let (outcome, calls) = run_with_sink(provider, sink, 3).await;
@@ -1017,10 +1031,11 @@ mod retry_tests {
 
     #[tokio::test]
     async fn a_transient_error_after_journaled_progress_is_not_retried() {
-        // The crux of #61 item 21: the retry rebuilds the turn from the ORIGINAL
-        // history, which does not contain the events the failed attempt already
-        // persisted. Retrying here would leave a phantom turn in the durable
-        // transcript that the model never saw, replayed into every later turn.
+        // The crux of #61 item 21: the retry rebuilds the turn from the
+        // ORIGINAL history, which does not contain the events the failed
+        // attempt already persisted. Retrying here would leave a phantom turn
+        // in the durable transcript that the model never saw, replayed into
+        // every later turn.
         let provider = MockProvider::scripted(Script::of([
             Ok(tool_response("call-1", "echo")),
             Err(LlmError::Overloaded),

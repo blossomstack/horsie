@@ -2,12 +2,13 @@
 //!
 //! An agent has one queue, and everything that arrives for it goes in the same
 //! one: a person's message, a subagent's report, a timer firing, a `Stop` hook
-//! saying to keep going. They differ in what they contribute to the turn, not in
-//! how they are held — which is the whole reason this is one enum rather than
-//! four fields.
+//! saying to keep going. They differ in what they contribute to the turn, not
+//! in how they are held — which is the whole reason this is one enum rather
+//! than four fields.
 //!
 //! No actors and no I/O, so the decision is unit-testable against a hand-built
-//! queue. [`AgentActor`](crate::agent_loop::AgentActor) owns the queue; this owns the rule.
+//! queue. [`AgentActor`](crate::agent_loop::AgentActor) owns the queue; this
+//! owns the rule.
 
 use horsie_models::agent::{SubAgentResultPart, ToolResultInput};
 use serde::{Deserialize, Serialize};
@@ -51,15 +52,15 @@ pub enum Incoming {
         id: String,
         instructions: Option<String>,
     },
-    /// Someone typed `/summary-n-fork`, and `fork` is the conversation waiting
+    /// Someone typed `/summary-n-fork`, and `sub_session` is the one waiting
     /// on the summary.
     ///
     /// Queued rather than run out of band so that accepting the command and
     /// this agent becoming busy are the same event: a summary taken while the
-    /// conversation it summarises is still answering describes a history the
+    /// session it summarises is still answering describes a history the
     /// branch marker does not. Nothing here is ever said to the model — this
     /// agent produces the summary and keeps its own history exactly as it was.
-    Fork { id: String, fork: uuid::Uuid },
+    SubSession { id: String, sub_session: uuid::Uuid },
 }
 
 impl Incoming {
@@ -72,18 +73,18 @@ impl Incoming {
             | Self::Timer { id, .. }
             | Self::Continue { id, .. }
             | Self::Compact { id, .. }
-            | Self::Fork { id, .. } => id,
+            | Self::SubSession { id, .. } => id,
         }
     }
 
     /// Whether this is a person speaking.
     ///
-    /// The one distinction the drain rule needs, and it decides a single thing:
-    /// whether this item may override a park. A person who types while the agent
-    /// is waiting on them has changed their mind — "never mind, do this instead"
-    /// — and that is the only thing entitled to abandon the questions. News that
-    /// merely *arrived* (a subagent finishing, a timer firing) has no opinion
-    /// about the questions and waits its turn.
+    /// The one distinction the drain rule needs, and it decides a single
+    /// thing: whether this item may override a park. A person who types while
+    /// the agent is waiting on them has changed their mind — "never mind, do
+    /// this instead" — and that is the only thing entitled to abandon the
+    /// questions. News that merely *arrived* (a subagent finishing, a timer
+    /// firing) has no opinion about the questions and waits its turn.
     #[must_use]
     pub fn is_user(&self) -> bool {
         matches!(self, Self::User { .. })
@@ -102,8 +103,8 @@ impl Incoming {
             // `/compact` is an instruction to the *server*. Merging it into the
             // turn's text would send the model the word "compact" and compact
             // nothing. `/summary-n-fork` is the same, and its message was never
-            // addressed to this agent — it belongs to the fork.
-            Self::Compact { .. } | Self::Fork { .. } => None,
+            // addressed to this agent — it belongs to the sub session.
+            Self::Compact { .. } | Self::SubSession { .. } => None,
         }
     }
 }
@@ -119,13 +120,13 @@ pub enum Summarise {
     /// boundary. The `Option` is the focus instructions — `None` is a bare
     /// `/compact`.
     Compact(Option<String>),
-    /// `/summary-n-fork`: the summary is not this conversation's to keep. It
-    /// seeds these forks, and this history is left exactly as it was.
+    /// `/summary-n-fork`: the summary is not this session's to keep. It
+    /// seeds these sub sessions, and this history is left exactly as it was.
     ///
-    /// A list, not one id, because forks queued into the same turn share a
-    /// branch point — nothing can append between them — so they are entitled to
-    /// the same summary rather than to a provider call each.
-    Fork(Vec<uuid::Uuid>),
+    /// A list, not one id, because sub sessions queued into the same turn
+    /// share a branch point — nothing can append between them — so they are
+    /// entitled to the same summary rather than to a provider call each.
+    SubSession(Vec<uuid::Uuid>),
 }
 
 /// Everything an agent is about to be resumed with, and what that consumes.
@@ -138,9 +139,9 @@ pub struct Turn {
     pub consumed: Vec<String>,
     /// A summarisation this turn carries, and what becomes of the summary.
     ///
-    /// It rides on the turn rather than being acted on at enqueue so it happens
-    /// in order — a turn in flight finishes first, and the summary describes the
-    /// history a reader sees it taken from.
+    /// It rides on the turn rather than being acted on at enqueue so it
+    /// happens in order — a turn in flight finishes first, and the summary
+    /// describes the history a reader sees it taken from.
     pub summarise: Option<Summarise>,
     /// Tool-call ids of the questions this turn *answered*. Empty when the turn
     /// abandoned them instead — the two are deliberately not the same thing.
@@ -188,11 +189,11 @@ impl std::fmt::Display for AnswerError {
 
 /// Whether the queue may start a turn now, and what that turn carries.
 ///
-/// `None` means "not yet", and there are exactly two reasons for it: nothing is
-/// queued, or the agent is parked on questions and nothing queued is entitled to
-/// abandon them. Being *busy* is not one of them — that is the actor's own
-/// business, checked before this is ever asked, because a run in flight is not a
-/// fact about the queue.
+/// `None` means "not yet", and there are exactly two reasons for it: nothing
+/// is queued, or the agent is parked on questions and nothing queued is
+/// entitled to abandon them. Being *busy* is not one of them — that is the
+/// actor's own business, checked before this is ever asked, because a run in
+/// flight is not a fact about the queue.
 #[must_use]
 pub fn queued_turn(inbox: &[Incoming], asks: &[crate::agent_loop::AskedQuestion]) -> Option<Turn> {
     if inbox.is_empty() {
@@ -202,10 +203,10 @@ pub fn queued_turn(inbox: &[Incoming], asks: &[crate::agent_loop::AskedQuestion]
         return None;
     }
     let mut turn = drain(inbox);
-    // Abandoned, not answered: every parked call still gets a result, so nothing
-    // dangles on the wire, but the result says the question went unanswered.
-    // Answering for real goes through `answered_turn`, which requires all of
-    // them at once.
+    // Abandoned, not answered: every parked call still gets a result, so
+    // nothing dangles on the wire, but the result says the question went
+    // unanswered. Answering for real goes through `answered_turn`, which
+    // requires all of them at once.
     turn.results = asks
         .iter()
         .filter_map(|ask| ask.tool_call_id.clone())
@@ -247,10 +248,10 @@ pub fn answered_turn(
             unexpected,
         });
     }
-    // The queue rides along rather than waiting for another boundary: a subagent
-    // that finished while the person was typing their answer is news the same
-    // turn wants, and holding it back would strand it until something else
-    // happened to start a turn.
+    // The queue rides along rather than waiting for another boundary: a
+    // subagent that finished while the person was typing their answer is news
+    // the same turn wants, and holding it back would strand it until something
+    // else happened to start a turn.
     let mut turn = drain(inbox);
     turn.answered = answers.iter().map(|a| a.tool_call_id.clone()).collect();
     turn.results = answers
@@ -271,16 +272,17 @@ pub fn answered_turn(
 /// A turn takes at most one: they all read the same history for the same
 /// provider call, and running two back to back would summarise a summary.
 ///
-/// Forks win over a queued `/compact`, and every fork in the drain shares the
-/// result. The asymmetry is deliberate and about what a loss costs — a dropped
-/// compaction is an optimisation that did not happen, and the automatic check
-/// runs again on the very next iteration, while a dropped fork leaves a
-/// conversation stuck in `Provisioning` with nobody left to finish it.
+/// Sub sessions win over a queued `/compact`, and every sub session in the
+/// drain shares the result. The asymmetry is deliberate and about what a loss
+/// costs — a dropped compaction is an optimisation that did not happen, and
+/// the automatic check runs again on the very next iteration, while a dropped
+/// sub session leaves a session stuck in `Provisioning` with nobody left to
+/// finish it.
 fn summarise(inbox: &[Incoming]) -> Option<Summarise> {
-    let forks: Vec<uuid::Uuid> = inbox
+    let sub_sessions: Vec<uuid::Uuid> = inbox
         .iter()
         .filter_map(|i| match i {
-            Incoming::Fork { fork, .. } => Some(*fork),
+            Incoming::SubSession { sub_session, .. } => Some(*sub_session),
             Incoming::User { .. }
             | Incoming::SubAgent { .. }
             | Incoming::Timer { .. }
@@ -288,8 +290,8 @@ fn summarise(inbox: &[Incoming]) -> Option<Summarise> {
             | Incoming::Compact { .. } => None,
         })
         .collect();
-    if !forks.is_empty() {
-        return Some(Summarise::Fork(forks));
+    if !sub_sessions.is_empty() {
+        return Some(Summarise::SubSession(sub_sessions));
     }
     // The newest `/compact` wins: they ask for the same thing.
     inbox.iter().rev().find_map(|i| match i {
@@ -298,7 +300,7 @@ fn summarise(inbox: &[Incoming]) -> Option<Summarise> {
         | Incoming::SubAgent { .. }
         | Incoming::Timer { .. }
         | Incoming::Continue { .. }
-        | Incoming::Fork { .. } => None,
+        | Incoming::SubSession { .. } => None,
     })
 }
 
@@ -319,7 +321,7 @@ fn drain(inbox: &[Incoming]) -> Turn {
                 | Incoming::Timer { .. }
                 | Incoming::Continue { .. }
                 | Incoming::Compact { .. }
-                | Incoming::Fork { .. } => None,
+                | Incoming::SubSession { .. } => None,
             })
             .collect(),
         results: Vec::new(),
@@ -409,10 +411,10 @@ mod tests {
         assert_eq!(drain(&[user("u1", "hello")]).summarise, None);
     }
 
-    fn fork_item(id: &str, fork: uuid::Uuid) -> Incoming {
-        Incoming::Fork {
+    fn sub_session_item(id: &str, sub_session: uuid::Uuid) -> Incoming {
+        Incoming::SubSession {
             id: id.to_string(),
-            fork,
+            sub_session,
         }
     }
 
@@ -420,36 +422,42 @@ mod tests {
     /// `/compact` is. Merged into the turn's text it would read as the person
     /// saying "summary-n-fork" to the model.
     #[test]
-    fn a_fork_contributes_no_text_to_the_turn() {
-        let fork = uuid::Uuid::from_bytes([3; 16]);
-        let turn = drain(&[fork_item("f1", fork)]);
+    fn a_sub_session_contributes_no_text_to_the_turn() {
+        let sub_session = uuid::Uuid::from_bytes([3; 16]);
+        let turn = drain(&[sub_session_item("f1", sub_session)]);
         assert_eq!(turn.message, None);
-        assert_eq!(turn.summarise, Some(Summarise::Fork(vec![fork])));
+        assert_eq!(
+            turn.summarise,
+            Some(Summarise::SubSession(vec![sub_session]))
+        );
         assert_eq!(turn.consumed, vec!["f1".to_string()]);
     }
 
-    /// Forks queued into the same turn cannot have anything between them, so
-    /// they branch from the same history and are entitled to one provider call
-    /// rather than one each.
+    /// Sub sessions queued into the same turn cannot have anything between
+    /// them, so they branch from the same history and are entitled to one
+    /// provider call rather than one each.
     #[test]
-    fn forks_queued_together_share_one_summary() {
+    fn sub_sessions_queued_together_share_one_summary() {
         let (a, b) = (
             uuid::Uuid::from_bytes([1; 16]),
             uuid::Uuid::from_bytes([2; 16]),
         );
-        let turn = drain(&[fork_item("f1", a), fork_item("f2", b)]);
-        assert_eq!(turn.summarise, Some(Summarise::Fork(vec![a, b])));
+        let turn = drain(&[sub_session_item("f1", a), sub_session_item("f2", b)]);
+        assert_eq!(turn.summarise, Some(Summarise::SubSession(vec![a, b])));
     }
 
     /// The asymmetry is about what a loss costs. A dropped compaction is an
     /// optimisation that did not happen and the automatic check runs again
-    /// immediately; a dropped fork leaves a conversation stuck in
+    /// immediately; a dropped sub session leaves a session stuck in
     /// `Provisioning` with nobody left to finish it.
     #[test]
-    fn a_fork_wins_over_a_compaction_queued_after_it() {
-        let fork = uuid::Uuid::from_bytes([4; 16]);
-        let turn = drain(&[fork_item("f1", fork), compact("c1", None)]);
-        assert_eq!(turn.summarise, Some(Summarise::Fork(vec![fork])));
+    fn a_sub_session_wins_over_a_compaction_queued_after_it() {
+        let sub_session = uuid::Uuid::from_bytes([4; 16]);
+        let turn = drain(&[sub_session_item("f1", sub_session), compact("c1", None)]);
+        assert_eq!(
+            turn.summarise,
+            Some(Summarise::SubSession(vec![sub_session]))
+        );
         assert_eq!(
             turn.consumed,
             vec!["f1".to_string(), "c1".to_string()],
@@ -579,8 +587,8 @@ mod tests {
         assert_eq!(err, AnswerError::NothingPending);
     }
 
-    /// Resuming on half the answers would send the provider a `tool_use` with no
-    /// result, which is the 400 the all-or-nothing rule exists to stop.
+    /// Resuming on half the answers would send the provider a `tool_use` with
+    /// no result, which is the 400 the all-or-nothing rule exists to stop.
     #[test]
     fn a_partial_answer_set_is_refused() {
         let asks = [asking("call-1", "which?"), asking("call-2", "which model?")];

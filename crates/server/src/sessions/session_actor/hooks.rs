@@ -38,7 +38,8 @@ use tokio::sync::oneshot;
 
 /// Adapts the session's mailbox to the [`AgentOutcomeSink`] its agents report
 /// to. No generation tag: the agent is resident and fences its own stale runs
-/// by `run_id`, so every outcome that arrives here is one the session asked for.
+/// by `run_id`, so every outcome that arrives here is one the session asked
+/// for.
 pub(super) struct SessionParent {
     target: SessionRef,
 }
@@ -132,9 +133,9 @@ pub(super) struct StopHookParent {
     session: SessionRef,
     key: AgentKey,
     /// The provider whose `provide()` cached this agent's client. `Stop` never
-    /// acquires a runtime of its own: a turn that already concluded must not be
-    /// able to fail on provisioning, and there is nothing to guard if no runtime
-    /// ever ran.
+    /// acquires a runtime of its own: a turn that already concluded must not
+    /// be able to fail on provisioning, and there is nothing to guard if no
+    /// runtime ever ran.
     provider: Arc<SessionContextProvider>,
     /// Consecutive continuations. Reset whenever a turn concludes without a
     /// block, so a long interactive session that legitimately continues a few
@@ -143,8 +144,8 @@ pub(super) struct StopHookParent {
 }
 
 impl StopHookParent {
-    /// The outcome sink one of a session's agents reports to: the session's own,
-    /// wrapped so this agent's `Stop` hooks run first.
+    /// The outcome sink one of a session's agents reports to: the session's
+    /// own, wrapped so this agent's `Stop` hooks run first.
     pub(super) fn wrap(
         session: SessionRef,
         key: AgentKey,
@@ -181,9 +182,9 @@ impl AgentOutcomeSink for StopHookParent {
 
         let used = self.continuations.load(Ordering::Relaxed);
         let last_assistant_message = output.as_str().map(str::to_string);
-        // The spec's own definition: true when horsie would normally stop but is
-        // being held in the loop by a blocking hook. A cooperative hook returns
-        // early on it.
+        // The spec's own definition: true when horsie would normally stop but
+        // is being held in the loop by a blocking hook. A cooperative hook
+        // returns early on it.
         let stop_hook_active = used > 0;
         // A subagent's turn ending is a `SubagentStop`, not a `Stop`. This sink
         // decorates every agent a session hosts, and until it was gated on the
@@ -198,21 +199,21 @@ impl AgentOutcomeSink for StopHookParent {
             // A step keeps `Stop`: it fires `SessionStart` and roots its own
             // subagent tree, so answering `SubagentStop` would contradict its
             // own start.
-            SessionAgentKind::Main | SessionAgentKind::Step(_) | SessionAgentKind::Fork(_) => {
-                ServerHookEvent::Stop(StopInput {
-                    last_assistant_message,
-                    stop_hook_active,
-                })
-            }
+            SessionAgentKind::Main
+            | SessionAgentKind::Step(_)
+            | SessionAgentKind::SubSession(_) => ServerHookEvent::Stop(StopInput {
+                last_assistant_message,
+                stop_hook_active,
+            }),
         };
         let records = client.run_hooks(event).await.unwrap_or_default();
 
         // A halt outranks a block, which is the spec's own precedence: a hook
         // that says both is asking to stop, and the turn is already stopping.
-        // So this ends the turn the way an unblocked one ends — the records are
-        // already on their way to the transcript, `run_hooks` having put them on
-        // the sink, and there is nothing to add to them the way `CapReached`
-        // adds to a block.
+        // So this ends the turn the way an unblocked one ends — the records
+        // are already on their way to the transcript, `run_hooks` having put
+        // them on the sink, and there is nothing to add to them the way
+        // `CapReached` adds to a block.
         if let Some(reason) = halt_reason(&records) {
             self.continuations.store(0, Ordering::Relaxed);
             tracing::info!(reason, "a stop hook set continue: false; the turn ends");
@@ -234,7 +235,8 @@ impl AgentOutcomeSink for StopHookParent {
                     .await;
             }
             // Blocked, but out of budget. The turn ends, and a second record
-            // says why — otherwise this reads as a turn that stopped on its own.
+            // says why — otherwise this reads as a turn that stopped on its
+            // own.
             Some(_) => {
                 self.continuations.store(0, Ordering::Relaxed);
                 let _ = self
@@ -325,9 +327,9 @@ fn stop_verdict(records: &[HookRecord]) -> Option<String> {
     records.iter().find_map(|r| match &r.action {
         HookAction::Stop(s) => match &s.outcome {
             StopOutcome::Blocked(b) => said(&b.reason, "a Stop hook asked for another iteration"),
-            // A failure is never fatal here: a stop hook runs after the fact, so
-            // a guard that could not run cannot deny anything. Only `PreToolUse`
-            // fails closed.
+            // A failure is never fatal here: a stop hook runs after the fact,
+            // so a guard that could not run cannot deny anything. Only
+            // `PreToolUse` fails closed.
             StopOutcome::Ran(_) | StopOutcome::Failed(_) | StopOutcome::CapReached(_) => None,
         },
         HookAction::SubagentStop(s) => match &s.outcome {
@@ -405,7 +407,7 @@ fn cap_reached(mut records: Vec<HookRecord>) -> Vec<HookRecord> {
 /// Whether the keyed agent has a turn of its own in flight — the halt gate.
 ///
 /// Per key rather than the session's status: a subagent working while the
-/// main conversation rests is still haltable, and a halt that raced the
+/// main session rests is still haltable, and a halt that raced the
 /// turn's own end still no-ops.
 fn is_working(state: &SessionState, key: AgentKey) -> bool {
     match key {
@@ -424,20 +426,21 @@ fn is_working(state: &SessionState, key: AgentKey) -> bool {
                     .map(|w| w.run.current() == Some(index))
             })
             .unwrap_or(false),
-        AgentKey::Fork(id) => state
+        AgentKey::SubSession(id) => state
             .forest
-            .fork(id)
+            .sub_session(id)
             .is_some_and(|f| f.status == super::AgentStatus::Running),
     }
 }
 
 /// Routing what plugin hooks did into the session.
 ///
-/// No events and no state: a hook record belongs in the transcript of the agent
-/// whose call it guarded, so this component only ever forwards. The one thing it
-/// decides is what a halt *means*, and it decides it by not deciding — a halt
-/// re-enters through the ordinary outcome path, so "what a failure means" stays
-/// answered in one place per agent kind rather than branching here.
+/// No events and no state: a hook record belongs in the transcript of the
+/// agent whose call it guarded, so this component only ever forwards. The one
+/// thing it decides is what a halt *means*, and it decides it by not deciding
+/// — a halt re-enters through the ordinary outcome path, so "what a failure
+/// means" stays answered in one place per agent kind rather than branching
+/// here.
 pub(super) struct HookRouting;
 
 impl HookRouting {
@@ -463,9 +466,9 @@ impl HookRouting {
             }
             HookCommand::Halt { key, reason } => {
                 // A halt races the turn it is halting: the records reach the
-                // session on the sink while the tool call that produced them is
-                // still returning, so the turn can finish first. Failing it then
-                // would rewrite a turn that already ended — which is why
+                // session on the sink while the tool call that produced them
+                // is still returning, so the turn can finish first. Failing it
+                // then would rewrite a turn that already ended — which is why
                 // `ContinueAfterStop` below no-ops on the same condition.
                 let live = actor
                     .agents
@@ -491,22 +494,25 @@ impl HookRouting {
                 if tokio::time::timeout(CANCEL_TIMEOUT, rx).await.is_err() {
                     tracing::warn!(session = %actor.id, "halted agent did not finish in time");
                 }
-                // Routed through the ordinary outcome path rather than given its
-                // own per-key branching: a halt is a failure with a reason, and
-                // what a failure means for a main agent, a subagent and a step is
-                // already decided in one place.
+                // Routed through the ordinary outcome path rather than given
+                // its own per-key branching: a halt is a failure with a
+                // reason, and what a failure means for a main agent, a
+                // subagent and a step is already decided in one place.
                 actor
                     .on_agent_outcome(
                         state,
                         AgentOutcome::Failed {
                             agent: match key {
                                 AgentKey::Main => actor.id,
-                                AgentKey::Sub(id) | AgentKey::Step(id) | AgentKey::Fork(id) => id,
+                                AgentKey::Sub(id)
+                                | AgentKey::Step(id)
+                                | AgentKey::SubSession(id) => id,
                             },
                             error: reason,
-                            // Not recoverable and not terminal: re-running the same
-                            // turn would meet the same hook, but the session is
-                            // perfectly able to run the next thing the user sends.
+                            // Not recoverable and not terminal: re-running the
+                            // same turn would meet the same hook, but the
+                            // session is perfectly able to run the next thing
+                            // the user sends.
                             recoverable: false,
                             terminal: false,
                         },
@@ -633,10 +639,11 @@ mod tests {
             "the halt must stop the block continuing the turn: {inputs:?}"
         );
         // And ends it *cleanly*. `run_hooks` puts its records on the same sink
-        // tool records take, so before `tool_halt_reason` narrowed what the sink
-        // acts on, this halt also arrived as a `HaltAgent` and failed the turn
-        // the stop seam had already concluded. Read off the journal rather than
-        // the status: `TurnEnded` lands after the spurious failure and hides it.
+        // tool records take, so before `tool_halt_reason` narrowed what the
+        // sink acts on, this halt also arrived as a `HaltAgent` and failed the
+        // turn the stop seam had already concluded. Read off the journal
+        // rather than the status: `TurnEnded` lands after the spurious failure
+        // and hides it.
         let events = journaled_events(&journal, id).await;
         assert!(
             !events.iter().any(|e| e.contains("TurnFailed")),
@@ -645,8 +652,8 @@ mod tests {
     }
 
     /// A halt from a tool hook reaches the session as its own command, because
-    /// the runtime that ran the hook cannot end a turn and the agent is mid-call
-    /// when it arrives. The reason is what the user is shown.
+    /// the runtime that ran the hook cannot end a turn and the agent is
+    /// mid-call when it arrives. The reason is what the user is shown.
     #[tokio::test]
     async fn halting_the_main_agent_fails_the_turn_with_the_hooks_reason() {
         let gate = BlockingProvider::new();
@@ -747,9 +754,9 @@ mod tests {
     }
 
     /// A hook guards one agent's call, so its record belongs in that agent's
-    /// transcript. Routed to the session instead, every agent's hooks would pile
-    /// into one log with no way to tell whose call they guarded — which is what
-    /// the session-scoped journal did before.
+    /// transcript. Routed to the session instead, every agent's hooks would
+    /// pile into one log with no way to tell whose call they guarded — which
+    /// is what the session-scoped journal did before.
     #[tokio::test]
     async fn a_subagents_hooks_land_on_its_own_transcript() {
         let gate = BlockingProvider::new();
@@ -769,7 +776,8 @@ mod tests {
             .await
             .unwrap();
 
-        // `tell` is fire-and-forget through two mailboxes; poll rather than race.
+        // `tell` is fire-and-forget through two mailboxes; poll rather than
+        // race.
         let mut waited = 0;
         loop {
             let page = agent_history(&session, Some(sub.to_string())).await;

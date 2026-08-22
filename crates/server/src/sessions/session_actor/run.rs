@@ -9,7 +9,7 @@
 //!
 //! Silent when the forest holds no runs. That check, rather than a branch
 //! chosen at construction, is the whole of what makes this component inert in
-//! a conversation that has invoked nothing.
+//! a session that has invoked nothing.
 
 use super::component::Component;
 use super::context::SessionAgentKind;
@@ -335,8 +335,8 @@ impl SessionActor {
                     false,
                 )
             }
-            // A step that fails fails the run, terminal or not. Retrying it is a
-            // decision for a person: the shared workspace holds whatever the
+            // A step that fails fails the run, terminal or not. Retrying it is
+            // a decision for a person: the shared workspace holds whatever the
             // failed attempt left behind, so re-running blind would redo
             // half-finished work.
             TurnEnd::Failed { error, .. } => (
@@ -421,10 +421,10 @@ impl SessionActor {
                         error: STOPPED_ERROR.to_string(),
                     });
                 }
-                // A fork is a conversation of its own, not delegated work: it
+                // A sub session is a session of its own, not delegated work: it
                 // outlives whoever branched it, exactly as deleting a parent
-                // fork leaves its children.
-                RunState::Fork(_) | RunState::Main(_) => {}
+                // sub session leaves its children.
+                RunState::SubSession(_) | RunState::Main(_) => {}
             }
         }
         events
@@ -514,10 +514,11 @@ impl Component for WorkflowRuns {
     /// Pure, and an associated function rather than a method: replay runs with
     /// no instance in scope, which is what makes a recovered session and a live
     /// one follow the same path.
-    // The fallthrough is unreachable by construction: `SessionActor::apply_event`
-    // matches every variant explicitly and routes each to exactly one component,
-    // so a newly added event fails to compile *there* — which is where it should
-    // be classified — rather than silently reaching the wrong fold here.
+    // The fallthrough is unreachable by construction:
+    // `SessionActor::apply_event` matches every variant explicitly and routes
+    // each to exactly one component, so a newly added event fails to compile
+    // *there* — which is where it should be classified — rather than silently
+    // reaching the wrong fold here.
     #[allow(clippy::wildcard_enum_match_arm)]
     fn apply(state: &mut SessionState, event: &SessionDomainEvent) {
         match event.clone() {
@@ -931,7 +932,7 @@ mod tests {
     }
 
     /// A run has no first message to hold it back — `AdvanceRun` fires at load
-    /// and starts step one by itself. So it needs the same wait a conversation
+    /// and starts step one by itself. So it needs the same wait a session
     /// gets, and for the same reason: the step would ask for a runtime nobody
     /// had been told to build.
     #[tokio::test]
@@ -1001,8 +1002,9 @@ mod tests {
             "the step is still running, parked on its question"
         );
 
-        // Unaddressed, which is the case that used to resolve nothing: a run has
-        // no main agent, so the step in flight is the only thing this can mean.
+        // Unaddressed, which is the case that used to resolve nothing: a run
+        // has no main agent, so the step in flight is the only thing this can
+        // mean.
         session
             .ask(|reply| {
                 SessionCommand::Turn(TurnCommand::Answer {
@@ -1065,11 +1067,11 @@ mod tests {
         provider.release();
     }
 
-    /// A step the process died inside is suspended at load, not resumed: how far
-    /// it got is unknowable and its effect on the shared workspace with it. The
-    /// guide has always promised this; nothing implemented it, so the entry
-    /// stayed `Running` and the run was unrecoverable except through a retry
-    /// nobody was told to make.
+    /// A step the process died inside is suspended at load, not resumed: how
+    /// far it got is unknowable and its effect on the shared workspace with
+    /// it. The guide has always promised this; nothing implemented it, so the
+    /// entry stayed `Running` and the run was unrecoverable except through a
+    /// retry nobody was told to make.
     #[tokio::test]
     async fn recovery_suspends_a_run_whose_step_was_interrupted() {
         let f = actor_fixture().await;
@@ -1248,7 +1250,7 @@ mod tests {
 
     /// The feature, end to end: the main agent invokes a workflow, its step
     /// runs and concludes, and the run's report is delivered back into the
-    /// invoker's own conversation — through the same owed-delivery rule a
+    /// invoker's own session — through the same owed-delivery rule a
     /// subagent's report takes.
     #[tokio::test]
     async fn an_invoked_run_executes_and_reports_to_its_invoker() {
@@ -1273,7 +1275,7 @@ mod tests {
         assert_ne!(
             state.status(),
             crate::sessions::spec::SessionStatus::Finished,
-            "a conversation does not finish because a run it invoked did"
+            "a session does not finish because a run it invoked did"
         );
         let texts = wait_for_subagent_text(&session, |texts| {
             texts

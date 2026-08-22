@@ -53,7 +53,7 @@ pub struct Agent {
     /// Responses wire uses it as a prompt-cache key — need an id that is the
     /// same across a conversation's turns and different across conversations;
     /// deriving one from message contents breaks the moment history is copied
-    /// (a fork) or trimmed (compaction).
+    /// (a branch) or trimmed (compaction).
     pub(crate) conversation_id: String,
     pub(crate) system_prompt: String,
     pub(crate) toolbox: Arc<dyn Toolbox>,

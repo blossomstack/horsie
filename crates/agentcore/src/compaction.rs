@@ -222,8 +222,8 @@ pub fn summary_prompt(instructions: Option<&str>) -> String {
 }
 
 /// Swallows everything. The summarising call is not a turn, and its streaming
-/// deltas must never reach a transcript — a viewer would watch the summary being
-/// typed as though the agent had started answering.
+/// deltas must never reach a transcript — a viewer would watch the summary
+/// being typed as though the agent had started answering.
 struct NullSink;
 
 #[async_trait::async_trait]
@@ -282,10 +282,10 @@ impl Agent {
     /// Summarise this agent's whole history, changing nothing.
     ///
     /// What `/summary-n-fork` runs. Distinct from [`Self::compact`] in the one
-    /// way that matters: no boundary is written and `self.history` is untouched,
-    /// because the conversation being summarised is not the one that receives
-    /// the summary. Folding it back would make the command do two things, only
-    /// one of which was asked for.
+    /// way that matters: no boundary is written and `self.history` is
+    /// untouched, because the session being summarised is not the one that
+    /// receives the summary. Folding it back would make the command do two
+    /// things, only one of which was asked for.
     ///
     /// Needs no [`CompactionPolicy`] for the same reason: nothing here is
     /// carried into a rewritten history, so there is no state to render and no
@@ -293,8 +293,8 @@ impl Agent {
     ///
     /// # Errors
     /// Whatever the summarising provider call fails with. An empty history
-    /// summarises to nothing rather than erroring — a fork of a conversation
-    /// that has not started yet is empty, not broken.
+    /// summarises to nothing rather than erroring — a sub session branched
+    /// from a session that has not started yet is empty, not broken.
     pub async fn summarise_all(&self, instructions: Option<&str>) -> Result<String, AgentError> {
         if self.history.is_empty() {
             return Ok(String::new());
@@ -448,7 +448,8 @@ impl Agent {
                     // doing the work. They would only bias the summary.
                     system: None,
                     // No tools, which is also what makes `tool_choice`
-                    // irrelevant — every provider omits it when tools are empty.
+                    // irrelevant — every provider omits it when tools are
+                    // empty.
                     tools: Vec::new(),
                     tool_choice: ToolChoice::Auto,
                     max_tokens: self.config.max_tokens,
@@ -742,8 +743,9 @@ mod tests {
                 })
                 .with_history(long_history(4))
                 .with_compaction(policy.clone())
-                // Seeded above 80% of 1000 — the previous turn left the context full,
-                // so iteration 0 of this fresh turn must compact.
+                // Seeded above 80% of 1000 — the previous turn left the
+                // context full, so iteration 0 of this fresh turn must
+                // compact.
                 .with_context_tokens(900)
                 .build()
                 .unwrap();

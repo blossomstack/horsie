@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ForkView, SubAgentView } from "../api/types";
+import type { SubSessionView, SubAgentView } from "../api/types";
 import type { TranscriptItem } from "../hooks/useSessionStream";
 import {
   buildScale,
@@ -129,7 +129,7 @@ const agent = (o: Partial<SubAgentView> & { id: string }): SubAgentView => ({
   ...o,
 });
 
-const fork = (o: Partial<ForkView> & { id: string }): ForkView => ({
+const subSession = (o: Partial<SubSessionView> & { id: string }): SubSessionView => ({
   status: "idle",
   createdAtMs: 0,
   lastActivityMs: 0,
@@ -246,18 +246,18 @@ describe("buildTimeline", () => {
     expect(t.lanes.find((l) => l.agentId === "s1")?.span?.open).toBe(true);
   });
 
-  it("leaves every fork's span open, because a conversation never ends", () => {
-    const t = buildTimeline(SESSION, MAIN, [fork({ id: "f1", createdAtMs: 6_000 })], 20_000);
+  it("leaves every sub session's span open, because a session never ends", () => {
+    const t = buildTimeline(SESSION, MAIN, [subSession({ id: "f1", createdAtMs: 6_000 })], 20_000);
     const lane = t.lanes.find((l) => l.agentId === "f1");
-    expect(lane?.kind).toBe("fork");
+    expect(lane?.kind).toBe("subSession");
     expect(lane?.span?.open).toBe(true);
   });
 
-  it("nests a fork of a fork and anchors it to its parent", () => {
+  it("nests a subSession of a subSession and anchors it to its parent", () => {
     const t = buildTimeline(
       SESSION,
       MAIN,
-      [fork({ id: "f1", createdAtMs: 6_000 }), fork({ id: "f2", parent: "f1", createdAtMs: 8_000 })],
+      [subSession({ id: "f1", createdAtMs: 6_000 }), subSession({ id: "f2", parent: "f1", createdAtMs: 8_000 })],
       20_000,
     );
     const child = t.lanes.find((l) => l.agentId === "f2");
@@ -265,8 +265,8 @@ describe("buildTimeline", () => {
     expect(child?.anchor?.parentAgentId).toBe("f1");
   });
 
-  it("shows a fork whose parent was deleted, at the top level", () => {
-    const t = buildTimeline(SESSION, MAIN, [fork({ id: "f2", parent: "gone", createdAtMs: 8_000 })], 20_000);
+  it("shows a subSession whose parent was deleted, at the top level", () => {
+    const t = buildTimeline(SESSION, MAIN, [subSession({ id: "f2", parent: "gone", createdAtMs: 8_000 })], 20_000);
     const lane = t.lanes.find((l) => l.agentId === "f2");
     expect(lane).toBeDefined();
     expect(lane?.depth).toBe(0);
@@ -446,11 +446,11 @@ describe("nesting", () => {
     expect(t.lanes.filter((l) => l.kind === "subagent")).toHaveLength(2);
   });
 
-  it("ends a fork's lane at its last activity, not at the edge of the session", () => {
+  it("ends a subSession's lane at its last activity, not at the edge of the session", () => {
     const t = buildTimeline(
       SESSION,
       MAIN,
-      [fork({ id: "f1", createdAtMs: 6_000, lastActivityMs: 8_000, status: "idle" })],
+      [subSession({ id: "f1", createdAtMs: 6_000, lastActivityMs: 8_000, status: "idle" })],
       20_000,
     );
     const lane = t.lanes.find((l) => l.agentId === "f1");
@@ -458,11 +458,11 @@ describe("nesting", () => {
     expect(lane!.span!.width).toBeLessThan(t.width);
   });
 
-  it("leaves a fork that is still running open", () => {
+  it("leaves a subSession that is still running open", () => {
     const t = buildTimeline(
       SESSION,
       MAIN,
-      [fork({ id: "f1", createdAtMs: 6_000, lastActivityMs: 8_000, status: "running" })],
+      [subSession({ id: "f1", createdAtMs: 6_000, lastActivityMs: 8_000, status: "running" })],
       20_000,
     );
     expect(t.lanes.find((l) => l.agentId === "f1")?.span?.open).toBe(true);
@@ -486,10 +486,10 @@ describe("nesting", () => {
   });
 });
 
-describe("an expanded fork", () => {
+describe("an expanded subSession", () => {
   it("shows only what it did, not the parent history it was seeded with", () => {
     // `/fork` copies the source's log, timestamps and all. Drawn unfiltered a
-    // fork claimed to have been working through turns that predate it.
+    // sub session claimed to have been working through turns that predate it.
     const copied: TranscriptItem[] = [
       msg("old", "Assistant", 3_000, { startedAtMs: 2_000, text: "from the parent" }),
       msg("mine", "Assistant", 9_000, { startedAtMs: 8_000, text: "my own work" }),
@@ -497,7 +497,7 @@ describe("an expanded fork", () => {
     const t = buildTimeline(
       SESSION,
       MAIN,
-      [fork({ id: "f1", createdAtMs: 7_000, lastActivityMs: 9_000 })],
+      [subSession({ id: "f1", createdAtMs: 7_000, lastActivityMs: 9_000 })],
       20_000,
       { f1: copied },
     );

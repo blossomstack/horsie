@@ -1,58 +1,58 @@
 import { NavLink, useMatch, useNavigate } from "react-router-dom";
-import type { ForkView } from "../api/types";
+import type { SubSessionView } from "../api/types";
 import { askConfirm } from "../lib/confirm";
 import { cn } from "../lib/cn";
 import { agentStatusMeta, statusMeta } from "../lib/status";
-import { useDeleteFork } from "../hooks/useSessions";
+import { useDeleteSubSession } from "../hooks/useSessions";
 import { Menu, MenuItem } from "./Menu";
 import { StatusDot } from "./StatusBadge";
 
 /**
  * How many lineage columns are drawn before the indent costs more readable
  * width than it buys clarity. Past this the rows stop stepping right; the
- * elbow still says the row is a fork, which is the part that matters.
+ * elbow still says the row is a sub session, which is the part that matters.
  */
 const MAX_RAILS = 4;
 
 /**
- * One forked conversation, indented under the one it branched from.
+ * One branched session, indented under the one it branched from.
  *
- * Its own row rather than a variant of `SessionRow`: a fork is not a session,
+ * Its own row rather than a variant of `SessionRow`: a sub session is not a session,
  * so it has no group to be moved between and no runtime to be told about, and
  * the two rows would have shared a name and almost none of their behaviour.
  *
- * The badge is the fork's own status, never a rollup — a session row says what
- * its main agent is doing, and this says what this conversation is doing. A
+ * The badge is the sub session's own status, never a rollup — a session row says what
+ * its main agent is doing, and this says what this session is doing. A
  * derived "something in here is running" is a second thing that can disagree
  * with the durable one after a crash.
  */
-export function ForkRow({
+export function SubSessionRow({
   sessionId,
-  fork,
+  subSession,
   depth,
   rails,
   last,
 }: {
   sessionId: string;
-  fork: ForkView;
+  subSession: SubSessionView;
   depth: number;
   rails: boolean[];
   last: boolean;
 }) {
-  const kind = agentStatusMeta(fork.status);
+  const kind = agentStatusMeta(subSession.status);
   const meta = statusMeta(kind);
-  const del = useDeleteFork();
+  const del = useDeleteSubSession();
   const navigate = useNavigate();
-  const to = `/sessions/${sessionId}/agents/${fork.id}`;
-  const open = useMatch("/sessions/:id/agents/:agentId")?.params.agentId === fork.id;
+  const to = `/sessions/${sessionId}/agents/${subSession.id}`;
+  const open = useMatch("/sessions/:id/agents/:agentId")?.params.agentId === subSession.id;
   // Until the model names it. Not the id — that means nothing to a reader — and
   // not a made-up name either, so the row says what it is instead.
-  const title = fork.title ?? "Untitled fork";
+  const title = subSession.title ?? "Untitled subSession";
 
   const remove = async () => {
     if (!(await askConfirm(`Delete “${title}”? This cannot be undone.`))) return;
     try {
-      await del.mutateAsync({ id: sessionId, forkId: fork.id });
+      await del.mutateAsync({ id: sessionId, subSessionId: subSession.id });
       if (open) navigate(`/sessions/${sessionId}`);
     } catch {
       /* reported by the global failure notice */
@@ -64,7 +64,7 @@ export function ForkRow({
     // span the row's full height and meet the next row's with no gap, which a
     // glyph on a text baseline cannot do — it would leave a dashed column of
     // disconnected marks. Drawn beside the link rather than inside it so the
-    // selected fill stops at the conversation and the lineage stays lineage.
+    // selected fill stops at the session and the lineage stays lineage.
     <div className="group relative flex items-stretch pl-2.5">
       {rails.slice(0, MAX_RAILS).map((rail, i) => (
         <span
@@ -74,7 +74,7 @@ export function ForkRow({
             "w-3 shrink-0",
             // A rail only where an ancestor still has a row below this one.
             // Everywhere else the column is blank, or the line would run
-            // through rows that are not this fork's lineage.
+            // through rows that are not this sub session's lineage.
             rail && "border-l border-rule",
           )}
         />
@@ -93,8 +93,8 @@ export function ForkRow({
       </span>
       <NavLink
         to={to}
-        data-testid="fork-row"
-        data-fork-id={fork.id}
+        data-testid="subSession-row"
+        data-subSession-id={subSession.id}
         data-depth={depth}
         title={`${title} — ${meta.hint}`}
         className={({ isActive }) =>
@@ -111,7 +111,7 @@ export function ForkRow({
       >
         <StatusDot status={kind} className="mt-[5px]" />
         {/* Title only, as a session row is: the dot beside it already carries
-            the status, and a fork sitting under the conversation it came from
+            the status, and a subSession sitting under the session it came from
             does not need to repeat "Idle · just now" on a second line. */}
         <span className="min-w-0 flex-1">
           <span className="block truncate text-[0.8125rem] leading-5">
@@ -120,13 +120,13 @@ export function ForkRow({
         </span>
       </NavLink>
       <span className="absolute right-1.5 top-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
-        <Menu label="Fork actions" testId={`fork-row-menu-${fork.id}`}>
+        <Menu label="SubSession actions" testId={`subSession-row-menu-${subSession.id}`}>
           <MenuItem
             danger
-            testId={`delete-fork-${fork.id}`}
+            testId={`delete-subSession-${subSession.id}`}
             onSelect={() => void remove()}
           >
-            Delete fork
+            Delete subSession
           </MenuItem>
         </Menu>
       </span>

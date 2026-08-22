@@ -62,12 +62,12 @@ export interface RenderedHookNotice {
 
 /** A compaction boundary, as the transcript shows it. */
 export interface RenderedCompaction {
-  /** The log seq of the boundary entry — the conversation's own id. */
+  /** The log seq of the boundary entry — the session's own id. */
   seq: number;
   summary: string;
   carriedState: string;
   /** How many entries this boundary's summary covers, or `null` when the
-   * conversation before it has not been paged in and the count is unknown. */
+   * session before it has not been paged in and the count is unknown. */
   covered: number | null;
   tokensBefore: number;
   tokensAfter: number;
@@ -85,12 +85,12 @@ export interface RenderedCompactionSkip {
   atMs: number;
 }
 
-/** A conversation branched off here, as the transcript shows it. */
-export interface RenderedFork {
-  /** The forked agent, which is where the marker links to. */
+/** A sub session branched off here, as the transcript shows it. */
+export interface RenderedSubSession {
+  /** The branched agent, which is where the marker links to. */
   id: string;
-  /** `copy` or `summary` — what the fork was given to start from. */
-  mode: string;
+  /** `copy`, `summary` or `fresh` — what it was given to start from. */
+  seed: string;
   atMs: number;
 }
 
@@ -99,7 +99,7 @@ export type TranscriptItem =
   | { kind: "notice"; value: RenderedHookNotice }
   | { kind: "compaction"; value: RenderedCompaction }
   | { kind: "compaction-skipped"; value: RenderedCompactionSkip }
-  | { kind: "fork"; value: RenderedFork };
+  | { kind: "subSession"; value: RenderedSubSession };
 
 export interface SessionStream {
   items: TranscriptItem[];
@@ -480,7 +480,7 @@ let optimisticSeq = 0;
  *
  * Extracted from the stream's own derivation rather than copied, so a second
  * reader of a second agent's history cannot drift from what the open
- * conversation shows. `running` decides whether a tool call with no result yet
+ * session shows. `running` decides whether a tool call with no result yet
  * is *in flight* or merely unanswered; `hasMoreBefore` decides whether a
  * compaction can honestly say how much it covered.
  */
@@ -549,7 +549,7 @@ export function transcriptItems(
   });
 
   const items: TranscriptItem[] = [];
-  // Where the previous conversation ended, so a boundary can say how much
+  // Where the previous session ended, so a boundary can say how much
   // *it* closed rather than how far the log stretches behind it.
   let previousBoundarySeq: number | null = null;
   for (const entry of entries) {
@@ -567,7 +567,7 @@ export function transcriptItems(
       entry.body.type === "Lifecycle" &&
       entry.body.value.kind === "CompactionSkipped"
     ) {
-      // Sits in the transcript for the same reason a fork marker does: it
+      // Sits in the transcript for the same reason a sub session marker does: it
       // answers something typed at a point, and the point is the answer.
       items.push({
         kind: "compaction-skipped",
@@ -579,17 +579,17 @@ export function transcriptItems(
       });
     } else if (
       entry.body.type === "Lifecycle" &&
-      entry.body.value.kind === "Forked"
+      entry.body.value.kind === "SubSession"
     ) {
       // One of the two lifecycle entries the transcript renders. The rest are
-      // folded into status and progress, because they describe the
-      // conversation rather than sitting *in* it — but a branch happened at a
-      // point, and the point is the whole of what it says.
+      // folded into status and progress, because they describe the session
+      // rather than sitting *in* it — but a branch happened at a point, and
+      // the point is the whole of what it says.
       items.push({
-        kind: "fork",
+        kind: "subSession",
         value: {
           id: entry.body.value.value.id,
-          mode: entry.body.value.value.mode,
+          seed: entry.body.value.value.seed,
           atMs: entry.atMs,
         },
       });

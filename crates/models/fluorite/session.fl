@@ -49,8 +49,8 @@ struct AgentSettings {
     /// Naming a `horsie_*` tool is the whole authorisation for the control
     /// plane: authority over this server is asked for, never inherited from a
     /// field left unset. Only the main agent gets those tools — subagents,
-    /// forks and workflow steps inherit the selection but not the authority,
-    /// the same rule that keeps session-metadata tools off them.
+    /// sub sessions and workflow steps inherit the selection but not the
+    /// authority, the same rule that keeps session-metadata tools off them.
     allowed_tools: Option<Vec<String>>,
     use_plugins: Option<bool>,
     max_iterations: Option<u32>,
@@ -97,36 +97,37 @@ struct SessionSummary {
     workflow: Option<String>,
     /// User-set key-value metadata (e.g. `group=<name>`). Empty when none.
     annotations: Vec<AnnotationEntry>,
-    /// The conversations forked out of this session, so a list can nest them
+    /// The sub sessions branched out of this session, so a list can nest them
     /// under it. Flat and parent-linked rather than already nested, because the
     /// registry holds it flat — and answered from that registry, so listing
     /// sessions still loads none of them.
-    forks: Vec<ForkView>,
+    sub_sessions: Vec<SubSessionView>,
 }
 
-/// One forked conversation under a session.
+/// One sub session under a session.
 ///
-/// `parent` absent means the session's main agent; present names another fork.
-/// That is what lets a client nest them to any depth without learning the
-/// server's own vocabulary for where a fork is rooted.
-struct ForkView {
+/// `parent` absent means the session's main agent; present names another sub
+/// session. That is what lets a client nest them to any depth without learning
+/// the server's own vocabulary for where one is rooted.
+struct SubSessionView {
     id: String,
     parent: Option<String>,
-    /// What the fork named itself, once it has. Absent until then — a client
-    /// shows what it was branched from instead of inventing a name.
+    /// What the sub session named itself, once it has. Absent until then — a
+    /// client shows what it was branched from instead of inventing a name.
     title: Option<String>,
     /// The same vocabulary an agent's document speaks: "provisioning" |
-    /// "running" | "idle" | "awaiting_input" | "failed" | "cancelled". A fork
-    /// is a conversation, so it never reads "completed".
+    /// "running" | "idle" | "awaiting_input" | "failed" | "cancelled". A sub
+    /// session is talked to rather than delegated to, so it never reads
+    /// "completed".
     status: String,
     created_at_ms: u64,
-    /// When this fork last did anything: the moment of its most recent status
-    /// change, which is the end of its last turn once it is idle again.
+    /// When this sub session last did anything: the moment of its most recent
+    /// status change, which is the end of its last turn once it is idle again.
     ///
-    /// A conversation has no *end* — nothing closes it — so this is not one.
-    /// It is how far along the fork got, which is what a reader looking at the
-    /// session's shape actually needs; without it a fork can only be drawn as
-    /// running forever. Zero before the fork has moved at all.
+    /// A session has no *end* — nothing closes it — so this is not one.
+    /// It is how far along it got, which is what a reader looking at the
+    /// session's shape actually needs; without it a sub session can only be
+    /// drawn as running forever. Zero before it has moved at all.
     last_activity_ms: u64,
 }
 
@@ -162,22 +163,22 @@ struct SessionDetail {
     /// document instead.
     usage_total: UsageView,
     /// Every agent this session hosts, each addressable at
-    /// `/sessions/:id/agents/:agent_id`. A conversation lists its main agent
+    /// `/sessions/:id/agents/:agent_id`. A session lists its main agent
     /// first, then its subagent tree. A workflow run has no main agent — it
     /// *is* its steps — so it lists one entry per execution in its run log,
     /// labelled with the step that ran.
     agents: Vec<SubAgentView>,
-    /// The conversations forked out of this session, so one read tells a client
-    /// everything the session hosts.
+    /// The sub sessions branched out of this session, so one read tells a
+    /// client everything the session hosts.
     ///
-    /// Its own field rather than more entries in `agents`, because a fork is
-    /// not a delegated task: it owes nobody a result and it never ends, so it
-    /// has no end stamp for a `SubAgentView` to carry and no honest way to
-    /// share the shape. The server keeps the two apart for the same reason —
-    /// `ForkRoster` is deliberately not a `SubAgentTree`.
-    forks: Vec<ForkView>,
+    /// Its own field rather than more entries in `agents`, because a sub
+    /// session is not a delegated task: it owes nobody a result and it never
+    /// ends, so it has no end stamp for a `SubAgentView` to carry and no honest
+    /// way to share the shape. The server keeps the two apart for the same
+    /// reason — a sub session is deliberately not a `SubAgentTree` node.
+    sub_sessions: Vec<SubSessionView>,
     /// The workflow this session is a run of, if it is one. Decides which view
-    /// the page renders: a run has a graph rather than a conversation.
+    /// the page renders: a run has a graph rather than a transcript.
     workflow: Option<String>,
 }
 

@@ -6,7 +6,7 @@ describe("isAskCall", () => {
     expect(isAskCall("ask_user")).toBe(true);
   });
 
-  /** A step asks with the same tool a conversation does. It used to ask
+  /** A step asks with the same tool a session does. It used to ask
    * through its finishing tool instead, so this had to sniff the payload —
    * and a step that *submitted* looked enough like a question to need telling
    * apart. Neither is true any more: the name is the whole test. */

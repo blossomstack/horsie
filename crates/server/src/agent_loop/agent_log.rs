@@ -75,7 +75,7 @@ pub struct LogPage {
 
 impl LogPage {
     /// Just the LLM messages in this window, for callers reasoning about the
-    /// conversation rather than the log. Hook and lifecycle entries are
+    /// session rather than the log. Hook and lifecycle entries are
     /// skipped, so a page of `n` entries may yield fewer than `n` messages.
     pub fn messages(&self) -> impl Iterator<Item = &horsie_agentcore::Message> {
         self.entries.iter().filter_map(|e| match &e.body {
@@ -100,10 +100,10 @@ fn index_of(log: &[AgentLogEntry], seq: u64) -> Option<usize> {
 /// The `max` entries ending just before `before`, or the tail when `before` is
 /// absent.
 ///
-/// An unresolvable `before` yields an empty page rather than falling back to the
-/// tail. The caller named an entry this log does not hold, so the honest answer
-/// is nothing — handing back the tail would look like a successful scroll-back
-/// and silently restart the window somewhere else.
+/// An unresolvable `before` yields an empty page rather than falling back to
+/// the tail. The caller named an entry this log does not hold, so the honest
+/// answer is nothing — handing back the tail would look like a successful
+/// scroll-back and silently restart the window somewhere else.
 #[must_use]
 pub fn page_before(log: &[AgentLogEntry], before: Option<u64>, max: usize) -> LogPage {
     let end = match before {

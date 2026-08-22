@@ -1,22 +1,22 @@
 //! Every unit of work a session hosts, in one hierarchical forest.
 //!
-//! An entry is one *run* of something: the main conversation, a delegated
+//! An entry is one *run* of something: the session's own agent, a delegated
 //! subagent task, a workflow run (the session's own, or one an agent invoked
-//! mid-session), or a forked conversation. Each entry names the **agent it runs
+//! mid-session), or a sub session. Each entry names the **agent it runs
 //! under** — `parent` — and that one edge is the whole nesting model: a step
 //! agent can spawn subagents, a subagent can invoke a workflow, a workflow's
 //! step can spawn subagents, and every routing question is answered by the same
 //! two lookups.
 //!
-//! Pure data, like the structures it replaces (`SubAgentForest`, `ForkRoster`,
-//! the single `WorkflowRunState`): the session actor folds its journal through
+//! Pure data, like the structures it replaces (`SubAgentForest`, the sub-session
+//! roster, the single `WorkflowRunState`): the session actor folds its journal through
 //! these methods, so live operation and recovery follow one path. The
-//! components keep their roles — turns, subagents, workflow runs, forks — and
-//! each folds only entries of its own kind; the forest is where their state
-//! lives, not who decides.
+//! components keep their roles — turns, subagents, workflow runs, sub sessions
+//! — and each folds only entries of its own kind; the forest is where their
+//! state lives, not who decides.
 //!
 //! Identity is deliberately plain: an agent-shaped entry (main, subagent,
-//! fork) is keyed by its agent's uuid — main's is the session's — and a
+//! sub session) is keyed by its agent's uuid — main's is the session's — and a
 //! workflow entry mints its own run id, hosting its step agents through the
 //! `agents` index. There is no per-kind key enum; what an id *is* lives in the
 //! entry it resolves to, where a `match` must be exhaustive.
@@ -76,9 +76,9 @@ fn truncate_result(text: &str) -> String {
     )
 }
 
-/// One unit of work the session hosts. For main, a subagent or a fork this is
-/// the agent's own uuid (main's is the session's); a workflow entry mints its
-/// own, distinct from any agent's.
+/// One unit of work the session hosts. For main, a subagent or a sub session
+/// this is the agent's own uuid (main's is the session's); a workflow entry
+/// mints its own, distinct from any agent's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RunId(pub Uuid);
 
@@ -86,7 +86,7 @@ pub struct RunId(pub Uuid);
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunEntry {
     /// The agent this work runs *under*: what spawned or invoked it. `None`
-    /// only for the root — the main conversation, or the session's own
+    /// only for the root — the main session, or the session's own
     /// workflow run. This one field is the whole nesting model.
     pub parent: Option<Uuid>,
     pub created_at_ms: u64,
@@ -101,10 +101,10 @@ pub enum RunState {
     Main(MainRun),
     Sub(SubAgentRun),
     Workflow(WorkflowRun),
-    Fork(ForkRun),
+    SubSession(SubSessionRun),
 }
 
-/// Where the main conversation's turn stands. The session's status used to be
+/// Where the main session's turn stands. The session's status used to be
 /// this, stored beside everything else's and written by three components; now
 /// it is the root entry's own fact and the status is a projection.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -122,7 +122,7 @@ pub enum TurnPhase {
     },
 }
 
-/// The main conversation.
+/// The main session.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct MainRun {
     pub turn: TurnPhase,
@@ -179,40 +179,42 @@ pub struct WorkflowRun {
     pub notified: bool,
 }
 
-/// One forked conversation. Owes nobody a result — there is deliberately no
-/// `notified` here, so the owed-delivery query cannot misread a fork.
+/// One branched session. Owes nobody a result — there is deliberately no
+/// `notified` here, so the owed-delivery query cannot misread a sub session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ForkRun {
-    /// The source agent's log seq this fork was taken at — the branch point.
+pub struct SubSessionRun {
+    /// The source agent's log seq this sub session was taken at — the branch
+    /// point.
     pub source_seq: u64,
-    pub mode: ForkMode,
-    /// What the fork was created to do. Durable here, not merely queued on the
-    /// agent, because a fork abandoned mid-seed is re-seeded from this record.
+    pub seed: SeedMode,
+    /// What the sub session was created to do. Durable here, not merely queued
+    /// on the agent, because a sub session abandoned mid-seed is re-seeded
+    /// from this record.
     pub message: String,
-    /// What the fork has named itself, once it has.
+    /// What the sub session has named itself, once it has.
     pub title: Option<String>,
     /// `Provisioning` is the seeding window — the one state in which no turn
     /// has run, and the reason an interrupted seed is safe to re-attempt.
     pub status: AgentStatus,
-    /// When this fork last did anything — the moment of its most recent status
-    /// change.
+    /// When this sub session last did anything — the moment of its most recent
+    /// status change.
     pub last_activity_ms: u64,
 }
 
-/// How a fork's history was seeded.
+/// How a sub session's history was seeded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ForkMode {
+pub enum SeedMode {
     /// `/fork` — the source's log, copied and scrubbed.
     Copy,
     /// `/summary-n-fork` — a summary of the source, produced out of band.
     Summary,
-    /// `spawn_conversation` — no history at all. The agent that asked for the
-    /// fork already knows the context and writes the brief itself, so there is
-    /// nothing to carry and nothing to summarise.
+    /// `spawn_subsession` — no history at all. The agent that asked for the
+    /// sub session already knows the context and writes the brief itself, so
+    /// there is nothing to carry and nothing to summarise.
     Fresh,
 }
 
-impl ForkMode {
+impl SeedMode {
     /// The wire spelling, and what a lifecycle entry carries.
     #[must_use]
     pub fn as_str(&self) -> &'static str {
@@ -250,7 +252,7 @@ pub struct RunForest {
 impl RunForest {
     // ---------------------------------------------------------------- roots
 
-    /// The session is a conversation: one main agent, keyed by the session id.
+    /// The session is a session: one main agent, keyed by the session id.
     pub fn apply_root_agent(&mut self, session: Uuid, at_ms: u64) {
         let id = RunId(session);
         self.entries.insert(
@@ -309,7 +311,7 @@ impl RunForest {
         let id = self.root?;
         match self.entries.get(&id).map(|e| &e.state) {
             Some(RunState::Workflow(w)) => Some((id, w)),
-            Some(RunState::Main(_) | RunState::Sub(_) | RunState::Fork(_)) | None => None,
+            Some(RunState::Main(_) | RunState::Sub(_) | RunState::SubSession(_)) | None => None,
         }
     }
 
@@ -352,8 +354,8 @@ impl RunForest {
         self.entries.get(&id)
     }
 
-    /// The entry that hosts `agent` — its own for main, a subagent or a fork;
-    /// its run's for a step agent.
+    /// The entry that hosts `agent` — its own for main, a subagent or a sub
+    /// session; its run's for a step agent.
     #[must_use]
     pub fn owner_of_agent(&self, agent: Uuid) -> Option<(RunId, &RunEntry)> {
         let id = *self.agents.get(&agent)?;
@@ -391,8 +393,8 @@ impl RunForest {
             depth += 1;
             match self.owner_of_agent(parent_agent) {
                 Some((_, parent_entry)) => at = parent_entry.parent,
-                // A deleted ancestor (a removed fork) leaves the chain where
-                // it stands: this is as deep as it can be said to be.
+                // A deleted ancestor (a removed sub session) leaves the chain
+                // where it stands: this is as deep as it can be said to be.
                 None => break,
             }
         }
@@ -494,14 +496,18 @@ impl RunForest {
     pub fn sub(&self, id: Uuid) -> Option<&SubAgentRun> {
         match self.entries.get(&RunId(id)).map(|e| &e.state) {
             Some(RunState::Sub(sub)) => Some(sub),
-            Some(RunState::Main(_) | RunState::Workflow(_) | RunState::Fork(_)) | None => None,
+            Some(RunState::Main(_) | RunState::Workflow(_) | RunState::SubSession(_)) | None => {
+                None
+            }
         }
     }
 
     fn sub_mut(&mut self, id: Uuid) -> Option<&mut SubAgentRun> {
         match self.entries.get_mut(&RunId(id)).map(|e| &mut e.state) {
             Some(RunState::Sub(sub)) => Some(sub),
-            Some(RunState::Main(_) | RunState::Workflow(_) | RunState::Fork(_)) | None => None,
+            Some(RunState::Main(_) | RunState::Workflow(_) | RunState::SubSession(_)) | None => {
+                None
+            }
         }
     }
 
@@ -542,20 +548,20 @@ impl RunForest {
     fn subs(&self) -> impl Iterator<Item = (Uuid, &SubAgentRun)> {
         self.entries.iter().filter_map(|(id, e)| match &e.state {
             RunState::Sub(sub) => Some((id.0, sub)),
-            RunState::Main(_) | RunState::Workflow(_) | RunState::Fork(_) => None,
+            RunState::Main(_) | RunState::Workflow(_) | RunState::SubSession(_) => None,
         })
     }
 
     // ---------------------------------------------------------------- turns
 
-    /// The main conversation's turn began.
+    /// The main session's turn began.
     pub fn apply_turn_began(&mut self, agent: Uuid) {
         if let Some(main) = self.main_mut(agent) {
             main.turn = TurnPhase::Running;
         }
     }
 
-    /// The main conversation's turn ended, stopped, or was found interrupted.
+    /// The main session's turn ended, stopped, or was found interrupted.
     pub fn apply_turn_idle(&mut self, agent: Uuid) {
         if let Some(main) = self.main_mut(agent) {
             main.turn = TurnPhase::Idle;
@@ -568,7 +574,7 @@ impl RunForest {
         }
     }
 
-    /// `agent` parked on questions. For the main conversation that is its turn
+    /// `agent` parked on questions. For the main session that is its turn
     /// phase; for a workflow's step it parks the run — the step stays running,
     /// and the answer resumes it.
     pub fn apply_asked(&mut self, agent: Uuid) {
@@ -578,23 +584,23 @@ impl RunForest {
         match self.entries.get_mut(&id).map(|e| &mut e.state) {
             Some(RunState::Main(main)) => main.turn = TurnPhase::AwaitingInput,
             Some(RunState::Workflow(run)) => run.run.apply_awaiting(),
-            Some(RunState::Sub(_) | RunState::Fork(_)) | None => {}
+            Some(RunState::Sub(_) | RunState::SubSession(_)) | None => {}
         }
     }
 
-    /// The main conversation's turn phase, when the root is one.
+    /// The main session's turn phase, when the root is one.
     #[must_use]
     pub fn main_turn(&self) -> Option<&TurnPhase> {
         match self.root().map(|e| &e.state) {
             Some(RunState::Main(main)) => Some(&main.turn),
-            Some(RunState::Sub(_) | RunState::Workflow(_) | RunState::Fork(_)) | None => None,
+            Some(RunState::Sub(_) | RunState::Workflow(_) | RunState::SubSession(_)) | None => None,
         }
     }
 
     fn main_mut(&mut self, agent: Uuid) -> Option<&mut MainRun> {
         match self.entries.get_mut(&RunId(agent)).map(|e| &mut e.state) {
             Some(RunState::Main(main)) => Some(main),
-            Some(RunState::Sub(_) | RunState::Workflow(_) | RunState::Fork(_)) | None => None,
+            Some(RunState::Sub(_) | RunState::Workflow(_) | RunState::SubSession(_)) | None => None,
         }
     }
 
@@ -687,14 +693,14 @@ impl RunForest {
     pub fn workflow(&self, id: RunId) -> Option<&WorkflowRun> {
         match self.entries.get(&id).map(|e| &e.state) {
             Some(RunState::Workflow(w)) => Some(w),
-            Some(RunState::Main(_) | RunState::Sub(_) | RunState::Fork(_)) | None => None,
+            Some(RunState::Main(_) | RunState::Sub(_) | RunState::SubSession(_)) | None => None,
         }
     }
 
     fn workflow_mut(&mut self, id: RunId) -> Option<&mut WorkflowRun> {
         match self.entries.get_mut(&id).map(|e| &mut e.state) {
             Some(RunState::Workflow(w)) => Some(w),
-            Some(RunState::Main(_) | RunState::Sub(_) | RunState::Fork(_)) | None => None,
+            Some(RunState::Main(_) | RunState::Sub(_) | RunState::SubSession(_)) | None => None,
         }
     }
 
@@ -702,7 +708,7 @@ impl RunForest {
     pub fn workflows(&self) -> impl Iterator<Item = (RunId, &WorkflowRun)> {
         self.entries.iter().filter_map(|(id, e)| match &e.state {
             RunState::Workflow(w) => Some((*id, w)),
-            RunState::Main(_) | RunState::Sub(_) | RunState::Fork(_) => None,
+            RunState::Main(_) | RunState::Sub(_) | RunState::SubSession(_) => None,
         })
     }
 
@@ -712,7 +718,7 @@ impl RunForest {
         let (id, entry) = self.owner_of_agent(agent)?;
         match &entry.state {
             RunState::Workflow(w) => w.run.index_of_agent(agent).map(|index| (id, index)),
-            RunState::Main(_) | RunState::Sub(_) | RunState::Fork(_) => None,
+            RunState::Main(_) | RunState::Sub(_) | RunState::SubSession(_) => None,
         }
     }
 
@@ -737,7 +743,7 @@ impl RunForest {
                 }
                 match &entry.state {
                     // An agent-shaped entry is its own agent: walk from it.
-                    RunState::Sub(_) | RunState::Fork(_) | RunState::Main(_) => {
+                    RunState::Sub(_) | RunState::SubSession(_) | RunState::Main(_) => {
                         self.descends_from(id.0, of)
                     }
                     // A run is reached through the agent that invoked it.
@@ -784,15 +790,16 @@ impl RunForest {
         Some(out)
     }
 
-    // ---------------------------------------------------------------- forks
+    // ---------------------------------------------------------------- sub
+    // sessions
 
     #[allow(clippy::too_many_arguments)]
-    pub fn apply_fork_created(
+    pub fn apply_sub_session_created(
         &mut self,
         id: Uuid,
         parent: Uuid,
         source_seq: u64,
-        mode: ForkMode,
+        seed: SeedMode,
         message: String,
         at_ms: u64,
     ) {
@@ -801,15 +808,15 @@ impl RunForest {
             RunEntry {
                 parent: Some(parent),
                 created_at_ms: at_ms,
-                state: RunState::Fork(ForkRun {
+                state: RunState::SubSession(SubSessionRun {
                     source_seq,
-                    mode,
+                    seed,
                     message,
                     title: None,
                     // Nothing may run until the seed lands — the same status a
                     // session uses while its runtime is built, and the reason
-                    // a fork found in it at load is safe to re-seed: it is
-                    // precisely the state in which no turn has run.
+                    // a sub session found in it at load is safe to re-seed: it
+                    // is precisely the state in which no turn has run.
                     status: AgentStatus::Provisioning,
                     last_activity_ms: at_ms,
                 }),
@@ -818,37 +825,38 @@ impl RunForest {
         self.agents.insert(id, RunId(id));
     }
 
-    /// The seed is durable, so the fork may run.
+    /// The seed is durable, so the sub session may run.
     ///
-    /// Only out of `Provisioning`: the seed carries the fork's first message,
-    /// so the fork can report `Running` before the session records the seed —
-    /// writing `Idle` regardless moved a working fork backwards.
-    pub fn apply_fork_seeded(&mut self, id: Uuid) {
-        if let Some(fork) = self
-            .fork_mut(id)
-            .filter(|fork| fork.status == AgentStatus::Provisioning)
+    /// Only out of `Provisioning`: the seed carries the sub session's first
+    /// message, so the sub session can report `Running` before the session
+    /// records the seed — writing `Idle` regardless moved a working sub
+    /// session backwards.
+    pub fn apply_sub_session_seeded(&mut self, id: Uuid) {
+        if let Some(sub_session) = self
+            .sub_session_mut(id)
+            .filter(|sub_session| sub_session.status == AgentStatus::Provisioning)
         {
-            fork.status = AgentStatus::Idle;
+            sub_session.status = AgentStatus::Idle;
         }
     }
 
-    pub fn apply_fork_titled(&mut self, id: Uuid, title: String) {
-        if let Some(fork) = self.fork_mut(id) {
-            fork.title = Some(title);
+    pub fn apply_sub_session_titled(&mut self, id: Uuid, title: String) {
+        if let Some(sub_session) = self.sub_session_mut(id) {
+            sub_session.title = Some(title);
         }
     }
 
-    pub fn apply_fork_status(&mut self, id: Uuid, status: AgentStatus, at_ms: u64) {
-        if let Some(fork) = self.fork_mut(id) {
-            fork.status = status;
-            fork.last_activity_ms = at_ms;
+    pub fn apply_sub_session_status(&mut self, id: Uuid, status: AgentStatus, at_ms: u64) {
+        if let Some(sub_session) = self.sub_session_mut(id) {
+            sub_session.status = status;
+            sub_session.last_activity_ms = at_ms;
         }
     }
 
-    pub fn apply_fork_deleted(&mut self, id: Uuid) {
+    pub fn apply_sub_session_deleted(&mut self, id: Uuid) {
         if matches!(
             self.entries.get(&RunId(id)).map(|e| &e.state),
-            Some(RunState::Fork(_))
+            Some(RunState::SubSession(_))
         ) {
             self.entries.remove(&RunId(id));
             self.agents.remove(&id);
@@ -856,60 +864,60 @@ impl RunForest {
     }
 
     #[must_use]
-    pub fn fork(&self, id: Uuid) -> Option<&ForkRun> {
+    pub fn sub_session(&self, id: Uuid) -> Option<&SubSessionRun> {
         match self.entries.get(&RunId(id)).map(|e| &e.state) {
-            Some(RunState::Fork(fork)) => Some(fork),
+            Some(RunState::SubSession(sub_session)) => Some(sub_session),
             Some(RunState::Main(_) | RunState::Sub(_) | RunState::Workflow(_)) | None => None,
         }
     }
 
-    fn fork_mut(&mut self, id: Uuid) -> Option<&mut ForkRun> {
+    fn sub_session_mut(&mut self, id: Uuid) -> Option<&mut SubSessionRun> {
         match self.entries.get_mut(&RunId(id)).map(|e| &mut e.state) {
-            Some(RunState::Fork(fork)) => Some(fork),
+            Some(RunState::SubSession(sub_session)) => Some(sub_session),
             Some(RunState::Main(_) | RunState::Sub(_) | RunState::Workflow(_)) | None => None,
         }
     }
 
-    pub fn forks(&self) -> impl Iterator<Item = (Uuid, &ForkRun)> {
+    pub fn sub_sessions(&self) -> impl Iterator<Item = (Uuid, &SubSessionRun)> {
         self.entries.iter().filter_map(|(id, e)| match &e.state {
-            RunState::Fork(fork) => Some((id.0, fork)),
+            RunState::SubSession(sub_session) => Some((id.0, sub_session)),
             RunState::Main(_) | RunState::Sub(_) | RunState::Workflow(_) => None,
         })
     }
 
     #[must_use]
-    pub fn fork_ids(&self) -> Vec<Uuid> {
-        self.forks().map(|(id, _)| id).collect()
+    pub fn sub_session_ids(&self) -> Vec<Uuid> {
+        self.sub_sessions().map(|(id, _)| id).collect()
     }
 
     #[must_use]
-    pub fn has_forks(&self) -> bool {
-        self.forks().next().is_some()
+    pub fn has_sub_sessions(&self) -> bool {
+        self.sub_sessions().next().is_some()
     }
 
-    /// Forks whose seed never landed. Re-seeded at load: seeding is
+    /// Sub sessions whose seed never landed. Re-seeded at load: seeding is
     /// session-owned work with no journal of its own, so nothing else can
     /// finish one a dead process abandoned.
     #[must_use]
-    pub fn seeding_forks(&self) -> Vec<Uuid> {
-        self.forks()
+    pub fn seeding_sub_sessions(&self) -> Vec<Uuid> {
+        self.sub_sessions()
             .filter(|(_, f)| matches!(f.status, AgentStatus::Provisioning))
             .map(|(id, _)| id)
             .collect()
     }
 
     #[must_use]
-    pub fn has_seeding_forks(&self) -> bool {
-        self.forks()
+    pub fn has_seeding_sub_sessions(&self) -> bool {
+        self.sub_sessions()
             .any(|(_, f)| matches!(f.status, AgentStatus::Provisioning))
     }
 
     // ------------------------------------------------------------- delivery
 
     /// Every result a child owes the agent that asked for it and has not been
-    /// sent: finished subagents and finished invoked runs, under one rule —
-    /// a parent, a terminal result, and `!notified`. Forks have no terminal
-    /// report by construction, so they cannot appear here.
+    /// sent: finished subagents and finished invoked runs, under one rule — a
+    /// parent, a terminal result, and `!notified`. Sub sessions have no
+    /// terminal report by construction, so they cannot appear here.
     #[must_use]
     pub fn owed(&self) -> Vec<OwedDelivery> {
         let mut out = Vec::new();
@@ -930,7 +938,7 @@ impl RunForest {
                     }
                     run_result_part(*id, entry.created_at_ms, w)
                 }
-                RunState::Main(_) | RunState::Fork(_) => continue,
+                RunState::Main(_) | RunState::SubSession(_) => continue,
             };
             out.push(OwedDelivery {
                 child: *id,
@@ -1001,7 +1009,7 @@ impl RunForest {
                         self.render_children(step.agent, indent, out);
                     }
                 }
-                RunState::Main(_) | RunState::Fork(_) => {}
+                RunState::Main(_) | RunState::SubSession(_) => {}
             }
         }
     }
@@ -1080,7 +1088,7 @@ mod tests {
         })
     }
 
-    fn conversation() -> (RunForest, Uuid) {
+    fn session_forest() -> (RunForest, Uuid) {
         let mut f = RunForest::default();
         let session = uid(1);
         f.apply_root_agent(session, 100);
@@ -1088,8 +1096,8 @@ mod tests {
     }
 
     #[test]
-    fn a_conversation_roots_a_main_entry_hosting_the_session_agent() {
-        let (f, session) = conversation();
+    fn a_session_roots_a_main_entry_hosting_the_session_agent() {
+        let (f, session) = session_forest();
         assert_eq!(f.root_id(), Some(RunId(session)));
         let (id, entry) = f.owner_of_agent(session).unwrap();
         assert_eq!(id, RunId(session));
@@ -1100,7 +1108,7 @@ mod tests {
 
     #[test]
     fn turn_events_move_only_the_main_entry() {
-        let (mut f, session) = conversation();
+        let (mut f, session) = session_forest();
         f.apply_turn_began(session);
         assert_eq!(f.main_turn(), Some(&TurnPhase::Running));
         f.apply_asked(session);
@@ -1118,7 +1126,7 @@ mod tests {
 
     #[test]
     fn a_spawned_sub_is_hosted_under_its_parent_at_the_next_depth() {
-        let (mut f, session) = conversation();
+        let (mut f, session) = session_forest();
         let sub = uid(2);
         f.apply_sub_spawned(sub, session, "research".into(), "dig".into(), None, 200);
         let (id, entry) = f.owner_of_agent(sub).unwrap();
@@ -1132,7 +1140,7 @@ mod tests {
 
     #[test]
     fn completed_then_notified_makes_a_sub_not_owed() {
-        let (mut f, session) = conversation();
+        let (mut f, session) = session_forest();
         let sub = uid(2);
         f.apply_sub_spawned(sub, session, "audit".into(), "t".into(), None, 100);
         f.apply_sub_completed(sub, "done".into(), 400);
@@ -1151,7 +1159,7 @@ mod tests {
 
     #[test]
     fn a_second_completion_re_owes_the_parent_with_its_own_span() {
-        let (mut f, session) = conversation();
+        let (mut f, session) = session_forest();
         let sub = uid(2);
         f.apply_sub_spawned(sub, session, "w".into(), "t".into(), None, 100);
         f.apply_sub_completed(sub, "first".into(), 400);
@@ -1169,7 +1177,7 @@ mod tests {
 
     #[test]
     fn a_later_failure_reports_the_failure_not_the_earlier_output() {
-        let (mut f, session) = conversation();
+        let (mut f, session) = session_forest();
         let sub = uid(2);
         f.apply_sub_spawned(sub, session, "w".into(), "t".into(), None, 100);
         f.apply_sub_completed(sub, "first pass".into(), 400);
@@ -1183,7 +1191,7 @@ mod tests {
 
     #[test]
     fn a_nested_sub_is_owed_to_the_sub_that_spawned_it() {
-        let (mut f, session) = conversation();
+        let (mut f, session) = session_forest();
         let lead = uid(2);
         let helper = uid(3);
         f.apply_sub_spawned(lead, session, "lead".into(), "t".into(), None, 100);
@@ -1200,7 +1208,7 @@ mod tests {
 
     #[test]
     fn an_owed_part_caps_a_huge_result() {
-        let (mut f, session) = conversation();
+        let (mut f, session) = session_forest();
         let sub = uid(2);
         let huge = "x".repeat(MAX_RESULT_BYTES + 10_000);
         f.apply_sub_spawned(sub, session, "w".into(), "t".into(), None, 100);
@@ -1213,7 +1221,7 @@ mod tests {
 
     #[test]
     fn visibility_is_the_descendant_closure_and_nothing_else() {
-        let (mut f, session) = conversation();
+        let (mut f, session) = session_forest();
         let parent = uid(2);
         let child = uid(3);
         let other = uid(4);
@@ -1229,7 +1237,7 @@ mod tests {
 
     #[test]
     fn renders_a_sub_and_a_subtree() {
-        let (mut f, session) = conversation();
+        let (mut f, session) = session_forest();
         let parent = uid(2);
         let child = uid(3);
         f.apply_sub_spawned(parent, session, "lead".into(), "t".into(), None, 100);
@@ -1282,7 +1290,7 @@ mod tests {
         assert_eq!(id, RunId(session));
         assert_eq!(f.step_of_agent(step_agent), Some((RunId(session), 0)));
         // A root run's step is the run's own work: depth 0, so its subagents
-        // count from 1 exactly as a conversation's do.
+        // count from 1 exactly as a session's do.
         assert_eq!(f.depth_of_agent(step_agent), Some(0));
         let sub = uid(6);
         f.apply_sub_spawned(sub, step_agent, "helper".into(), "t".into(), None, 300);
@@ -1292,7 +1300,7 @@ mod tests {
 
     #[test]
     fn an_invoked_run_is_owed_to_its_invoker_when_terminal() {
-        let (mut f, session) = conversation();
+        let (mut f, session) = session_forest();
         let run = RunId(uid(7));
         f.apply_run_created(run, session, "deploy".into(), graph("deploy"), 500);
         assert!(f.owed().is_empty(), "a live run owes nothing yet");
@@ -1314,7 +1322,7 @@ mod tests {
 
     #[test]
     fn a_failed_run_reports_failed_with_its_error() {
-        let (mut f, session) = conversation();
+        let (mut f, session) = session_forest();
         let run = RunId(uid(7));
         f.apply_run_created(run, session, "deploy".into(), graph("deploy"), 500);
         f.apply_run_failed(run, "no transition matched".into());
@@ -1336,7 +1344,7 @@ mod tests {
 
     #[test]
     fn an_invoked_runs_step_counts_depth_from_the_invoker() {
-        let (mut f, session) = conversation();
+        let (mut f, session) = session_forest();
         let sub = uid(2);
         f.apply_sub_spawned(sub, session, "lead".into(), "t".into(), None, 100);
         let run = RunId(uid(7));
@@ -1358,85 +1366,93 @@ mod tests {
         assert!(f.descends_from(step_agent, session));
     }
 
-    // ------------------------------------------------------------- forks
+    // ------------------------------------------------------------- sub
+    // sessions
 
     #[test]
-    fn a_fork_lifecycle_folds_like_the_roster_did() {
-        let (mut f, session) = conversation();
-        let fork = uid(3);
-        f.apply_fork_created(fork, session, 42, ForkMode::Copy, "go".into(), 1_000);
-        let rec = f.fork(fork).unwrap();
+    fn a_sub_session_lifecycle_folds_like_the_roster_did() {
+        let (mut f, session) = session_forest();
+        let sub_session = uid(3);
+        f.apply_sub_session_created(sub_session, session, 42, SeedMode::Copy, "go".into(), 1_000);
+        let rec = f.sub_session(sub_session).unwrap();
         assert_eq!(rec.source_seq, 42);
         assert_eq!(rec.status, AgentStatus::Provisioning);
-        assert!(f.has_seeding_forks());
-        f.apply_fork_seeded(fork);
-        assert_eq!(f.fork(fork).unwrap().status, AgentStatus::Idle);
-        assert!(!f.has_seeding_forks());
-        f.apply_fork_titled(fork, "Try the other migration".into());
-        f.apply_fork_status(fork, AgentStatus::Running, 2_000);
-        let rec = f.fork(fork).unwrap();
+        assert!(f.has_seeding_sub_sessions());
+        f.apply_sub_session_seeded(sub_session);
+        assert_eq!(
+            f.sub_session(sub_session).unwrap().status,
+            AgentStatus::Idle
+        );
+        assert!(!f.has_seeding_sub_sessions());
+        f.apply_sub_session_titled(sub_session, "Try the other migration".into());
+        f.apply_sub_session_status(sub_session, AgentStatus::Running, 2_000);
+        let rec = f.sub_session(sub_session).unwrap();
         assert_eq!(rec.title.as_deref(), Some("Try the other migration"));
         assert_eq!(rec.last_activity_ms, 2_000);
-        f.apply_fork_deleted(fork);
-        assert!(f.fork(fork).is_none());
-        assert!(!f.is_known_agent(fork));
+        f.apply_sub_session_deleted(sub_session);
+        assert!(f.sub_session(sub_session).is_none());
+        assert!(!f.is_known_agent(sub_session));
     }
 
     #[test]
-    fn seeding_does_not_overwrite_a_fork_that_is_already_working() {
-        let (mut f, session) = conversation();
-        let fork = uid(3);
-        f.apply_fork_created(fork, session, 0, ForkMode::Copy, "go".into(), 1_000);
-        f.apply_fork_status(fork, AgentStatus::Running, 1_100);
-        f.apply_fork_seeded(fork);
-        assert_eq!(f.fork(fork).unwrap().status, AgentStatus::Running);
+    fn seeding_does_not_overwrite_a_sub_session_that_is_already_working() {
+        let (mut f, session) = session_forest();
+        let sub_session = uid(3);
+        f.apply_sub_session_created(sub_session, session, 0, SeedMode::Copy, "go".into(), 1_000);
+        f.apply_sub_session_status(sub_session, AgentStatus::Running, 1_100);
+        f.apply_sub_session_seeded(sub_session);
+        assert_eq!(
+            f.sub_session(sub_session).unwrap().status,
+            AgentStatus::Running
+        );
     }
 
     #[test]
-    fn events_for_a_deleted_fork_are_ignored() {
-        let (mut f, session) = conversation();
-        let fork = uid(3);
-        f.apply_fork_created(fork, session, 0, ForkMode::Copy, "go".into(), 1_000);
-        f.apply_fork_deleted(fork);
-        f.apply_fork_seeded(fork);
-        f.apply_fork_titled(fork, "ghost".into());
-        f.apply_fork_status(fork, AgentStatus::Running, 2_000);
-        assert!(f.fork(fork).is_none());
+    fn events_for_a_deleted_sub_session_are_ignored() {
+        let (mut f, session) = session_forest();
+        let sub_session = uid(3);
+        f.apply_sub_session_created(sub_session, session, 0, SeedMode::Copy, "go".into(), 1_000);
+        f.apply_sub_session_deleted(sub_session);
+        f.apply_sub_session_seeded(sub_session);
+        f.apply_sub_session_titled(sub_session, "ghost".into());
+        f.apply_sub_session_status(sub_session, AgentStatus::Running, 2_000);
+        assert!(f.sub_session(sub_session).is_none());
     }
 
     #[test]
-    fn a_fork_never_appears_in_owed_deliveries() {
-        let (mut f, session) = conversation();
-        let fork = uid(3);
-        f.apply_fork_created(fork, session, 0, ForkMode::Copy, "go".into(), 1_000);
-        f.apply_fork_status(fork, AgentStatus::Idle, 2_000);
+    fn a_sub_session_never_appears_in_owed_deliveries() {
+        let (mut f, session) = session_forest();
+        let sub_session = uid(3);
+        f.apply_sub_session_created(sub_session, session, 0, SeedMode::Copy, "go".into(), 1_000);
+        f.apply_sub_session_status(sub_session, AgentStatus::Idle, 2_000);
         assert!(f.owed().is_empty());
     }
 
     #[test]
-    fn deleting_a_parent_fork_leaves_its_child_and_bounds_the_depth_walk() {
-        let (mut f, session) = conversation();
+    fn deleting_a_parent_sub_session_leaves_its_child_and_bounds_the_depth_walk() {
+        let (mut f, session) = session_forest();
         let parent = uid(3);
         let child = uid(4);
-        f.apply_fork_created(parent, session, 0, ForkMode::Copy, "go".into(), 1_000);
-        f.apply_fork_created(child, parent, 0, ForkMode::Copy, "go".into(), 2_000);
-        f.apply_fork_deleted(parent);
+        f.apply_sub_session_created(parent, session, 0, SeedMode::Copy, "go".into(), 1_000);
+        f.apply_sub_session_created(child, parent, 0, SeedMode::Copy, "go".into(), 2_000);
+        f.apply_sub_session_deleted(parent);
         assert!(
-            f.fork(child).is_some(),
-            "a child fork is its own conversation"
+            f.sub_session(child).is_some(),
+            "a child sub_session is its own session"
         );
-        // The chain above it is gone, so this is as deep as it can be said to be.
+        // The chain above it is gone, so this is as deep as it can be said to
+        // be.
         assert_eq!(f.depth_of_agent(child), Some(1));
     }
 
     #[test]
     fn the_forest_round_trips_through_serde() {
-        let (mut f, session) = conversation();
+        let (mut f, session) = session_forest();
         let sub = uid(2);
         f.apply_sub_spawned(sub, session, "x".into(), "t".into(), None, 100);
         let run = RunId(uid(7));
         f.apply_run_created(run, sub, "deploy".into(), graph("deploy"), 500);
-        f.apply_fork_created(uid(3), session, 0, ForkMode::Summary, "go".into(), 600);
+        f.apply_sub_session_created(uid(3), session, 0, SeedMode::Summary, "go".into(), 600);
         let json = serde_json::to_value(&f).unwrap();
         let back: RunForest = serde_json::from_value(json).unwrap();
         assert_eq!(back, f);

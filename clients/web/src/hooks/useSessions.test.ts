@@ -1,12 +1,12 @@
 import { QueryClient } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
-import type { ForkView, ListSessionsResponse, SessionSummary } from "../api/types";
+import type { SubSessionView, ListSessionsResponse, SessionSummary } from "../api/types";
 import { SessionStatusKind } from "../api/types";
 import { applySessionList, qk } from "./useSessions";
 
 vi.mock("../api/client", () => ({ api: { sessions: {} } }));
 
-function fork(id: string, title?: string): ForkView {
+function subSession(id: string, title?: string): SubSessionView {
   return {
     id,
     title,
@@ -22,7 +22,7 @@ function session(id: string, over: Partial<SessionSummary> = {}): SessionSummary
     status: SessionStatusKind.Idle,
     createdAt: 1,
     annotations: [],
-    forks: [],
+    subSessions: [],
     ...over,
   };
 }
@@ -45,7 +45,7 @@ describe("a session-list frame", () => {
     expect(held?.sessions[0].name).toBe("renamed");
   });
 
-  it("carries a new fork without a refetch", () => {
+  it("carries a new subSession without a refetch", () => {
     // What the three per-field frames existed to do, now falling out of the
     // list itself: no invalidation, so no round trip.
     const client = new QueryClient();
@@ -54,11 +54,11 @@ describe("a session-list frame", () => {
 
     applySessionList(
       client,
-      list(session("s1", { forks: [fork("f1", "The other direction")] })),
+      list(session("s1", { subSessions: [subSession("f1", "The other direction")] })),
     );
 
     const held = client.getQueryData<ListSessionsResponse>(qk.sessions);
-    expect(held?.sessions[0].forks).toEqual([fork("f1", "The other direction")]);
+    expect(held?.sessions[0].subSessions).toEqual([subSession("f1", "The other direction")]);
     expect(invalidate).not.toHaveBeenCalled();
   });
 
@@ -82,12 +82,12 @@ describe("a session-list frame", () => {
     client.setQueryData(qk.sessions, list(session("s1")));
     client.setQueryData(qk.session("s1"), { session: session("s1") });
 
-    applySessionList(client, list(session("s1", { forks: [fork("f1")] })));
+    applySessionList(client, list(session("s1", { subSessions: [subSession("f1")] })));
 
     const detail = client.getQueryData<{ session: SessionSummary }>(
       qk.session("s1"),
     );
-    expect(detail?.session.forks).toEqual([fork("f1")]);
+    expect(detail?.session.subSessions).toEqual([subSession("f1")]);
   });
 
   it("leaves a detail it holds nothing for alone", () => {

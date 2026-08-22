@@ -1,13 +1,13 @@
 
 import { AskLifecycle } from './askLifecycle';
 import { CompactionSkippedLifecycle } from './compactionSkippedLifecycle';
-import { ForkLifecycle } from './forkLifecycle';
 import { PreparingLifecycle } from './preparingLifecycle';
 import { QueuedLifecycle } from './queuedLifecycle';
 import { RuntimeLifecycle } from './runtimeLifecycle';
 import { SessionFailedLifecycle } from './sessionFailedLifecycle';
 import { StepLifecycle } from './stepLifecycle';
 import { SubAgentLifecycle } from './subAgentLifecycle';
+import { SubSessionLifecycle } from './subSessionLifecycle';
 import { TaskListLifecycle } from './taskListLifecycle';
 import { TurnBeganLifecycle } from './turnBeganLifecycle';
 import { TurnEndedLifecycle } from './turnEndedLifecycle';
@@ -27,7 +27,7 @@ export type LifecycleEvent =
   | { kind: "TurnEnded"; value: TurnEndedLifecycle }
   | { kind: "AskRecorded"; value: AskLifecycle }
   | { kind: "SubAgent"; value: SubAgentLifecycle }
-  | { kind: "Forked"; value: ForkLifecycle }
+  | { kind: "SubSession"; value: SubSessionLifecycle }
   | { kind: "Step"; value: StepLifecycle }
   | { kind: "TaskList"; value: TaskListLifecycle }
   | { kind: "SessionFailed"; value: SessionFailedLifecycle }

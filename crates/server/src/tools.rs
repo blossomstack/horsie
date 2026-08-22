@@ -43,8 +43,8 @@ pub const GROUP_SESSION: &str = "session";
 pub const GROUP_AUTHORING: &str = "authoring";
 pub const GROUP_CONTROL: &str = "control";
 
-/// The prefix every control-plane tool carries. Mirrors `control::toolbox`'s own
-/// constant, which is private to that module.
+/// The prefix every control-plane tool carries. Mirrors `control::toolbox`'s
+/// own constant, which is private to that module.
 const CONTROL_PREFIX: &str = "horsie_";
 
 /// One row of the static table, before the generated control group is appended.
@@ -70,9 +70,9 @@ const fn write(name: &'static str, description: &'static str) -> Row {
     }
 }
 
-/// `bash` is `Write` because it can be, not because it always is. Same reasoning
-/// puts `set_working_dir` and `set_env` here: they change what every later call
-/// resolves against, which is a side effect that outlives the call.
+/// `bash` is `Write` because it can be, not because it always is. Same
+/// reasoning puts `set_working_dir` and `set_env` here: they change what every
+/// later call resolves against, which is a side effect that outlives the call.
 const RUNTIME: &[Row] = &[
     write("bash", "Run a shell command in the session's runtime."),
     read("read_file", "Read a file, optionally a line range of it."),
@@ -110,7 +110,7 @@ const TIMERS: &[Row] = &[
 
 /// Both ways of handing work to another agent, which is why they are one group
 /// rather than "subagents" plus a stray. They differ only in where the result
-/// goes: a subagent reports back to whoever spawned it, a conversation talks to
+/// goes: a subagent reports back to whoever spawned it, a session talks to
 /// the person and never reports back at all.
 const DELEGATION: &[Row] = &[
     write(
@@ -119,8 +119,8 @@ const DELEGATION: &[Row] = &[
     ),
     read("subagent_status", "Check on a spawned subagent."),
     write(
-        "spawn_conversation",
-        "Hand work to a second conversation the user steers themselves.",
+        "spawn_subsession",
+        "Hand work to a second session the user steers themselves.",
     ),
 ];
 
@@ -196,10 +196,10 @@ fn group(
 /// routes are built from, so a resource added there appears here without anyone
 /// remembering to add it.
 ///
-/// One tool per resource, each taking an `action`, so a resource is `Read` only
-/// when every action it exposes to the model is a `Get`. In practice that is
-/// none of them — which is the honest answer, since `horsie_sessions` can create
-/// a session.
+/// One tool per resource, each taking an `action`, so a resource is `Read`
+/// only when every action it exposes to the model is a `Get`. In practice that
+/// is none of them — which is the honest answer, since `horsie_sessions` can
+/// create a session.
 fn control_group() -> ToolGroupView {
     let mut by_resource: Vec<(&'static str, bool)> = Vec::new();
     for operation in crate::control::operations()
@@ -343,9 +343,9 @@ pub fn default_set() -> HashSet<String> {
 /// The tools a selection permits.
 ///
 /// `None` is the default set rather than "everything", which is what stops an
-/// unset field from handing out the control plane. A caller that genuinely wants
-/// no tools passes `Some(&[])` — a distinction the wire keeps because absent and
-/// empty are different values there.
+/// unset field from handing out the control plane. A caller that genuinely
+/// wants no tools passes `Some(&[])` — a distinction the wire keeps because
+/// absent and empty are different values there.
 #[must_use]
 pub fn resolve(selection: Option<&[String]>) -> HashSet<String> {
     match selection {
@@ -459,7 +459,7 @@ mod tests {
             crate::agent_loop::TASK_LIST_TOOL,
             crate::sessions::spawn_tool::SPAWN_AGENT_TOOL,
             crate::sessions::spawn_tool::SUBAGENT_STATUS_TOOL,
-            crate::sessions::conversation_tool::SPAWN_CONVERSATION_TOOL,
+            crate::sessions::sub_session_tool::SPAWN_SUBSESSION_TOOL,
             crate::sessions::invoke_workflow_tool::INVOKE_WORKFLOW_TOOL,
             crate::sessions::invoke_workflow_tool::WORKFLOW_STATUS_TOOL,
             crate::sessions::title_tool::SET_SESSION_TITLE_TOOL,

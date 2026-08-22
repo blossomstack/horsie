@@ -7,7 +7,7 @@
 //!
 //! **Never asks what kind of session it is in.** Every query it makes spans the
 //! whole forest, which is what makes a workflow step's subagents work through
-//! the identical code path a conversation's use. The previous shape put the tree
+//! the identical code path a session's use. The previous shape put the tree
 //! inside the session's mode and every read silently answered empty for a run.
 
 use super::component::Component;
@@ -213,23 +213,23 @@ impl SessionActor {
             TurnEnd::Parked => {
                 return self.persist_and_advance(state, Vec::new(), ctx).await;
             }
-            // A subagent's interruption is repaired from the forest at *session*
-            // load, by `SubAgents::on_load`, which is also where the parent is
-            // owed the failure. This report cannot arrive first: a subagent
-            // actor stays cold and spawns on demand, so its own recovery runs
-            // long after the node was reconciled, and acting on it would fail
-            // the same node a second time.
+            // A subagent's interruption is repaired from the forest at
+            // *session* load, by `SubAgents::on_load`, which is also where the
+            // parent is owed the failure. This report cannot arrive first: a
+            // subagent actor stays cold and spawns on demand, so its own
+            // recovery runs long after the node was reconciled, and acting on
+            // it would fail the same node a second time.
             TurnEnd::Interrupted => return CommandEffect::none(),
         };
         self.persist_and_advance(state, vec![terminal], ctx).await
     }
     /// Spawn a resident subagent actor — journal replay only; the caller
-    /// decides whether a run starts (spawn) or not (recovery).
-    /// Spawn one subagent's actor. `agent_type` names a plugin-declared agent to
-    /// run as, and travels no further than the provider: the *definition* is
-    /// resolved from the library scan when the subagent runs, so an agent whose
-    /// plugin was removed in between fails loudly rather than running with a
-    /// prompt nobody can point at.
+    /// decides whether a run starts (spawn) or not (recovery). Spawn one
+    /// subagent's actor. `agent_type` names a plugin-declared agent to run as,
+    /// and travels no further than the provider: the *definition* is resolved
+    /// from the library scan when the subagent runs, so an agent whose plugin
+    /// was removed in between fails loudly rather than running with a prompt
+    /// nobody can point at.
     pub(super) fn spawn_sub_agent_actor(
         &mut self,
         ctx: &ActorContext<SessionInbox>,
@@ -239,7 +239,7 @@ impl SessionActor {
     ) -> Option<ActorRef<AgentCommand>> {
         // Derived from the node's stored parent: a cold node woken to run must
         // run under the same settings its tree root ran under — a workflow
-        // step's spawns under the step's preset, a conversation's under the
+        // step's spawns under the step's preset, a session's under the
         // main agent's — never a fabricated session-wide value.
         let settings = self.effective_settings(state, AgentKey::Sub(id)).cloned()?;
         self.spawn_agent(
@@ -258,7 +258,7 @@ impl SessionActor {
 
 impl Component for SubAgents {
     /// Deliver every result a child owes its parent. Reads the forest, so it
-    /// works in a run exactly as in a conversation — and it never asks which it
+    /// works in a run exactly as in a session — and it never asks which it
     /// is in.
     fn actions(state: &SessionState) -> Vec<AgentAction> {
         crate::sessions::orchestrator::owed_deliveries(state)
@@ -283,10 +283,11 @@ impl Component for SubAgents {
     /// Pure, and an associated function rather than a method: replay runs with
     /// no instance in scope, which is what makes a recovered session and a live
     /// one follow the same path.
-    // The fallthrough is unreachable by construction: `SessionActor::apply_event`
-    // matches every variant explicitly and routes each to exactly one component,
-    // so a newly added event fails to compile *there* — which is where it should
-    // be classified — rather than silently reaching the wrong fold here.
+    // The fallthrough is unreachable by construction:
+    // `SessionActor::apply_event` matches every variant explicitly and routes
+    // each to exactly one component, so a newly added event fails to compile
+    // *there* — which is where it should be classified — rather than silently
+    // reaching the wrong fold here.
     #[allow(clippy::wildcard_enum_match_arm)]
     fn apply(state: &mut SessionState, event: &SessionDomainEvent) {
         match event.clone() {
@@ -586,9 +587,10 @@ mod tests {
     /// Stop, addressed to a subagent.
     ///
     /// The child is cancelled *and* the parent is told, because the parent is
-    /// blocked on a `spawn_agent` result: stopping the child quietly would leave
-    /// it waiting for one that can never come. Reported as a failed child, which
-    /// is the shape crash recovery already delivers for the same situation.
+    /// blocked on a `spawn_agent` result: stopping the child quietly would
+    /// leave it waiting for one that can never come. Reported as a failed
+    /// child, which is the shape crash recovery already delivers for the same
+    /// situation.
     #[tokio::test]
     async fn stopping_a_subagent_cancels_it_and_tells_the_parent() {
         let provider = BlockingProvider::new();
@@ -822,9 +824,10 @@ mod tests {
         gate.release();
     }
 
-    /// The defect this change exists to close. A subagent spawned by a workflow
-    /// step used to have its completion dropped — `on_sub_agent_outcome` looked the
-    /// node up in the conversation's tree, which a run does not have.
+    /// The defect this change exists to close. A subagent spawned by a
+    /// workflow step used to have its completion dropped —
+    /// `on_sub_agent_outcome` looked the node up in the session's tree, which
+    /// a run does not have.
     #[tokio::test]
     async fn a_workflow_steps_subagent_completion_is_recorded() {
         let (_f, session, id, journal) = a_run_with_a_step_in_flight().await;
@@ -853,20 +856,21 @@ mod tests {
         );
     }
 
-    /// The aggregates a run used to answer as though it had no subagents at all.
+    /// The aggregates a run used to answer as though it had no subagents at
+    /// all.
     #[tokio::test]
     async fn a_runs_subagents_count_toward_the_session_wide_aggregates() {
-        // Blocks every call, so both the step and its subagent stay `Running` for
-        // as long as this test looks at them.
+        // Blocks every call, so both the step and its subagent stay `Running`
+        // for as long as this test looks at them.
         let provider = BlockingProvider::new();
         let (_f, session, id, journal) = spawn_run_with_provider(provider).await;
         wait_for_run(&journal, id, |r| r.current().is_some()).await;
         let sub = spawn_sub(&session, "slow", "work").await;
         wait_for_tree(&journal, id, |f| f.sub(sub).is_some()).await;
 
-        // While it runs, the session is busy. This is what stops the supervisor
-        // unloading a run out from under a step's subagent — `has_active` answered
-        // false for every run before the forest.
+        // While it runs, the session is busy. This is what stops the
+        // supervisor unloading a run out from under a step's subagent —
+        // `has_active` answered false for every run before the forest.
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
         assert!(
             state.forest.has_active_subs(),
@@ -888,9 +892,10 @@ mod tests {
         );
     }
 
-    /// A nested subagent's result reaches its parent inside a run. Delivery used to
-    /// live only in `InteractiveOrchestrator`, so it never ran for a workflow;
-    /// `wake_owed_parents` now reads the forest and the run driver calls it.
+    /// A nested subagent's result reaches its parent inside a run. Delivery
+    /// used to live only in `InteractiveOrchestrator`, so it never ran for a
+    /// workflow; `wake_owed_parents` now reads the forest and the run driver
+    /// calls it.
     #[tokio::test]
     async fn a_nested_subagents_result_wakes_its_parent_inside_a_run() {
         let (_f, session, id, journal) = a_run_with_a_step_in_flight().await;
@@ -1029,7 +1034,7 @@ mod tests {
             subagent_texts(&main_history(&session).await)
                 .iter()
                 .all(|t| !t.contains("\"lead\"")),
-            "no early report reaches the parent conversation"
+            "no early report reaches the parent session"
         );
 
         // The child ends (stopped here, which is one of the ways); its result

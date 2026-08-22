@@ -73,8 +73,8 @@ pub struct AgentSettings {
     /// pre-memory journal rows deserialize.
     #[serde(default)]
     pub memory_spaces: Vec<String>,
-    /// Canonical thinking effort chosen at session creation. `#[serde(default)]`
-    /// so pre-thinking journal rows deserialize.
+    /// Canonical thinking effort chosen at session creation.
+    /// `#[serde(default)]` so pre-thinking journal rows deserialize.
     #[serde(default)]
     pub thinking_effort: Option<String>,
     /// Cap on concurrently-active subagents. `#[serde(default)]` so
@@ -163,7 +163,7 @@ pub enum SessionOrigin {
 /// session's.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SessionKind {
-    /// A conversation: one main agent under these settings, and its forks.
+    /// A session: one main agent under these settings, and its sub sessions.
     Agent { settings: AgentSettings },
     /// A run of a workflow. No main agent — the definition decides who runs —
     /// and each step carries its own settings in the snapshot.
@@ -255,7 +255,7 @@ impl SessionSpec {
     }
 
     /// The workflow this session is a run of, snapshotted at creation: the
-    /// graph and each step's resolved preset. `None` for every conversation.
+    /// graph and each step's resolved preset. `None` for every session.
     pub fn workflow_run(&self) -> Option<&Arc<crate::sessions::workflow::WorkflowRunSpec>> {
         match &self.kind {
             SessionKind::Agent { .. } => None,
@@ -294,9 +294,9 @@ pub enum SessionStatus {
     Running,
     /// A workflow run reached a terminal step with no error.
     ///
-    /// Not terminal for the session: a retry, a fork or a new message moves it
-    /// back to `Running`. `Unrecoverable` is the only status a session cannot
-    /// leave. Unreachable for a conversation, which is never over.
+    /// Not terminal for the session: a retry, a sub session or a new message
+    /// moves it back to `Running`. `Unrecoverable` is the only status a
+    /// session cannot leave. Unreachable for a session, which is never over.
     Finished,
     /// Parked on one or more questions.
     ///
@@ -315,9 +315,9 @@ pub enum SessionStatus {
     /// failed turn *has* a runtime and can simply run again, while this one has
     /// none and must build one first.
     ///
-    /// Safe to re-attempt for the same reason `Provisioning` is: a session whose
-    /// create never succeeded has never run a turn, so there is no work in a
-    /// workspace for a rebuild to destroy.
+    /// Safe to re-attempt for the same reason `Provisioning` is: a session
+    /// whose create never succeeded has never run a turn, so there is no work
+    /// in a workspace for a rebuild to destroy.
     ProvisioningFailed {
         reason: String,
     },
@@ -361,7 +361,8 @@ pub fn status_reason(s: &SessionStatus) -> Option<String> {
     }
 }
 
-/// Process-wide dependencies injected into every [`crate::sessions::session_actor::SessionActor`].
+/// Process-wide dependencies injected into every
+/// [`crate::sessions::session_actor::SessionActor`].
 #[derive(Clone)]
 pub struct ServerDeps {
     /// Runtime lifecycle, owned server-side. The actors ask it for a client
@@ -518,7 +519,7 @@ mod tests {
         assert!(loaded.is_unattended());
     }
 
-    /// The kind is the whole of what differs between a conversation and a run:
+    /// The kind is the whole of what differs between a session and a run:
     /// the shared fields are identical, and neither shape fabricates the
     /// other's. In particular there is no workflow constructor that also
     /// carries an `AgentSettings`.

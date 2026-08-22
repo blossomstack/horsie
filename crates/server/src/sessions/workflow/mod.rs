@@ -309,7 +309,7 @@ mod tests {
         assert_eq!(s.current_agent(), Some(Uuid::from_u128(0)));
         s.apply_concluded(0, Value::Null, 200);
         // Between steps nothing is in flight, so a spawn would belong to the
-        // conversation's tree — which is exactly why a run must never be
+        // session's tree — which is exactly why a run must never be
         // between steps while one of its agents can spawn.
         assert_eq!(s.current_agent(), None);
         started(&mut s, "b", 1, Some(0));

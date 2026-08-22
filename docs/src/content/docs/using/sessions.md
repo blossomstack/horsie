@@ -81,7 +81,7 @@ Beside the composer:
 - **Status** — a lamp and the word for it: provisioning, idle, running,
   awaiting input, finished, failed, or unrecoverable. A workflow run is a
   session, so it uses these same words; **finished** is the one only a run
-  reaches, since a conversation is never over.
+  reaches, since a session is never over.
 - **Tokens** — a running total for the session. This is cumulative usage, not
   how full the context window is; open it for the context meter and the
   per-turn breakdown.
@@ -98,7 +98,7 @@ delegated without scrolling for it.
 
 The top lane is the main agent, one bar per entry — what you said, what it
 thought, each tool call, each answer — coloured by kind and as wide as it took.
-Subagents and forked conversations get their own lanes below, each running from
+Subagents and sub sessions get their own lanes below, each running from
 the moment it branched off to the last thing it did.
 
 Names sit in a sidebar down the left, indented under whatever spawned them, and
@@ -168,23 +168,23 @@ resume on top.
 You do not need the tab open for work to continue — the run happens on the
 server. Opening an idle session to read it does not wake its runtime.
 
-## Branch a conversation
+## Branch a session
 
-A conversation reaches a point where two directions are worth trying, or where
+A session reaches a point where two directions are worth trying, or where
 the context is full of settled work and the next thing is different. Type
-`/fork` with what you want done next, and horsie starts a second conversation
-inside the same session:
+`/fork` with what you want done next, and horsie starts a **sub session**
+under it:
 
 ```
 /fork try the same migration with a materialised view instead
 ```
 
 You land in it straight away. It carries everything said up to that point, and
-it shares the session's workspace — the same checkout, the same uncommitted
+it shares the parent's workspace — the same checkout, the same uncommitted
 edits — so it can pick up exactly where the first one was.
 
-`/summary-n-fork` does the same, but seeds the new conversation with a *summary*
-of the old one rather than the whole history:
+`/summary-n-fork` does the same, but seeds the sub session with a *summary*
+of the parent rather than the whole history:
 
 ```
 /summary-n-fork now write the migration guide
@@ -194,27 +194,27 @@ Use it when the detail is settled and only the conclusions matter. It starts
 with a much smaller context, so it has more room to work in — at the cost of
 being unable to scroll back into what it came from.
 
-The original conversation is never changed by either. It gets a marker where the
-branch happened, linking to the conversation that left.
+The parent is never changed by either. It gets a marker where the branch
+happened, linking to the sub session that left.
 
-A fork is a full conversation: it can ask you questions, spawn its own
-subagents, and be forked again. It names itself once the direction is clear, and
-appears in the rail nested under the session it belongs to, with its own status
-lamp. Forking a fork nests one level deeper.
+A sub session is a session in every way that matters: it can ask you questions,
+spawn its own subagents, and be branched again. It names itself once the
+direction is clear, and appears in the rail nested under the session it belongs
+to, with its own status lamp. Branching a sub session nests one level deeper.
 
 The agent can also start one on its own, without waiting to be asked. Its
-`spawn_conversation` tool hands a *task* to a new conversation — no copy, no
+`spawn_subsession` tool hands a *task* to a sub session — no copy, no
 summary. The agent already knows the context, so it writes the brief itself, the
 same way it writes one for a subagent. When the work splits into a direction you
-will want to steer separately, it can give that direction its own conversation
+will want to steer separately, it can give that direction its own sub session
 and carry on with the rest.
 
-The new conversation appears in the rail the moment it exists, shares the
-workspace like any other fork, and starts on the brief and nothing else — so it
-is yours to talk to from the first message. The agent hears nothing back from it.
+The sub session appears in the rail the moment it exists, shares the workspace
+like any other, and starts on the brief and nothing else — so it is yours to
+talk to from the first message. The agent hears nothing back from it.
 
-Nothing ever removes a fork on its own. Delete one from its menu in the rail
-when you are done with it; deleting the session removes its forks too.
+Nothing ever removes a sub session on its own. Delete one from its menu in the
+rail when you are done with it; deleting a session removes its sub sessions too.
 
 ## Stop, or delete
 
@@ -233,5 +233,5 @@ click anything. From it you can search by name, create a session, and reach
 becomes a drawer behind the menu button.
 
 Runs started by a [routine](/using/routines/) are listed on that routine's own
-page instead, so a job on a fifteen-minute timer cannot bury the conversations
+page instead, so a job on a fifteen-minute timer cannot bury the sessions
 you are actually having.

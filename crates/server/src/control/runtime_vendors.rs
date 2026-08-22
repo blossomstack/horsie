@@ -11,9 +11,9 @@ use horsie_models::runtime_vendor::RuntimeVendorConfigInput;
 use std::sync::Arc;
 
 /// `name_in_use` is the envelope code these routes have always answered with,
-/// and a client branching on it must keep working — which is why this is spelled
-/// out here rather than folded into the `duplicate`/`conflict` macro in
-/// [`crate::control`].
+/// and a client branching on it must keep working — which is why this is
+/// spelled out here rather than folded into the `duplicate`/`conflict` macro
+/// in [`crate::control`].
 fn control_error(e: VendorConfigError) -> ControlError {
     match e {
         VendorConfigError::NotFound(m) => ControlError::NotFound(m),
@@ -49,7 +49,7 @@ impl Resource for RuntimeVendors {
             ),
             // Api-only: `RuntimeVendorConfigInput.credential` carries the
             // vendor's substrate token, and a tool schema is an invitation for
-            // the model to invent one and put it in a conversation transcript.
+            // the model to invent one and put it in a session transcript.
             // A human types this on the settings page.
             op(
                 "save",

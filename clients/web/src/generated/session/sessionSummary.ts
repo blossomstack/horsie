@@ -1,7 +1,7 @@
 
 import { AnnotationEntry } from './annotationEntry';
-import { ForkView } from './forkView';
 import { SessionStatusKind } from './sessionStatusKind';
+import { SubSessionView } from './subSessionView';
 export interface SessionSummary {
   id: string;
   name?: string;
@@ -23,10 +23,10 @@ export interface SessionSummary {
    */
   annotations: AnnotationEntry[];
   /**
-   * The conversations forked out of this session, so a list can nest them
+   * The sub sessions branched out of this session, so a list can nest them
    * under it. Flat and parent-linked rather than already nested, because the
    * registry holds it flat — and answered from that registry, so listing
    * sessions still loads none of them.
    */
-  forks: ForkView[];
+  subSessions: SubSessionView[];
 }

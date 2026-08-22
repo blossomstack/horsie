@@ -16,8 +16,8 @@ export interface AgentSettings {
    * Naming a `horsie_*` tool is the whole authorisation for the control
    * plane: authority over this server is asked for, never inherited from a
    * field left unset. Only the main agent gets those tools — subagents,
-   * forks and workflow steps inherit the selection but not the authority,
-   * the same rule that keeps session-metadata tools off them.
+   * sub sessions and workflow steps inherit the selection but not the
+   * authority, the same rule that keeps session-metadata tools off them.
    */
   allowedTools?: string[];
   usePlugins?: boolean;

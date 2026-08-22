@@ -328,7 +328,7 @@ fn scoped() -> Router<AppState> {
         .route("/sessions/{id}/answers", post(handlers::answer_asks))
         .route(
             "/sessions/{id}/agents/{agent_id}",
-            get(handlers::get_agent).delete(handlers::delete_fork),
+            get(handlers::get_agent).delete(handlers::delete_sub_session),
         )
         .route(
             "/sessions/{id}/messages",
@@ -440,8 +440,9 @@ pub fn app(state: AppState) -> Router {
     match web_dir {
         // Serve the built UI: hashed assets and favicon from disk, and every
         // other (non-`/api`) path to index.html with a 200 so client-side
-        // routes like `/sessions/:id` survive a hard refresh. Using `ServeFile`
-        // as the fallback (rather than `not_found_service`) keeps the status 200.
+        // routes like `/sessions/:id` survive a hard refresh. Using
+        // `ServeFile` as the fallback (rather than `not_found_service`) keeps
+        // the status 200.
         Some(dir) => api
             .nest_service("/assets", ServeDir::new(dir.join("assets")))
             .route_service("/favicon.svg", ServeFile::new(dir.join("favicon.svg")))
@@ -557,8 +558,8 @@ mod tests {
         )
     }
 
-    /// Publish a fake vendor process as `mock` in the state's anonymous account,
-    /// which is who every unauthenticated request resolves to.
+    /// Publish a fake vendor process as `mock` in the state's anonymous
+    /// account, which is who every unauthenticated request resolves to.
     async fn publish_mock_vendor(state: &AppState) {
         let agent = FakeRuntimeVendor::builder("mock")
             .serve_in_process()
@@ -667,9 +668,10 @@ mod tests {
     /// The contract every *created* named resource on this API keeps.
     ///
     /// `POST /api/thing` to create, `GET|PUT|DELETE /api/thing/{name}` to work
-    /// on one. Four resources answer to exactly this, and used to say so in four
-    /// hundred-line tests that each asserted ten behaviours in sequence — where
-    /// the first failure hid the nine after it and reported only a status code.
+    /// on one. Four resources answer to exactly this, and used to say so in
+    /// four hundred-line tests that each asserted ten behaviours in sequence —
+    /// where the first failure hid the nine after it and reported only a
+    /// status code.
     ///
     /// Not every resource is in here, and that is the point of a contract: the
     /// runtime-vendor and MCP-server routes are `PUT`-upsert with no `POST` and
@@ -865,9 +867,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
-        // A fork answers with the conversation to open. camelCase on the wire —
-        // a snake_case key here would read as absent and the assert would pass
-        // for the wrong reason, so this reads the raw JSON.
+        // A sub session answers with the session to open. camelCase on the
+        // wire — a snake_case key here would read as absent and the assert
+        // would pass for the wrong reason, so this reads the raw JSON.
         let res = app
             .clone()
             .oneshot(post_json(
@@ -887,16 +889,17 @@ mod tests {
             String::from_utf8_lossy(&raw)
         );
         let ack: serde_json::Value = serde_json::from_slice(&raw).unwrap();
-        let fork = ack["forkedAgent"]
+        let sub_session = ack["subSession"]
             .as_str()
-            .expect("a fork command answers with the agent to open")
+            .expect("a sub session command answers with the agent to open")
             .to_string();
         assert!(
-            uuid::Uuid::parse_str(&fork).is_ok(),
-            "{fork} is an agent id"
+            uuid::Uuid::parse_str(&sub_session).is_ok(),
+            "{sub_session} is an agent id"
         );
 
-        // An ordinary message carries no fork, so a client never redirects.
+        // An ordinary message carries no sub session, so a client never
+        // redirects.
         let res = app
             .clone()
             .oneshot(post_json(
@@ -906,9 +909,9 @@ mod tests {
             .await
             .unwrap();
         let ack: serde_json::Value = read_json(res).await;
-        assert!(ack["forkedAgent"].is_null(), "{ack}");
+        assert!(ack["subSession"].is_null(), "{ack}");
 
-        // The fork lists under its session, from the registry.
+        // The sub session lists under its session, from the registry.
         let res = app.clone().oneshot(get(&t.url("/sessions"))).await.unwrap();
         let list: ListSessionsResponse = read_json(res).await;
         let row = list
@@ -917,24 +920,32 @@ mod tests {
             .find(|s| s.id == id)
             .expect("the session");
         assert!(
-            row.forks.iter().any(|f| f.id == fork),
-            "the fork is listed under its session: {:?}",
-            row.forks
+            row.sub_sessions.iter().any(|f| f.id == sub_session),
+            "the sub_session is listed under its session: {:?}",
+            row.sub_sessions
         );
 
         // And can be removed, but only because somebody asked.
         let res = app
             .clone()
-            .oneshot(delete(&t.url(&format!("/sessions/{id}/agents/{fork}"))))
+            .oneshot(delete(
+                &t.url(&format!("/sessions/{id}/agents/{sub_session}")),
+            ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let res = app
             .clone()
-            .oneshot(delete(&t.url(&format!("/sessions/{id}/agents/{fork}"))))
+            .oneshot(delete(
+                &t.url(&format!("/sessions/{id}/agents/{sub_session}")),
+            ))
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::NOT_FOUND, "a fork goes once");
+        assert_eq!(
+            res.status(),
+            StatusCode::NOT_FOUND,
+            "a sub_session goes once"
+        );
 
         // A message is always accepted: an unregistered model is a *turn*
         // failure the session reports later, not a rejection at the door.
@@ -970,8 +981,8 @@ mod tests {
     }
 
     /// The endpoints reject what they should before ever reaching OpenAI. The
-    /// approved-login path is covered in `config::chatgpt_login`, against a fake
-    /// issuer — there is nothing for an HTTP test to add to it.
+    /// approved-login path is covered in `config::chatgpt_login`, against a
+    /// fake issuer — there is nothing for an HTTP test to add to it.
     #[tokio::test]
     async fn chatgpt_login_rejects_unknown_and_non_chatgpt_providers() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1875,7 +1886,8 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
-        // Upsert a bearer server; the token is redacted to `has_token` in the view.
+        // Upsert a bearer server; the token is redacted to `has_token` in the
+        // view.
         let body = serde_json::json!({
             "name": "acme",
             "url": "http://127.0.0.1:0/",
@@ -2273,9 +2285,10 @@ mod tests {
             .await
             .expect("dial");
 
-        // The announcement lands on the topic the *token* names, which bounds the
-        // negative assertion below on something real rather than on a sleep: by
-        // the time `mine` has the frame, the pump has already routed it.
+        // The announcement lands on the topic the *token* names, which bounds
+        // the negative assertion below on something real rather than on a
+        // sleep: by the time `mine` has the frame, the pump has already routed
+        // it.
         let landed = tokio::time::timeout(std::time::Duration::from_secs(5), mine.recv())
             .await
             .expect("the token's own runtime must hear the announcement")
@@ -2601,7 +2614,8 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
 
-        // ...and reports an authenticated status that admits the generated password.
+        // ...and reports an authenticated status that admits the generated
+        // password.
         let res = app
             .clone()
             .oneshot(get_with_cookie("/api/auth/status", &cookie))
@@ -3597,7 +3611,8 @@ mod tests {
             StatusCode::OK
         );
 
-        // Refresh rotates, unauthenticated (the refresh token is the credential).
+        // Refresh rotates, unauthenticated (the refresh token is the
+        // credential).
         let res = app
             .clone()
             .oneshot(post_json(

@@ -6,7 +6,7 @@ import { formatDuration } from "../lib/time";
 
 /** A finished subagent's report, in the same visual grammar as a tool call —
  * because that is what it is to the reader: a piece of machine work the agent
- * set going, not a turn in the conversation. It arrives on the wire inside a
+ * set going, not a turn in the session. It arrives on the wire inside a
  * user message, and rendering it as one made a delegating session read as if
  * the person kept pasting reports to themselves.
  *

@@ -175,7 +175,7 @@ async fn run_workflow(
         created_at,
         annotations: Default::default(),
         status: SessionStatus::Idle,
-        forks: Vec::new(),
+        sub_sessions: Vec::new(),
     };
     Ok(WorkflowRunResponse {
         session: handlers::summary(&id, &rec),

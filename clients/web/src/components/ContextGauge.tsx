@@ -29,7 +29,7 @@ function UsageBreakdown({ usage }: { usage: Usage | UsageView }) {
       <StatRow
         label="Input"
         value={compactNumber(usage.inputTokens)}
-        hint="Full prompt tokens: system prompt, tool definitions, and the conversation history so far. Cache reads/writes below are included in this total, not additional."
+        hint="Full prompt tokens: system prompt, tool definitions, and the session history so far. Cache reads/writes below are included in this total, not additional."
       />
       <StatRow
         label="Output"

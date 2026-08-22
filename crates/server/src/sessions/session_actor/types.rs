@@ -2,13 +2,15 @@
 //! records having done, and what it knows as a result.
 //!
 //! Split out from the actor for one reason — every component names these, and
-//! none of them names the actor. Keeping the commands, the events and the folded
-//! state together also puts the three halves of the event-sourcing contract in
-//! one place: a command decides, an event records, the state is their fold.
+//! none of them names the actor. Keeping the commands, the events and the
+//! folded state together also puts the three halves of the event-sourcing
+//! contract in one place: a command decides, an event records, the state is
+//! their fold.
 //!
 //! Nothing here has behaviour beyond `Display`. The decisions live in the
-//! components, the fold lives in [`SessionActor::apply_event`](super::SessionActor::apply_event),
-//! and this file stays readable as a description of the domain.
+//! components, the fold lives in
+//! [`SessionActor::apply_event`](super::SessionActor::apply_event), and this
+//! file stays readable as a description of the domain.
 
 use crate::agent_loop::{AgentOutcome, AgentUsageSnapshot, UsageTotal};
 /// Answering belongs to the agent that asked, so its vocabulary lives with the
@@ -17,7 +19,7 @@ use crate::agent_loop::{AgentOutcome, AgentUsageSnapshot, UsageTotal};
 pub use crate::agent_loop::{AnswerError, AskAnswer};
 use crate::sessions::{
     UserMessageError,
-    run_forest::{ForkMode, RunForest, RunId, RunState, TurnPhase},
+    run_forest::{RunForest, RunId, RunState, SeedMode, TurnPhase},
     spec::{AgentSettings, SessionSpec, SessionStatus},
     workflow::{WorkflowRunSpec, WorkflowRunStatus},
 };
@@ -34,23 +36,23 @@ use uuid::Uuid;
 pub enum SessionCommand {
     /// Getting and releasing this session's sandbox.
     Lifecycle(LifecycleCommand),
-    /// The conversation: what a person sends and how a turn ends.
+    /// The session: what a person sends and how a turn ends.
     Turn(TurnCommand),
     /// The workflow graph, when this session is a run.
     Run(RunCommand),
     /// The tree of delegated work.
     SubAgent(SubAgentCommand),
-    /// Branching a conversation into a second one inside this session.
-    Fork(ForkCommand),
+    /// Branching a session into a second one inside this session.
+    SubSession(SubSessionCommand),
     /// Questions answered without waking anything.
     Read(ReadCommand),
     /// What plugin hooks did, routed to the agent it happened to.
     Hooks(HookCommand),
     /// The session's own bookkeeping: its title, and preparation progress.
     Core(CoreCommand),
-    /// Internal: an agent reported its terminal outcome. Top-level because it is
-    /// the one command routed by *identity* rather than by variant — which agent
-    /// sent it decides which component answers.
+    /// Internal: an agent reported its terminal outcome. Top-level because it
+    /// is the one command routed by *identity* rather than by variant — which
+    /// agent sent it decides which component answers.
     AgentOutcome(AgentOutcome),
 }
 
@@ -84,7 +86,7 @@ pub enum LifecycleCommand {
     Delete { reply: ReplyTo<()> },
 }
 
-/// The conversation.
+/// The session.
 #[derive(Serialize, Deserialize)]
 pub enum TurnCommand {
     /// A message for one of this session's agents. Always accepted: the agent
@@ -103,7 +105,7 @@ pub enum TurnCommand {
     /// Cancel one agent's turn in flight. Queued messages are *not* discarded —
     /// stop means "not this turn", not "throw away what I asked for".
     ///
-    /// Addressed, never session-wide: a session hosts several conversations at
+    /// Addressed, never session-wide: a session hosts several sessions at
     /// once and each has its own turn, so "stop the session" named no single
     /// thing to cancel. `agent_id` is `"main"` or an agent's uuid, the same
     /// vocabulary every other agent-scoped request speaks.
@@ -211,81 +213,83 @@ pub enum SubAgentCommand {
 /// What accepting a message produced.
 ///
 /// More than the message's id because one message can do more than queue
-/// itself: `/fork` creates a conversation, and the client has to be told which
+/// itself: `/fork` creates a session, and the client has to be told which
 /// one to open. A field rather than a second endpoint, so every client that can
-/// send a message can fork without learning a new call.
+/// send a message can sub session without learning a new call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageAccepted {
     pub message_id: String,
-    /// The fork this message created. Absent for every ordinary message, which
-    /// is what makes the field additive.
-    pub forked_agent: Option<String>,
+    /// The sub session this message created. Absent for every ordinary
+    /// message, which is what makes the field additive.
+    pub sub_session: Option<String>,
 }
 
 impl MessageAccepted {
-    /// An ordinary message, which created no fork.
+    /// An ordinary message, which created no sub session.
     #[must_use]
     pub fn queued(message_id: String) -> Self {
         Self {
             message_id,
-            forked_agent: None,
+            sub_session: None,
         }
     }
 }
 
-/// Branching a conversation into a second one inside this session.
+/// Branching a session into a second one inside this session.
 ///
-/// A fork is a conversation, not delegated work: nothing here reports a result
-/// to anybody, and the only reply any of it carries is the fork's own id, which
-/// is what a client redirects to.
+/// A sub session is a session, not delegated work: nothing here reports a
+/// result to anybody, and the only reply any of it carries is the sub
+/// session's own id, which is what a client redirects to.
 #[derive(Serialize, Deserialize)]
-pub enum ForkCommand {
-    /// `/fork` or `/summary-n-fork`: branch the conversation of agent
-    /// `parent` — the main agent or another fork — and queue `message` in the
-    /// new fork so it has something to do when its seed lands.
+pub enum SubSessionCommand {
+    /// `/fork` or `/summary-n-fork`: branch the session of agent `parent` —
+    /// the main agent or another sub session — and queue `message` in the new
+    /// sub session so it has something to do when its seed lands.
     Create {
         parent: Uuid,
-        mode: ForkMode,
+        seed: SeedMode,
         message: String,
         reply: ReplyTo<Result<Uuid, String>>,
     },
-    /// Internal: the `ForkCreated` write came back — only now does the fork's
-    /// actor exist (persist-then-spawn, exactly as a subagent spawn does). A
-    /// failed write spawns nothing and the caller gets the error.
+    /// Internal: the `ForkCreated` write came back — only now does the sub
+    /// session's actor exist (persist-then-spawn, exactly as a subagent spawn
+    /// does). A failed write spawns nothing and the caller gets the error.
     FinishCreate {
         id: Uuid,
         reply: ReplyTo<Result<Uuid, String>>,
         persisted: Result<(), horsie_actor::JournalError>,
     },
-    /// Internal: the detached seeding task wrote the fork's initial state, so
-    /// the fork may run and the message waiting in its queue is released.
+    /// Internal: the detached seeding task wrote the sub session's initial
+    /// state, so the sub session may run and the message waiting in its queue
+    /// is released.
     Seeded { id: Uuid },
     /// Internal: the source agent's `/summary-n-fork` turn produced the summary
-    /// these forks were waiting on.
+    /// these sub sessions were waiting on.
     ///
-    /// A list because forks queued into one turn share a branch point, so one
-    /// provider call serves all of them.
+    /// A list because sub sessions queued into one turn share a branch point,
+    /// so one provider call serves all of them.
     Summarised {
-        forks: Vec<Uuid>,
+        sub_sessions: Vec<Uuid>,
         result: Result<String, String>,
     },
     /// Internal: the detached seeding task could not. Carries the reason
     /// verbatim, because that string is what the user is shown.
     SeedFailed { id: Uuid, error: String },
-    /// A fork's own `set_session_title` call. Renames the fork, never the
-    /// session — the model should not have to know which kind of conversation
-    /// it is in to name it.
+    /// A sub session's own `set_session_title` call. Renames the sub session,
+    /// never the session — the model should not have to know which kind of
+    /// session it is in to name it.
     SetTitle {
         id: Uuid,
         title: String,
         reply: ReplyTo<Result<String, String>>,
     },
-    /// Someone asked for this fork to go. Nothing ever removes one on its own.
+    /// Someone asked for this sub session to go. Nothing ever removes one on
+    /// its own.
     Delete {
         id: Uuid,
         reply: ReplyTo<Result<(), String>>,
     },
-    /// Internal: recovery found forks a dead process abandoned mid-seed.
+    /// Internal: recovery found sub sessions a dead process abandoned mid-seed.
     ReseedInterrupted,
 }
 
@@ -479,7 +483,7 @@ pub enum SessionDomainEvent {
     /// that queue becomes a turn, so this is the session learning what
     /// happened. What the turn consumed and answered is the agent's own fact
     /// and lives in the agent's journal — this carries only the fact that the
-    /// conversation is now running.
+    /// session is now running.
     TurnBegan {
         at_ms: u64,
         agent: Uuid,
@@ -526,8 +530,8 @@ pub enum SessionDomainEvent {
         agent_id: String,
         usage_total: UsageTotal,
     },
-    /// A subagent was spawned by agent `parent` — main, a step, a fork, or
-    /// another subagent. Persisted before the child actor exists — a crash
+    /// A subagent was spawned by agent `parent` — main, a step, a sub session,
+    /// or another subagent. Persisted before the child actor exists — a crash
     /// between the two replays as a node that recovery reconciles to failed.
     ///
     /// The parent is the actual agent, resolved when the tool was called;
@@ -627,61 +631,62 @@ pub enum SessionDomainEvent {
         at_ms: u64,
         run: Uuid,
     },
-    /// A conversation was branched. Persisted before the fork's actor exists —
-    /// a crash between the two replays as a fork still `Provisioning`, which
-    /// `ForkedAgents::on_load` re-seeds. Strictly better than an untracked
-    /// agent, which is the same trade `SubAgentSpawned` makes.
-    ForkCreated {
+    /// A session was branched. Persisted before the sub session's actor exists
+    /// — a crash between the two replays as a sub session still
+    /// `Provisioning`, which `SubSessions::on_load` re-seeds. Strictly better
+    /// than an untracked agent, which is the same trade `SubAgentSpawned`
+    /// makes.
+    SubSessionCreated {
         at_ms: u64,
         id: Uuid,
-        /// The agent whose conversation was branched: main, or another fork.
+        /// The agent whose session was branched: main, or another sub session.
         parent: Uuid,
         /// The source agent's log seq at the branch point.
         source_seq: u64,
-        mode: ForkMode,
-        /// What the fork was created to do. On the event so a fork abandoned
-        /// mid-seed can be re-seeded with it, rather than coming back idle
-        /// with nothing to answer.
+        seed: SeedMode,
+        /// What the sub session was created to do. On the event so a sub
+        /// session abandoned mid-seed can be re-seeded with it, rather than
+        /// coming back idle with nothing to answer.
         message: String,
     },
-    /// The fork's initial state is durable, so it may run and the message
-    /// seeded alongside it is drained.
-    ForkSeeded {
+    /// The sub session's initial state is durable, so it may run and the
+    /// message seeded alongside it is drained.
+    SubSessionSeeded {
         at_ms: u64,
         id: Uuid,
     },
-    /// A fork named itself.
-    ForkTitled {
+    /// A sub session named itself.
+    SubSessionTitled {
         at_ms: u64,
         id: Uuid,
         name: String,
     },
-    /// A fork moved. Journaled so the session list can show it without loading
-    /// the session, exactly as the session's own status is.
-    ForkStatusChanged {
+    /// A sub session moved. Journaled so the session list can show it without
+    /// loading the session, exactly as the session's own status is.
+    SubSessionStatusChanged {
         at_ms: u64,
         id: Uuid,
         status: AgentStatus,
     },
-    /// One of a fork's turns ended, however it ended.
+    /// One of a sub session's turns ended, however it ended.
     ///
     /// One variant carrying an outcome, where the main agent's turn has four
     /// siblings (`TurnEnded`/`TurnFailed`/`TurnStopped`/`TurnInterrupted`):
     /// those four exist because each moves the *session's* status differently,
-    /// and a fork moves only its own roster entry, which is a function of the
-    /// outcome. Deriving the status here is also what stops the two from
-    /// disagreeing.
+    /// and a sub session moves only its own roster entry, which is a function
+    /// of the outcome. Deriving the status here is also what stops the two
+    /// from disagreeing.
     ///
-    /// Separate from `ForkStatusChanged` because it is the fork's turn
+    /// Separate from `ForkStatusChanged` because it is the sub session's turn
     /// *boundary*, and a boundary is the one thing a reader must see in the
-    /// fork's own transcript — a status is not.
-    ForkTurnEnded {
+    /// sub session's own transcript — a status is not.
+    SubSessionTurnEnded {
         at_ms: u64,
         id: Uuid,
         outcome: horsie_agentcore::TurnOutcome,
     },
-    /// A fork was removed, because someone asked. Never automatic.
-    ForkDeleted {
+    /// A sub session was removed, because someone asked. Never automatic.
+    SubSessionDeleted {
         at_ms: u64,
         id: Uuid,
     },
@@ -697,13 +702,13 @@ pub enum SessionDomainEvent {
 /// instead of each carrying an `unreachable!` for a variant it can never be
 /// handed.
 ///
-/// It is a second vocabulary for something `crate::agent_loop` already names, and
-/// that is the deliberate cost. `AgentOutcome` is the *protocol* between an
-/// agent and whatever owns it, and horsie has owners that are not sessions; a
-/// session's components want the smaller thing. [`TurnEnd::split`] is the only
-/// conversion, and its match is exhaustive, so a variant added to `AgentOutcome`
-/// fails to compile there — which is the right place to decide whether it is a
-/// way a turn ends or another thing to bank.
+/// It is a second vocabulary for something `crate::agent_loop` already names,
+/// and that is the deliberate cost. `AgentOutcome` is the *protocol* between
+/// an agent and whatever owns it, and horsie has owners that are not sessions;
+/// a session's components want the smaller thing. [`TurnEnd::split`] is the
+/// only conversion, and its match is exhaustive, so a variant added to
+/// `AgentOutcome` fails to compile there — which is the right place to decide
+/// whether it is a way a turn ends or another thing to bank.
 pub(super) enum TurnEnd {
     /// The agent produced its output — structured, or its final text.
     Concluded { output: Value },
@@ -729,12 +734,13 @@ pub(super) enum TurnEnd {
 }
 
 impl TurnEnd {
-    /// Separate the two things an outcome can be: a turn that ended, or usage to
-    /// bank. Both carry the agent that reported them.
+    /// Separate the two things an outcome can be: a turn that ended, or usage
+    /// to bank. Both carry the agent that reported them.
     ///
-    /// A `Result` rather than an `Option` so the caller cannot reach the routing
-    /// path with a non-ending outcome still in hand — the narrowing is total,
-    /// and nothing below it needs a case for a variant that never arrives.
+    /// A `Result` rather than an `Option` so the caller cannot reach the
+    /// routing path with a non-ending outcome still in hand — the narrowing is
+    /// total, and nothing below it needs a case for a variant that never
+    /// arrives.
     pub(super) fn split(outcome: AgentOutcome) -> Result<(Uuid, Self), (Uuid, NotAnEnd)> {
         match outcome {
             AgentOutcome::Concluded { agent, output } => Ok((agent, Self::Concluded { output })),
@@ -751,11 +757,17 @@ impl TurnEnd {
                 Err((agent, NotAnEnd::Usage(usage_total)))
             }
             AgentOutcome::Started { agent } => Err((agent, NotAnEnd::Started)),
-            AgentOutcome::ForkSummary {
+            AgentOutcome::SeedSummary {
                 agent,
-                forks,
+                sub_sessions,
                 result,
-            } => Err((agent, NotAnEnd::ForkSummary { forks, result })),
+            } => Err((
+                agent,
+                NotAnEnd::SeedSummary {
+                    sub_sessions,
+                    result,
+                },
+            )),
         }
     }
 }
@@ -768,8 +780,8 @@ pub(super) enum NotAnEnd {
     Usage(UsageTotal),
     /// The summary a `/summary-n-fork` turn was asked for. Nothing about how
     /// that turn ended — it is still running, or it ended some other way.
-    ForkSummary {
-        forks: Vec<Uuid>,
+    SeedSummary {
+        sub_sessions: Vec<Uuid>,
         result: Result<String, String>,
     },
 }
@@ -838,8 +850,8 @@ pub struct SessionState {
     pub provisioning: ProvisioningState,
     #[serde(default)]
     pub agent_usage: HashMap<String, UsageTotal>,
-    /// Every unit of work this session hosts — the main conversation, its
-    /// workflow runs, every subagent and every fork — as one hierarchy.
+    /// Every unit of work this session hosts — the main session, its
+    /// workflow runs, every subagent and every sub session — as one hierarchy.
     #[serde(default)]
     pub forest: RunForest,
 }
@@ -894,9 +906,9 @@ impl SessionState {
                     reason: w.run.error.clone().unwrap_or_default(),
                 },
             },
-            // A root is only ever a conversation or a run; an unrooted session
+            // A root is only ever a session or a run; an unrooted session
             // has not been told what it is yet and rests.
-            Some(RunState::Sub(_) | RunState::Fork(_)) | None => SessionStatus::Idle,
+            Some(RunState::Sub(_) | RunState::SubSession(_)) | None => SessionStatus::Idle,
         }
     }
 
@@ -943,7 +955,7 @@ pub struct SessionSnapshot {
 
 /// What became of one of a session's agents.
 ///
-/// One vocabulary for three different underlying facts — a conversation's main
+/// One vocabulary for three different underlying facts — a session's main
 /// agent takes its state from the session, a run's step agent from the run log,
 /// a subagent from the tree — because to a reader they are one question. Asked
 /// three times above the actor, they became three projections that disagreed: a
@@ -954,12 +966,12 @@ pub enum AgentStatus {
     /// The session's runtime is still being built. Nothing has run yet.
     Provisioning,
     Running,
-    /// Loaded and not working — where a conversation's agent rests between
+    /// Loaded and not working — where a session's agent rests between
     /// turns, and the one state that is not an ending.
     Idle,
     /// Parked on a question, waiting for an answer.
     AwaitingInput,
-    /// Ran to a result. Only a subagent or a step reaches it: a conversation is
+    /// Ran to a result. Only a subagent or a step reaches it: a session is
     /// never *done*.
     Completed,
     Failed,
@@ -970,8 +982,8 @@ impl AgentStatus {
     /// The name a client reads this status by.
     ///
     /// Here rather than beside a wire type because two places now project an
-    /// `AgentStatus` outward — the HTTP layer and the supervisor's global feed —
-    /// and a second copy of this mapping is a second chance for them to
+    /// `AgentStatus` outward — the HTTP layer and the supervisor's global feed
+    /// — and a second copy of this mapping is a second chance for them to
     /// disagree about what `awaiting_input` is called.
     #[must_use]
     pub fn as_wire(self) -> &'static str {
@@ -1069,10 +1081,10 @@ pub enum AgentKey {
     /// spawned by an agent, it is chosen by the definition, and it roots a
     /// subagent tree of its own.
     Step(Uuid),
-    /// One fork of a conversation. Its own key for the same reason a step's is:
-    /// nothing spawned it expecting a result, and it roots a subagent tree of
-    /// its own.
-    Fork(Uuid),
+    /// One sub session of a session. Its own key for the same reason a step's
+    /// is: nothing spawned it expecting a result, and it roots a subagent tree
+    /// of its own.
+    SubSession(Uuid),
 }
 
 #[cfg(test)]
@@ -1083,7 +1095,7 @@ mod tests {
     /// Every state has a spelling, and one spelling: a `_ =>` arm is how the
     /// documents that carry a status came to disagree about what a failed
     /// provision looks like. Three projections read this now — the session
-    /// list, an agent document, and the global feed's fork rows — so the
+    /// list, an agent document, and the global feed's sub session rows — so the
     /// mapping is tested where it lives rather than at one of them.
     #[test]
     fn every_agent_status_has_one_spelling() {

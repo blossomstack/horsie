@@ -7,7 +7,7 @@ import { hookSummary, systemMessage } from "../lib/hookSummary";
  * `Stop` that kept the turn going.
  *
  * It has nowhere to attach, so it is a row. Deliberately quieter than a tool
- * card: this is something a plugin did *around* the conversation, not something
+ * card: this is something a plugin did *around* the session, not something
  * the agent asked for. */
 export function HookNoticeRow({ record }: { record: HookRecord }) {
   const { text, intervened } = hookSummary(record);

@@ -9,7 +9,7 @@ use super::*;
 use horsie_agentcore::{AgentLogBody, AgentLogEntry, Usage};
 use serde::{Deserialize, Serialize};
 
-/// The conversation history reconstructed by folding [`AgentDomainEvent`]s, plus
+/// The session history reconstructed by folding [`AgentDomainEvent`]s, plus
 /// any timers the agent has armed and whether it is currently parked.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -18,8 +18,8 @@ pub struct AgentState {
     /// it. Read [`Self::prompt_messages`] to get what goes to a provider — this
     /// field deliberately cannot be handed to one.
     ///
-    /// Every field here carries `#[serde(default)]`, including this one: state is
-    /// snapshotted, so it is a durability contract. A field that fails to
+    /// Every field here carries `#[serde(default)]`, including this one: state
+    /// is snapshotted, so it is a durability contract. A field that fails to
     /// deserialize takes down `recover()` for every existing session — the way
     /// renamed event variants did on 2026-08-02. Add optional fields; never
     /// rename or repurpose one.
@@ -43,10 +43,10 @@ pub struct AgentState {
     /// Accepted-but-undelivered things addressed to this agent, oldest first.
     ///
     /// The queue lives here rather than on the session because a message is
-    /// addressed to an *agent*: once one can name a subagent or a workflow step,
-    /// a session-level queue has nowhere to put it. Durable for the same reason
-    /// timers are — an accepted message is a promise, and a crash must not
-    /// forget it.
+    /// addressed to an *agent*: once one can name a subagent or a workflow
+    /// step, a session-level queue has nowhere to put it. Durable for the same
+    /// reason timers are — an accepted message is a promise, and a crash must
+    /// not forget it.
     #[serde(default)]
     pub inbox: Vec<crate::agent_loop::Incoming>,
     /// Every question this agent is parked on, oldest first. A turn may ask
@@ -54,10 +54,12 @@ pub struct AgentState {
     /// result.
     #[serde(default)]
     pub asks: Vec<crate::agent_loop::AskedQuestion>,
-    /// Active timers — durable so they re-arm on recovery and back `list`/`cancel`.
+    /// Active timers — durable so they re-arm on recovery and back
+    /// `list`/`cancel`.
     #[serde(default)]
     pub timers: Vec<crate::agent_loop::timers::TimerRecord>,
-    /// True while the agent has parked itself awaiting a timer (no run in flight).
+    /// True while the agent has parked itself awaiting a timer (no run in
+    /// flight).
     #[serde(default)]
     pub parked: bool,
     /// Consecutive turns this agent ended without the result it owed.
@@ -88,10 +90,11 @@ pub struct AgentState {
     /// like timers do; see `crate::agent_loop::task_list`.
     #[serde(default)]
     pub task_list: crate::agent_loop::task_list::TaskListState,
-    /// Cumulative token usage across every completed run — durable agent state,
-    /// folded from `RunComplete`. `u64` so a long session's re-sent-context input
-    /// total can't overflow the per-turn `u32` wire counters. Answers the
-    /// session's usage readout without replaying the whole journal.
+    /// Cumulative token usage across every completed run — durable agent
+    /// state, folded from `RunComplete`. `u64` so a long session's
+    /// re-sent-context input total can't overflow the per-turn `u32` wire
+    /// counters. Answers the session's usage readout without replaying the
+    /// whole journal.
     #[serde(default)]
     pub usage_total: UsageTotal,
     /// The most recently completed run's own usage — a per-run cost figure,
@@ -106,9 +109,9 @@ pub struct AgentState {
     pub context_tokens: u32,
 }
 
-/// Running token totals held in [`AgentState`]. Distinct from the per-turn wire
-/// [`Usage`] (`u32`): this accumulates across all turns, so it is `u64` and owns
-/// a `Default`, which the fluorite-generated `Usage` does not.
+/// Running token totals held in [`AgentState`]. Distinct from the per-turn
+/// wire [`Usage`] (`u32`): this accumulates across all turns, so it is `u64`
+/// and owns a `Default`, which the fluorite-generated `Usage` does not.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsageTotal {
     pub input_tokens: u64,
@@ -325,7 +328,7 @@ mod tests {
         assert_eq!(prompt[0].role, Role::User);
     }
 
-    /// The transcript is not the conversation: a translated entry keeps its
+    /// The transcript is not the session: a translated entry keeps its
     /// place among the messages around it, so injected context lands where the
     /// hook ran rather than at the end of the prompt.
     #[test]
@@ -448,8 +451,9 @@ mod tests {
     /// or stall on a hook row.
     ///
     /// The seq is what carries this now. The old id-keyed cursor had to reason
-    /// about two disjoint id spaces (`result:{tool_call_id}` and `hook:{n}`) to
-    /// stay unambiguous; one counter over all of them has nothing to disambiguate.
+    /// about two disjoint id spaces (`result:{tool_call_id}` and `hook:{n}`)
+    /// to stay unambiguous; one counter over all of them has nothing to
+    /// disambiguate.
     #[test]
     fn the_log_numbers_every_kind_of_entry_in_one_sequence() {
         let mut state = AgentActor::initial_state();

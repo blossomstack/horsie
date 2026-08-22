@@ -1,16 +1,17 @@
 //! [`Journal`] on the server's database, for either backend.
 //!
 //! Lives in this crate, not `horsie-actor`, because it shares the settings
-//! database: one database takes one sqlx migrator, so the schema belongs to the
-//! server's migration chain (`server/migrations/*/0017_journal.sql`), and
-//! keeping the DDL and the queries together beats splitting them across a crate.
+//! database: one database takes one sqlx migrator, so the schema belongs to
+//! the server's migration chain (`server/migrations/*/0017_journal.sql`), and
+//! keeping the DDL and the queries together beats splitting them across a
+//! crate.
 //!
 //! The property that matters is that **sequence numbers are stored, not
 //! counted**. `journal_logs.last_seq` is the allocator; deleting events cannot
 //! renumber the survivors, which is what makes compaction safe and what the
 //! `Journal` trait already promises. Keeping the allocator in the database
-//! rather than in a per-process cache is also what lets the numbers stay correct
-//! without this type having to assume it is the only writer.
+//! rather than in a per-process cache is also what lets the numbers stay
+//! correct without this type having to assume it is the only writer.
 //!
 //! This is the only journal the server has. The `FileJournal` that preceded it
 //! no-oped every snapshot method — fine for a short single-shot run that always
@@ -59,14 +60,15 @@ pub(crate) fn insert_statement(rows: usize) -> String {
 
 /// A [`Journal`] over the server's database, on either dialect.
 ///
-/// **One per node, not one per account.** A log is found by `(kind, id)` alone,
-/// which every persistence id here already satisfies uniquely — an account id is
-/// random, a session and an agent are uuids. It could not be otherwise: a
-/// [`Journal`] method receives a [`PersistenceId`] and nothing else, and a
-/// persistence id is fixed when its actor is constructed, which for a shard
-/// actor is before a single byte of its history has been read. So an account
-/// could only reach the journal by being packed into the id — and a journal is a
-/// framework thing, where not every user of it has accounts at all.
+/// **One per node, not one per account.** A log is found by `(kind, id)`
+/// alone, which every persistence id here already satisfies uniquely — an
+/// account id is random, a session and an agent are uuids. It could not be
+/// otherwise: a [`Journal`] method receives a [`PersistenceId`] and nothing
+/// else, and a persistence id is fixed when its actor is constructed, which
+/// for a shard actor is before a single byte of its history has been read. So
+/// an account could only reach the journal by being packed into the id — and a
+/// journal is a framework thing, where not every user of it has accounts at
+/// all.
 ///
 /// What the `user_id` column used to buy was that another account's log was
 /// unreachable even given its id. That protection is now that the id is a uuid
@@ -95,7 +97,8 @@ impl SqlJournal {
             .map_err(backend)
     }
 
-    /// The `log_id` for `pid`, creating the row if absent. Only writes call this.
+    /// The `log_id` for `pid`, creating the row if absent. Only writes call
+    /// this.
     async fn log_id_for_write(
         db: &Db,
         tx: &mut Transaction<'_, Any>,
@@ -184,9 +187,9 @@ fn backend(e: sqlx::Error) -> JournalError {
     JournalError::Backend(e.to_string())
 }
 
-/// Neither dialect has unsigned integers, so sequence numbers cross the boundary
-/// as `i64`. A journal would need ~9.2 quintillion events to overflow;
-/// saturating is still better than a panic in a durability path.
+/// Neither dialect has unsigned integers, so sequence numbers cross the
+/// boundary as `i64`. A journal would need ~9.2 quintillion events to
+/// overflow; saturating is still better than a panic in a durability path.
 fn to_i64(n: u64) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
@@ -217,11 +220,11 @@ impl Journal for SqlJournal {
         //
         // The write fence rides along in the same statement rather than taking
         // one of its own. `last_seq = ?` is the whole check: it admits the
-        // writer only if the log still ends where that writer believes, which is
-        // false the moment anybody else has appended. Folding it into the update
-        // that was happening anyway costs nothing and makes check-and-write
-        // indivisible by construction rather than by remembering to keep them
-        // together.
+        // writer only if the log still ends where that writer believes, which
+        // is false the moment anybody else has appended. Folding it into the
+        // update that was happening anyway costs nothing and makes
+        // check-and-write indivisible by construction rather than by
+        // remembering to keep them together.
         let sql = self.db.q("UPDATE journal_logs SET last_seq = last_seq + ? \
              WHERE log_id = ? AND last_seq = ? RETURNING last_seq");
         let admitted: Option<i64> = sqlx::query_scalar(&sql)
@@ -268,9 +271,9 @@ impl Journal for SqlJournal {
             Ok(None) => return stream::empty().boxed(),
             Err(e) => return stream::iter(vec![Err(e)]).boxed(),
         };
-        // Everything the stream needs is owned, so it borrows neither `self` nor
-        // the query string — which is what makes keyset pagination simpler here
-        // than holding one long-lived sqlx cursor open.
+        // Everything the stream needs is owned, so it borrows neither `self`
+        // nor the query string — which is what makes keyset pagination simpler
+        // here than holding one long-lived sqlx cursor open.
         let init = Page {
             db: self.db.clone(),
             log_id,
@@ -370,8 +373,9 @@ impl Journal for SqlJournal {
             .fetch_optional(&mut *tx)
             .await
             .map_err(backend)?
-            // Erroring beats succeeding emptily: the caller forks a session from
-            // this snapshot, and a silent miss produces an agent with no history.
+            // Erroring beats succeeding emptily: the caller sub sessions a
+            // session from this snapshot, and a silent miss produces an agent
+            // with no history.
             .ok_or_else(|| JournalError::Backend(format!("no snapshot for '{from}'")))?;
 
         let state: Vec<u8> = src.try_get("state").map_err(backend)?;
@@ -530,8 +534,9 @@ mod tests {
         assert_eq!(sql.matches("(?, ?, ?)").count(), INSERT_CHUNK_ROWS);
     }
 
-    /// SQLite-only, like the other migration tests: it builds the schema by hand
-    /// and applies exactly 0036, which is the repair for a log 0035 emptied.
+    /// SQLite-only, like the other migration tests: it builds the schema by
+    /// hand and applies exactly 0036, which is the repair for a log 0035
+    /// emptied.
     ///
     /// The three rows are the three shapes a log can be in. Only the first is
     /// damaged — a compacted log has no events either, and zeroing *its*

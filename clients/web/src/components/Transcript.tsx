@@ -4,7 +4,7 @@ import { cn } from "../lib/cn";
 import type {
   RenderedCompaction,
   RenderedCompactionSkip,
-  RenderedFork,
+  RenderedSubSession,
   RenderedMessage,
   RenderedToolCall,
   TranscriptItem,
@@ -12,7 +12,7 @@ import type {
 import { buildSegments, type Segment } from "../lib/transcriptSegments";
 import { CompactionDivider } from "./CompactionDivider";
 import { CompactionNotice } from "./CompactionNotice";
-import { ForkMarker } from "./ForkMarker";
+import { SubSessionMarker } from "./SubSessionMarker";
 import { CollapsibleText } from "./CollapsibleText";
 import { HookNoticeRow } from "./HookNoticeRow";
 import { Prose } from "./Prose";
@@ -192,9 +192,9 @@ export type TurnGroup =
   | { kind: "user"; msg: RenderedMessage }
   | { kind: "assistant"; id: string; msgs: RenderedMessage[] }
   // Never folded into an assistant turn: a plugin acting *around* the
-  // conversation is not something the agent said.
+  // session is not something the agent said.
   | { kind: "notice"; id: string; record: HookRecord }
-  // A boundary between conversations, not a thing anyone said. Always breaks
+  // A boundary between sessions, not a thing anyone said. Always breaks
   // the assistant thread: the messages either side of it belong to different
   // working sets, and running them together would read as one exchange.
   | { kind: "compaction"; id: string; value: RenderedCompaction }
@@ -206,10 +206,10 @@ export type TurnGroup =
       id: string;
       value: RenderedCompactionSkip;
     }
-  // Where a conversation branched off. Not something anyone said, and not a
-  // break in the thread either — the conversation carried on here, and this
+  // Where a session branched off. Not something anyone said, and not a
+  // break in the thread either — the session carried on here, and this
   // marks the point another one left from.
-  | { kind: "fork"; id: string; value: RenderedFork };
+  | { kind: "subSession"; id: string; value: RenderedSubSession };
 
 export function groupTurns(items: TranscriptItem[]): TurnGroup[] {
   const turns: TurnGroup[] = [];
@@ -227,8 +227,8 @@ export function groupTurns(items: TranscriptItem[]): TurnGroup[] {
       });
       continue;
     }
-    if (item.kind === "fork") {
-      turns.push({ kind: "fork", id: `fork:${item.value.id}`, value: item.value });
+    if (item.kind === "subSession") {
+      turns.push({ kind: "subSession", id: `subSession:${item.value.id}`, value: item.value });
       continue;
     }
     if (item.kind === "compaction") {
@@ -286,7 +286,7 @@ export function Transcript({
   orphanTools: RenderedToolCall[];
   showLive: boolean;
   showThinking: boolean;
-  /** Which session these agents belong to, so a fork marker can link to one. */
+  /** Which session these agents belong to, so a sub session marker can link to one. */
   sessionId: string;
 }) {
   const turns = groupTurns(items);
@@ -307,8 +307,8 @@ export function Transcript({
           <CompactionDivider key={t.id} value={t.value} />
         ) : t.kind === "compaction-skipped" ? (
           <CompactionNotice key={t.id} value={t.value} />
-        ) : t.kind === "fork" ? (
-          <ForkMarker key={t.id} value={t.value} sessionId={sessionId} />
+        ) : t.kind === "subSession" ? (
+          <SubSessionMarker key={t.id} value={t.value} sessionId={sessionId} />
         ) : t.kind === "user" ? (
           <UserTurn key={t.msg.id} msg={t.msg} />
         ) : (

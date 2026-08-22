@@ -2,17 +2,17 @@
 //! a finished child's result, and — for each workflow run — which step goes
 //! next.
 //!
-//! Turns are not among them. An agent holds its own queue and decides when that
-//! queue becomes a turn, so what used to be `main_turn` is now
-//! [`crate::agent_loop::queued_turn`], asked by the agent against its own state.
-//! What is left here is delivery: the session owns the forest, so it is the only
-//! thing that knows a child's result is owed to a parent, and its job ends at
-//! putting that result in the parent's queue.
+//! Turns are not among them. An agent holds its own queue and decides when
+//! that queue becomes a turn, so what used to be `main_turn` is now
+//! [`crate::agent_loop::queued_turn`], asked by the agent against its own
+//! state. What is left here is delivery: the session owns the forest, so it is
+//! the only thing that knows a child's result is owed to a parent, and its job
+//! ends at putting that result in the parent's queue.
 //!
 //! No actors, no I/O, no clock — so this is unit-testable against a hand-built
-//! [`SessionState`]. Called from the components that own the work, which is why
-//! there is no strategy trait: the actor concatenates what its components return
-//! rather than delegating the whole decision to one object.
+//! [`SessionState`]. Called from the components that own the work, which is
+//! why there is no strategy trait: the actor concatenates what its components
+//! return rather than delegating the whole decision to one object.
 
 use crate::sessions::run_forest::{RunId, RunState};
 use crate::sessions::session_actor::{AgentKey, SessionState};
@@ -86,7 +86,7 @@ pub fn owed_deliveries(state: &SessionState) -> Vec<AgentAction> {
                 RunState::Main(_) => AgentKey::Main,
                 RunState::Sub(_) => AgentKey::Sub(owed.to),
                 RunState::Workflow(_) => AgentKey::Step(owed.to),
-                RunState::Fork(_) => AgentKey::Fork(owed.to),
+                RunState::SubSession(_) => AgentKey::SubSession(owed.to),
             };
             Some(AgentAction::Deliver(Delivery {
                 to,

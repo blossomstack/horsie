@@ -338,8 +338,8 @@ export const api = {
 
     /** Send a message to one of a session's agents.
      *
-     * `agentId` names who it is for. Not optional in practice: a fork is an
-     * agent, and leaving it out delivered everything typed on a fork's page to
+     * `agentId` names who it is for. Not optional in practice: a sub session is an
+     * agent, and leaving it out delivered everything typed on a sub session's page to
      * the session's main agent instead. Absent means the main agent, which is
      * what the session page itself wants. */
     send: (
@@ -356,11 +356,11 @@ export const api = {
         },
       ),
 
-    /** Remove one fork. Only a fork: a subagent and a workflow step are part of
+    /** Remove one sub session. Only a sub session: a subagent and a workflow step are part of
      * what their session did, and nothing removes one. */
-    deleteFork: (id: string, forkId: string): Promise<Ack> =>
+    deleteSubSession: (id: string, subSessionId: string): Promise<Ack> =>
       request(
-        `/sessions/${encodeURIComponent(id)}/agents/${encodeURIComponent(forkId)}`,
+        `/sessions/${encodeURIComponent(id)}/agents/${encodeURIComponent(subSessionId)}`,
         { method: "DELETE" },
       ),
 
@@ -384,7 +384,7 @@ export const api = {
 
     /** Cancel one agent's turn. `agentId` is `"main"` or an agent's uuid —
      * there is no session-wide stop, because a session hosts several
-     * conversations at once and each has a turn of its own. */
+     * sessions at once and each has a turn of its own. */
     stop: (id: string, agentId: string): Promise<Ack> =>
       request(
         `/sessions/${encodeURIComponent(id)}/agents/${encodeURIComponent(agentId)}/stop`,

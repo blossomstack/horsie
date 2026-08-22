@@ -25,7 +25,7 @@ export * from './emptyOutcome';
 export * from './failedOutcome';
 export * from './askLifecycle';
 export * from './subAgentLifecycle';
-export * from './forkLifecycle';
+export * from './subSessionLifecycle';
 export * from './stepLifecycle';
 export * from './taskListLifecycle';
 export * from './sessionFailedLifecycle';

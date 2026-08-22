@@ -4,11 +4,11 @@
 //! session is the one place that enforces limits, persists the run, and owns
 //! the step agents.
 //!
-//! Layered onto every agent in a session — main, subagents, steps and forks
-//! alike — carrying the *calling* agent's identity, so a run is attributed to
-//! whatever invoked it and its report is delivered back there. That is the
-//! whole of nesting: a workflow's step can invoke a workflow whose steps spawn
-//! subagents, and each edge is the same edge.
+//! Layered onto every agent in a session — main, subagents, steps and sub
+//! sessions alike — carrying the *calling* agent's identity, so a run is
+//! attributed to whatever invoked it and its report is delivered back there.
+//! That is the whole of nesting: a workflow's step can invoke a workflow whose
+//! steps spawn subagents, and each edge is the same edge.
 //!
 //! Resolution happens here, on the agent's own task, through the same
 //! [`resolve_run_spec`] the HTTP `run` operation uses — so a run created
@@ -84,7 +84,7 @@ fn invoke_workflow_spec(catalog: &[(String, String)]) -> ToolSpec {
                     "type": "string",
                     "description": "What the workflow's first step is handed. Complete and \
                         self-contained — the run inherits your workspace but not your \
-                        conversation."
+                        session."
                 }
             }
         }),

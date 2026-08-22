@@ -1,6 +1,6 @@
 //! Turning a hook record into the message it puts in front of the model.
 //!
-//! One rule decides every arm: **a hook record translates into the conversation
+//! One rule decides every arm: **a hook record translates into the session
 //! only when its effect has no other representation there.** A tool hook edits
 //! the tool's own output, so the tool result already carries it. A `Stop` block
 //! is a turn input and arrives as `AgentCommand::Resume { message }`. A
@@ -91,8 +91,9 @@ pub fn translate(entry: &HookEntry) -> Option<Message> {
         // --- Never translated: already represented in the tool result ---
         //
         // A tool hook edits the tool's own output. `PreToolUse` has no
-        // `additionalContext` by spec and its denial is a `ToolResult::Err`; the
-        // other two have their context appended to the output by the runtime.
+        // `additionalContext` by spec and its denial is a `ToolResult::Err`;
+        // the other two have their context appended to the output by the
+        // runtime.
         HookAction::PreToolUse(_)
         | HookAction::PostToolUse(_)
         | HookAction::PostToolUseFailure(_)

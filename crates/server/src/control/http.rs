@@ -77,7 +77,7 @@ pub const NON_OPERATIONS: &[(&str, &str)] = &[
     ),
     // Bytes, not JSON.
     ("/api/plugin-bundles/{name}/{version}", "serves a file"),
-    // Session traffic that is a conversation rather than management. A tool
+    // Session traffic that is talking rather than management. A tool
     // that could message a session could talk to itself.
     (
         "/sessions",
@@ -87,8 +87,8 @@ pub const NON_OPERATIONS: &[(&str, &str)] = &[
         "/sessions/{id}/messages",
         "POST sends a message, GET is the stream",
     ),
-    ("/sessions/{id}/answers", "answers an ask, mid-conversation"),
-    ("/sessions/{id}/annotations", "conversation metadata"),
+    ("/sessions/{id}/answers", "answers an ask, mid-session"),
+    ("/sessions/{id}/annotations", "session metadata"),
     (
         "/sessions/{id}/agents/{agent_id}",
         "reads or deletes one agent of a live session",

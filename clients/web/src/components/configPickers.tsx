@@ -1093,7 +1093,7 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
   });
 
   // Only for models that offer a menu. The value is fixed for the session's
-  // lifetime: changing effort mid-conversation invalidates the prompt cache.
+  // lifetime: changing effort mid-session invalidates the prompt cache.
   if (draft.thinkingEfforts.length > 0) {
     pickers.push({
       key: "thinking",

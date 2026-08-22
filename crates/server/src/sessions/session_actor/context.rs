@@ -1,16 +1,17 @@
 //! How one turn is assembled.
 //!
-//! A [`SessionContextProvider`] is what an [`AgentActor`](crate::agent_loop::AgentActor)
-//! asks, on its own task, for everything a run needs: the runtime handle, the
-//! LLM provider, the toolbox and the system prompt. It resolves them per run
-//! rather than holding them, which is what lets an agent stay resident across a
-//! hibernate and resume without knowing either happened.
+//! A [`SessionContextProvider`] is what an
+//! [`AgentActor`](crate::agent_loop::AgentActor) asks, on its own task, for
+//! everything a run needs: the runtime handle, the LLM provider, the toolbox
+//! and the system prompt. It resolves them per run rather than holding them,
+//! which is what lets an agent stay resident across a hibernate and resume
+//! without knowing either happened.
 //!
 //! One type serves all three kinds of agent a session hosts — main, subagent
 //! and workflow step — because they differ only in which layers they get.
 //! [`SessionAgentKind`] is what decides: the session-metadata tools are
-//! main-only, `submit_result` is step-only, and preparation progress is broadcast
-//! for everything except a subagent, which is quiet by design.
+//! main-only, `submit_result` is step-only, and preparation progress is
+//! broadcast for everything except a subagent, which is quiet by design.
 
 use super::CoreCommand;
 use super::{AgentKey, SessionCommand, hooks::SessionHookSink};
@@ -140,8 +141,8 @@ pub(crate) struct StepResultDef {
 /// unwrite a system prompt — building unconditionally would tell every model on
 /// the server it can manage horsie and then reject the call.
 ///
-/// Main-agent only. A subagent, a workflow step and a fork all inherit the
-/// session's settings, but authority over the server is not a setting they
+/// Main-agent only. A subagent, a workflow step and a sub session all inherit
+/// the session's settings, but authority over the server is not a setting they
 /// should carry — the same rule that keeps session-metadata tools off them.
 fn build_control_layer(
     base: Arc<dyn Toolbox>,
@@ -220,9 +221,9 @@ pub(super) enum SessionAgentKind {
     Main,
     Sub(Uuid),
     Step(Uuid),
-    /// A fork of a conversation. Its own kind, not `Sub`: it owes nobody a
+    /// A sub session of a session. Its own kind, not `Sub`: it owes nobody a
     /// result, it can ask the user, and it names itself.
-    Fork(Uuid),
+    SubSession(Uuid),
 }
 
 impl SessionAgentKind {
@@ -233,7 +234,7 @@ impl SessionAgentKind {
             Self::Main => AgentKey::Main,
             Self::Sub(id) => AgentKey::Sub(*id),
             Self::Step(id) => AgentKey::Step(*id),
-            Self::Fork(id) => AgentKey::Fork(*id),
+            Self::SubSession(id) => AgentKey::SubSession(*id),
         }
     }
 
@@ -241,7 +242,7 @@ impl SessionAgentKind {
     /// session to watch does; a subagent is quiet by design, and its progress
     /// reaches the reader as the parent's `SubAgent` entry instead.
     fn broadcasts(&self) -> bool {
-        matches!(self, Self::Main | Self::Step(_) | Self::Fork(_))
+        matches!(self, Self::Main | Self::Step(_) | Self::SubSession(_))
     }
 }
 
@@ -254,9 +255,9 @@ pub(super) fn scoped_client(kind: &SessionAgentKind, client: RuntimeClient) -> R
         // Steps share the run's sandbox — that is the point — but never its
         // cwd/env bucket: the runtime keys that state by agent id, so each acts
         // under its own identity, exactly as a subagent does.
-        SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) | SessionAgentKind::Fork(id) => {
-            client.with_agent_id(id.to_string())
-        }
+        SessionAgentKind::Sub(id)
+        | SessionAgentKind::Step(id)
+        | SessionAgentKind::SubSession(id) => client.with_agent_id(id.to_string()),
     }
 }
 
@@ -281,7 +282,7 @@ report that instead.";
 /// not know the difference either submits early to be safe or stops with
 /// nothing to wake it.
 const STEP_PROMPT_SUFFIX: &str = "\n\n# Workflow step\n\
-You are one step of a workflow, not a conversation. Your instruction and the previous \
+You are one step of a workflow, not a session. Your instruction and the previous \
 step's result are in the message above. You share one workspace with every other step: \
 what you change on disk is what the next step sees. You may spawn subagents with \
 spawn_agent. You cannot rename the session.\n\n\
@@ -291,17 +292,17 @@ Ending a turn without it is only safe while something will wake you — a questi
 asked, a timer you armed, or a subagent still running. If nothing will, and the work is \
 done, submit.";
 
-/// Appended to a fork's system prompt.
+/// Appended to a sub session's system prompt.
 ///
-/// A fork is a conversation, so almost nothing a subagent is told applies: it
+/// A sub session is a session, so almost nothing a subagent is told applies: it
 /// can ask the user, and it owes nobody a report. What it does need is to know
 /// it is one of several under one session sharing one workspace, and that its
 /// title is how a person tells them apart.
-const FORK_PROMPT_SUFFIX: &str = "\n\n# Forked conversation\n\
-You are a fork: a conversation branched from another one in this session, carrying its \
+const FORK_PROMPT_SUFFIX: &str = "\n\n# Forked session\n\
+You are a sub_session: a session branched from another one in this session, carrying its \
 history up to the branch point. You share one workspace with it — what you change on disk \
 is what it sees. Name yourself with set_session_title as soon as the new direction is \
-clear; that title is how a person tells this conversation from the one it came from.";
+clear; that title is how a person tells this session from the one it came from.";
 
 /// Appended to an unattended session's system prompt (a routine run). It has
 /// no `ask_user` tool, so the prompt says why rather than leaving the model to
@@ -351,9 +352,10 @@ pub(super) struct SessionContextProvider {
     /// *starting* with a slash cost nothing.
     pub(super) plugins: Vec<String>,
     pub(super) plugin_library: Option<Arc<dyn crate::plugins::PluginProvisioner>>,
-    /// The client the most recent `provide()` resolved. Cheap to keep — cloning
-    /// shares the same in-flight-call tracking — and it is what lets
-    /// [`SessionActor::cancel_run`](super::SessionActor) cancel without a fresh vendor round-trip.
+    /// The client the most recent `provide()` resolved. Cheap to keep —
+    /// cloning shares the same in-flight-call tracking — and it is what lets
+    /// [`SessionActor::cancel_run`](super::SessionActor) cancel without a
+    /// fresh vendor round-trip.
     pub(super) last_client: Mutex<Option<RuntimeClient>>,
 }
 
@@ -408,7 +410,8 @@ impl SessionContextProvider {
         self.settings.use_plugins.unwrap_or(true)
     }
 
-    /// Install this agent's own plugin bundles into its own tree on the runtime.
+    /// Install this agent's own plugin bundles into its own tree on the
+    /// runtime.
     ///
     /// The bundles come from the agent's settings, which a workflow step fills
     /// from its own preset — that is what makes a step able to run with skills
@@ -599,9 +602,10 @@ impl ContextProvider for SessionContextProvider {
     /// Fire this turn's start hooks, before the run snapshots its history.
     ///
     /// A hook that cannot run is not a turn that cannot start: `run_hooks`
-    /// failures fall back to no records, exactly as the `SessionStart` bootstrap
-    /// did. Acquiring the runtime is the only step that can fail the turn, and
-    /// it fails it the same way `provide` would have, one step later.
+    /// failures fall back to no records, exactly as the `SessionStart`
+    /// bootstrap did. Acquiring the runtime is the only step that can fail the
+    /// turn, and it fails it the same way `provide` would have, one step
+    /// later.
     async fn start_hooks(&self, turn: StartTurn) -> Result<TurnPreparation, ContextError> {
         // Reuse the handle the last run resolved when there is one, so a warm
         // agent pays one vendor round-trip per turn rather than two. Only the
@@ -612,23 +616,23 @@ impl ContextProvider for SessionContextProvider {
             None => self.runtime_client().await?,
         };
         // KNOWN GAP: this seam runs *before* `provide` (see the
-        // `ContextProvider` docs), so the hooks below run against an agent whose
-        // plugin tree has not been built yet — and a hook is itself a plugin
-        // file. A runtime refuses a request naming an unprovisioned agent, and
-        // `run_hooks` swallows that with `unwrap_or_default`, so the hooks
-        // simply never fire.
+        // `ContextProvider` docs), so the hooks below run against an agent
+        // whose plugin tree has not been built yet — and a hook is itself a
+        // plugin file. A runtime refuses a request naming an unprovisioned
+        // agent, and `run_hooks` swallows that with `unwrap_or_default`, so
+        // the hooks simply never fire.
         //
         // Provisioning here is the obvious fix and is NOT applied, because the
-        // extra pre-turn round trip wedges a fork's turn: with it, three fork
-        // tests and one subagent test hang; without it, all 36 pass. That is a
-        // fork-path fragility this change surfaces rather than causes, and it
-        // needs its own diagnosis before this line goes in.
-        // Before the hooks, because a hook *is* a plugin file. This seam runs
-        // ahead of `provide` — see the `ContextProvider` docs — so it is the
-        // first place an agent's tree can exist, and hooks fired against an
-        // agent the runtime has never been told about are refused. `run_hooks`
-        // swallows that with `unwrap_or_default`, so the failure would be every
-        // plugin hook silently not running.
+        // extra pre-turn round trip wedges a sub session's turn: with it,
+        // three sub session tests and one subagent test hang; without it, all
+        // 36 pass. That is a sub session-path fragility this change surfaces
+        // rather than causes, and it needs its own diagnosis before this line
+        // goes in. Before the hooks, because a hook *is* a plugin file. This
+        // seam runs ahead of `provide` — see the `ContextProvider` docs — so
+        // it is the first place an agent's tree can exist, and hooks fired
+        // against an agent the runtime has never been told about are refused.
+        // `run_hooks` swallows that with `unwrap_or_default`, so the failure
+        // would be every plugin hook silently not running.
         //
         // `provide` provisions too. Both is correct rather than wasteful: this
         // method is skipped entirely when `has_start_hooks` is false, and the
@@ -645,7 +649,9 @@ impl ContextProvider for SessionContextProvider {
                     agent_id: id.to_string(),
                     agent_type: self.agent_type(),
                 }),
-                SessionAgentKind::Main | SessionAgentKind::Step(_) | SessionAgentKind::Fork(_) => {
+                SessionAgentKind::Main
+                | SessionAgentKind::Step(_)
+                | SessionAgentKind::SubSession(_) => {
                     ServerHookEvent::SessionStart(SessionStartInput { source })
                 }
             };
@@ -708,10 +714,11 @@ impl ContextProvider for SessionContextProvider {
             self.session.clone(),
             self.kind.agent_key(),
         )));
-        // Cached *after* the sink is attached, not before: `Stop` runs its hooks
-        // through this handle once the turn is over, and a sink-less clone would
-        // run them and drop every record on the floor. Cancellation is
-        // unaffected — in-flight tracking is shared across clones.
+        // Cached *after* the sink is attached, not before: `Stop` runs its
+        // hooks through this handle once the turn is over, and a sink-less
+        // clone would run them and drop every record on the floor.
+        // Cancellation is unaffected — in-flight tracking is shared across
+        // clones.
         *self
             .last_client
             .lock()
@@ -736,8 +743,8 @@ impl ContextProvider for SessionContextProvider {
         // No `SessionStart` here any more. It used to fire on this line, once
         // per *run* — `provide` is per-run — so every turn re-ran every start
         // hook, always reporting `source: "startup"`. It now fires once per
-        // agent load at `start_hooks`, early enough for its context to reach the
-        // turn that triggered it.
+        // agent load at `start_hooks`, early enough for its context to reach
+        // the turn that triggered it.
         let shared = use_plugins.then(|| SharedContext {
             skills: Arc::new(shared_scan.skills),
             agents: Arc::new(shared_scan.agents),
@@ -796,9 +803,9 @@ impl ContextProvider for SessionContextProvider {
         }
         // A declared `model` is honoured only when horsie actually has it.
         // Every model declared in the wild is an alias (`inherit`, `sonnet`,
-        // `opus`), and mapping those onto whatever the catalogue holds would let
-        // a plugin author switch a kimi session to Anthropic by writing a word
-        // in a file.
+        // `opus`), and mapping those onto whatever the catalogue holds would
+        // let a plugin author switch a kimi session to Anthropic by writing a
+        // word in a file.
         let provider = match plugin_agent.as_ref().and_then(|a| a.def.model.as_deref()) {
             Some(model) => match self.provider_for(model) {
                 Some(provider) => provider,
@@ -887,8 +894,8 @@ impl ContextProvider for SessionContextProvider {
                             )));
                     }
                 }
-                // Never fatal: a plugin bringing a broken server must not stop a
-                // session that merely happens to load it.
+                // Never fatal: a plugin bringing a broken server must not stop
+                // a session that merely happens to load it.
                 Err(e) => tracing::warn!(
                     session = %self.session_id,
                     error = %e,
@@ -908,9 +915,9 @@ impl ContextProvider for SessionContextProvider {
         // the main agent's id is the session's.
         let caller = match self.kind {
             SessionAgentKind::Main => self.session_id,
-            SessionAgentKind::Step(id) | SessionAgentKind::Fork(id) | SessionAgentKind::Sub(id) => {
-                id
-            }
+            SessionAgentKind::Step(id)
+            | SessionAgentKind::SubSession(id)
+            | SessionAgentKind::Sub(id) => id,
         };
         // A zero cap disables subagents outright: no tools advertised, so the
         // model never meets a tool that only ever rejects.
@@ -928,12 +935,12 @@ impl ContextProvider for SessionContextProvider {
             ))
         };
         // Every kind of agent may invoke a workflow — main, subagents, steps
-        // and forks alike; the session gates at call time (depth, live runs).
-        // The saved workflows ride in the tool description so the model knows
-        // what exists; with none saved the tools are not offered at all, so a
-        // session without workflows sees exactly the toolbox it saw before
-        // they existed. Re-read per turn, where this toolbox is rebuilt, so a
-        // workflow saved mid-session appears at the next turn.
+        // and sub sessions alike; the session gates at call time (depth, live
+        // runs). The saved workflows ride in the tool description so the model
+        // knows what exists; with none saved the tools are not offered at all,
+        // so a session without workflows sees exactly the toolbox it saw
+        // before they existed. Re-read per turn, where this toolbox is
+        // rebuilt, so a workflow saved mid-session appears at the next turn.
         let workflow_catalog: Vec<(String, String)> = match &self.services {
             Some(services) => services
                 .workflows
@@ -957,21 +964,21 @@ impl ContextProvider for SessionContextProvider {
             ),
             (Some(_), true) | (None, _) => with_spawn,
         };
-        // `/fork`, addressed to the model. Conversations only: a subagent's
-        // history is delegated work and a step's belongs to the run, so neither
-        // has a branch to take — the same rule the composer's `/fork` follows.
-        // An unattended session is excluded for the reason it has no `ask_user`:
-        // a fork is a conversation, and nobody is there to have one.
+        // `/fork`, addressed to the model. Sessions only: a subagent's history
+        // is delegated work and a step's belongs to the run, so neither has a
+        // branch to take — the same rule the composer's `/fork` follows. An
+        // unattended session is excluded for the reason it has no `ask_user`:
+        // a sub session is a session, and nobody is there to have one.
         let with_spawn: Arc<dyn Toolbox> = match self.kind {
-            SessionAgentKind::Main | SessionAgentKind::Fork(_) if !self.unattended => Arc::new(
-                crate::sessions::conversation_tool::ConversationToolbox::new(
+            SessionAgentKind::Main | SessionAgentKind::SubSession(_) if !self.unattended => {
+                Arc::new(crate::sessions::sub_session_tool::SubSessionToolbox::new(
                     with_spawn,
                     self.session.clone(),
                     caller,
-                ),
-            ),
+                ))
+            }
             SessionAgentKind::Main
-            | SessionAgentKind::Fork(_)
+            | SessionAgentKind::SubSession(_)
             | SessionAgentKind::Step(_)
             | SessionAgentKind::Sub(_) => with_spawn,
         };
@@ -1001,11 +1008,11 @@ impl ContextProvider for SessionContextProvider {
                     result
                 }
             }
-            // A fork takes the main agent's arms: it is a conversation, so
+            // A sub session takes the main agent's arms: it is a session, so
             // it can ask the user — and it names *itself*, not the session.
-            SessionAgentKind::Fork(id) => {
+            SessionAgentKind::SubSession(id) => {
                 let inner: Arc<dyn Toolbox> = Arc::new(AskUserToolbox::new(with_spawn));
-                Arc::new(SessionTitleToolbox::for_fork(
+                Arc::new(SessionTitleToolbox::for_sub_session(
                     inner,
                     self.session.clone(),
                     id,
@@ -1036,7 +1043,7 @@ impl ContextProvider for SessionContextProvider {
             SessionAgentKind::Main if self.unattended => Some(UNATTENDED_PROMPT_SUFFIX),
             SessionAgentKind::Main => None,
             SessionAgentKind::Step(_) => Some(STEP_PROMPT_SUFFIX),
-            SessionAgentKind::Fork(_) => Some(FORK_PROMPT_SUFFIX),
+            SessionAgentKind::SubSession(_) => Some(FORK_PROMPT_SUFFIX),
             SessionAgentKind::Sub(_) => {
                 Some(subagent_role.as_deref().unwrap_or(SUBAGENT_PROMPT_SUFFIX))
             }
@@ -1145,7 +1152,7 @@ mod tests {
         for kind in [
             SessionAgentKind::Sub(Uuid::new_v4()),
             SessionAgentKind::Step(Uuid::new_v4()),
-            SessionAgentKind::Fork(Uuid::new_v4()),
+            SessionAgentKind::SubSession(Uuid::new_v4()),
         ] {
             let (toolbox, _) = build_control_layer(base.clone(), Some(&services), &settings, kind);
             assert!(
@@ -1671,10 +1678,10 @@ mod tests {
         assert_eq!(types, vec!["subagent".to_string()]);
     }
 
-    /// `SessionStart` used to fire from `provide()`, which is per-run — so every
-    /// turn re-ran every start hook, always reporting `source: "startup"`. It
-    /// fires once per agent load now; `UserPromptSubmit` is the one that belongs
-    /// to every turn.
+    /// `SessionStart` used to fire from `provide()`, which is per-run — so
+    /// every turn re-ran every start hook, always reporting `source:
+    /// "startup"`. It fires once per agent load now; `UserPromptSubmit` is the
+    /// one that belongs to every turn.
     #[tokio::test]
     async fn a_session_starts_once_but_every_prompt_is_hooked() {
         let (f, session) = stop_harness(vec![]).await;
@@ -1699,9 +1706,9 @@ mod tests {
         assert_eq!(prompts, 2, "the prompt hook is due every turn");
     }
 
-    /// A subagent is not a session. The call fired `SessionStart` for one before
-    /// this, because it was not gated on the agent's kind at all — so a hook
-    /// matching `startup` fired again for every subagent spawned.
+    /// A subagent is not a session. The call fired `SessionStart` for one
+    /// before this, because it was not gated on the agent's kind at all — so a
+    /// hook matching `startup` fired again for every subagent spawned.
     #[tokio::test]
     async fn a_subagent_fires_subagent_start_never_session_start() {
         let (f, session) = stop_harness(vec![]).await;
@@ -1865,9 +1872,9 @@ mod tests {
     /// refusal with `unwrap_or_default`, so getting this order wrong is not an
     /// error anywhere: it is every plugin hook silently never running.
     ///
-    /// Ordering rather than mere presence, because `start_hooks` runs *ahead* of
-    /// `provide` — provisioning only in `provide` looks correct and is exactly
-    /// the bug.
+    /// Ordering rather than mere presence, because `start_hooks` runs *ahead*
+    /// of `provide` — provisioning only in `provide` looks correct and is
+    /// exactly the bug.
     #[tokio::test]
     async fn an_agent_is_provisioned_before_its_hooks_run() {
         let (f, session, id) = catalog_harness_with(Vec::new(), Vec::new()).await;

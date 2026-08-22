@@ -93,9 +93,9 @@ impl SessionCore {
                         .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
                         .await;
                 }
-                // Answered either way: a create that carried a message owes one,
-                // and a caller left waiting on a redelivery is the failure this
-                // whole command exists to remove.
+                // Answered either way: a create that carried a message owes
+                // one, and a caller left waiting on a redelivery is the
+                // failure this whole command exists to remove.
                 if let Some(FirstMessage { text, reply }) = message {
                     let _ = me
                         .tell(SessionCommand::Turn(TurnCommand::UserMessage {
@@ -196,13 +196,13 @@ impl SessionActor {
     /// only — an agent never tells the session anything back through here.
     ///
     /// **Resident agents only**, because this hook has no `ActorContext` to
-    /// spawn with. That is not the limitation it looks like: a conversation's
-    /// `main` is spawned at recovery and stays for the session's loaded life, a
-    /// run's step agent is live for as long as its step is, and every
-    /// subagent-targeted event happens while that subagent is running. A miss is
-    /// therefore a bug worth hearing about rather than a case to handle, which
-    /// is what the warning is for — an event with genuinely nowhere to go routes
-    /// to nothing at all, and never reaches this loop.
+    /// spawn with. That is not the limitation it looks like: a session's
+    /// `main` is spawned at recovery and stays for the session's loaded life,
+    /// a run's step agent is live for as long as its step is, and every
+    /// subagent-targeted event happens while that subagent is running. A miss
+    /// is therefore a bug worth hearing about rather than a case to handle,
+    /// which is what the warning is for — an event with genuinely nowhere to
+    /// go routes to nothing at all, and never reaches this loop.
     ///
     /// Note the state it routes against: `on_events_persisted` is called once
     /// per batch, with the state the *whole* batch folded to. Two of the
@@ -259,10 +259,11 @@ impl Component for SessionCore {
     /// Pure, and an associated function rather than a method: replay runs with
     /// no instance in scope, which is what makes a recovered session and a live
     /// one follow the same path.
-    // The fallthrough is unreachable by construction: `SessionActor::apply_event`
-    // matches every variant explicitly and routes each to exactly one component,
-    // so a newly added event fails to compile *there* — which is where it should
-    // be classified — rather than silently reaching the wrong fold here.
+    // The fallthrough is unreachable by construction:
+    // `SessionActor::apply_event` matches every variant explicitly and routes
+    // each to exactly one component, so a newly added event fails to compile
+    // *there* — which is where it should be classified — rather than silently
+    // reaching the wrong fold here.
     #[allow(clippy::wildcard_enum_match_arm)]
     fn apply(state: &mut SessionState, event: &SessionDomainEvent) {
         match event.clone() {
@@ -278,7 +279,7 @@ impl Component for SessionCore {
                 session,
                 spec,
             } => {
-                // The spec is also what roots the forest: a conversation's
+                // The spec is also what roots the forest: a session's
                 // main entry, or the session's own workflow run — keyed by the
                 // session id, so replay needs nothing but this event.
                 match &spec.kind {

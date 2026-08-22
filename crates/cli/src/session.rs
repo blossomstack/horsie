@@ -17,7 +17,7 @@ use std::time::Duration;
 /// Which session events land in the JSONL file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum EventsMode {
-    /// Complete transcript messages only (the durable conversation).
+    /// Complete transcript messages only (the durable session).
     Messages,
     /// Every frame: log entries and the live text chunks between them.
     All,
@@ -112,8 +112,9 @@ impl SessionSink {
         let event: MessageFrame = match serde_json::from_str(data) {
             Ok(e) => e,
             Err(e) => {
-                // Can't tell an append from a value frame, so trust the stream's
-                // id and skip ahead rather than re-receiving the corrupt frame.
+                // Can't tell an append from a value frame, so trust the
+                // stream's id and skip ahead rather than re-receiving the
+                // corrupt frame.
                 if !sse_id.is_empty() {
                     self.cursor = Some(sse_id.to_string());
                 }

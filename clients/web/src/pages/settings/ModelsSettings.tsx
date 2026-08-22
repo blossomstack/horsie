@@ -679,7 +679,7 @@ function ProviderEditor({
           // The rule nobody knew: horsie appends the protocol's own path, so
           // pasting the value a vendor's docs give you — which usually ends in
           // /v1 — produces /v1/v1/chat/completions. It surfaced only as a
-          // conversation that would not start, with nothing pointing back here.
+          // session that would not start, with nothing pointing back here.
           hint={`Host only — horsie appends the API path. ${KIND_PLACEHOLDERS[draft.kind]}, not ${KIND_PLACEHOLDERS[draft.kind]}/v1.`}
         />
         {usesApiKey(draft.kind) && (

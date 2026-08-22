@@ -112,7 +112,7 @@ mod tests {
         // Exact names, not prefixes — otherwise `/fork` would be ambiguous with
         // the longer one and resolution order would decide which you got.
         assert!(builtin("summary-n").is_none());
-        assert!(builtin("fork-summary").is_none());
+        assert!(builtin("sub_session-summary").is_none());
     }
 
     /// Two built-ins with one name would make resolution order decide which

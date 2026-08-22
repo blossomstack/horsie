@@ -27,7 +27,7 @@ function session(
       ...tags.map((t) => ({ key: `tag.${t}`, value: "" })),
       ...extra,
     ],
-    forks: [],
+    subSessions: [],
   };
 }
 

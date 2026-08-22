@@ -198,7 +198,7 @@ async fn invoke(
         created_at,
         annotations: BTreeMap::new(),
         status: SessionStatus::Idle,
-        forks: Vec::new(),
+        sub_sessions: Vec::new(),
     };
     Ok(AgentInvokeResponse {
         session: handlers::summary(&id, &rec),

@@ -1,32 +1,32 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it } from "vitest";
-import { ForkMarker } from "./ForkMarker";
+import { SubSessionMarker } from "./SubSessionMarker";
 
 afterEach(cleanup);
 
-function renderMarker(mode: string) {
+function renderMarker(seed: string) {
   return render(
     <MemoryRouter>
-      <ForkMarker
-        value={{ id: "fork-1", mode, atMs: 1 }}
+      <SubSessionMarker
+        value={{ id: "subSession-1", seed, atMs: 1 }}
         sessionId="s1"
       />
     </MemoryRouter>,
   );
 }
 
-describe("ForkMarker", () => {
-  it("links to the conversation that branched off", () => {
+describe("SubSessionMarker", () => {
+  it("links to the sub session that branched off", () => {
     renderMarker("copy");
     expect(screen.getByRole("link").getAttribute("href")).toBe(
-      "/sessions/s1/agents/fork-1",
+      "/sessions/s1/agents/subSession-1",
     );
   });
 
-  /* The modes give the fork genuinely different histories, so the marker says
-     which — otherwise "forked from here" means three things. */
-  it("says when the fork got a summary rather than the history", () => {
+  /* The modes give the sub session genuinely different histories, so the marker says
+     which — otherwise "subSessioned from here" means three things. */
+  it("says when the subSession got a summary rather than the history", () => {
     renderMarker("summary");
     expect(screen.getByRole("link").textContent).toMatch(/summary/);
     cleanup();
@@ -34,9 +34,9 @@ describe("ForkMarker", () => {
     expect(screen.getByRole("link").textContent).not.toMatch(/summary/);
   });
 
-  /* A fresh fork carries nothing from here, so "forked from here" would claim
+  /* A fresh sub session carries nothing from here, so "branched from here" would claim
      a history it does not have. */
-  it("says a fresh fork was handed off rather than forked", () => {
+  it("says a fresh subSession was handed off rather than subSessioned", () => {
     renderMarker("fresh");
     expect(screen.getByRole("link").textContent).toMatch(/handed off/);
     expect(screen.getByRole("link").textContent).not.toMatch(/forked/);
