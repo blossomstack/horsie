@@ -65,9 +65,16 @@ test("X1: the timeline draws the session and clicks through to the subagent", as
   await expect(page.getByTestId("agent-panel-title")).toHaveText("audit");
   await expect(page).not.toHaveURL(/\/agents\//);
 
-  // The jump key is what leaves.
+  // The jump key is what leaves — for that run's *transcript*, which is what
+  // the key says it opens. It used to land in whichever view was remembered,
+  // so pressing "open this agent's transcript" from the timeline opened that
+  // agent's timeline: the same picture, one run over.
   await sub.locator('[data-testid^="timeline-open-"]').click();
   await expect(page).toHaveURL(/\/agents\//);
+  await expect(page.getByTestId("transcript-scroll")).toBeVisible();
+  await expect(page.getByTestId("transcript-toggle")).toHaveAttribute("aria-checked", "true");
+  // The panel came from the picture that was left, so it does not come along.
+  await expect(page.getByTestId("agent-panel")).toHaveCount(0);
 
   // ...and there the switch is still offered: the timeline is now drawn of
   // whichever run the page is on, so a subagent's page has one of its own.

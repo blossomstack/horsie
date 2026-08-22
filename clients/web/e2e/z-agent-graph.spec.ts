@@ -56,12 +56,14 @@ test("Z1: the graph draws the main agent and what it spawned", async ({
   // node, in its hover title and in its fold's label.
   await expect(page.locator('[data-testid^="agent-node-"]')).toHaveCount(2);
   // Every node says what kind of thing it is, which is the one claim a shape
-  // alone could never make. Scoped to the graph: "subagent" is a word the rail
-  // uses too, and an unscoped match is a strict-mode failure waiting for the
-  // next component that says it.
+  // alone could never make. It shares the bottom line with the status now —
+  // the name has the two lines above it — so this matches the line, not the
+  // word. Scoped to the graph: "subagent" is a word the rail uses too, and an
+  // unscoped match is a strict-mode failure waiting for the next component
+  // that says it.
   const graph = page.getByTestId("agent-graph");
-  await expect(graph.getByText("main session", { exact: true })).toBeVisible();
-  await expect(graph.getByText("subagent", { exact: true })).toBeVisible();
+  await expect(graph.getByText(/^main session · /)).toBeVisible();
+  await expect(graph.getByText(/^subagent · /)).toBeVisible();
   // The subagent is named for the title its spawner gave it.
   await expect(page.getByRole("button", { name: "Show audit" })).toBeVisible();
 });
@@ -117,6 +119,13 @@ test("Z3: a node shows the agent beside the graph rather than leaving it", async
   await expect(page).not.toHaveURL(/\/agents\//);
 });
 
+/** The id a node's own controls are keyed by. Every node has a jump key now,
+ *  so an unscoped `agent-jump-` locator matches the whole graph. */
+async function nodeId(node: import("@playwright/test").Locator): Promise<string> {
+  const testid = await node.getAttribute("data-testid");
+  return (testid ?? "").slice("agent-node-".length);
+}
+
 test("Z3b: the jump key on a node opens that agent's transcript", async ({
   page,
   appBase,
@@ -125,11 +134,48 @@ test("Z3b: the jump key on a node opens that agent's transcript", async ({
   await delegatingSession(page, appBase, mock);
   await page.getByTestId("graph-toggle").click();
 
-  await page.locator('[data-testid^="agent-jump-"]').click();
+  const sub = page.locator('[data-testid^="agent-node-"][data-kind="subagent"]');
+  await page.getByTestId(`agent-jump-${await nodeId(sub)}`).click();
   await expect(page).toHaveURL(/\/agents\//);
+  // In the transcript, which is what the key says it opens. It used to land in
+  // whichever view was remembered — so from the graph it opened the graph,
+  // one run over, with the transcript it promised nowhere in sight.
+  await expect(page.getByTestId("transcript-scroll")).toBeVisible();
+  await expect(page.getByTestId("transcript-toggle")).toHaveAttribute("aria-checked", "true");
   // The switch is on every run now, so a subagent's page has its own way back
   // into either structural view.
   await expect(page.getByTestId("graph-toggle")).toBeVisible();
+});
+
+/** The root is a run like any other, and from a subagent's page it is the one
+ *  node worth pressing: the way back to the session. It used to be the one
+ *  node with no key, on the reasoning that its transcript is the page the
+ *  graph is drawn on — true only of the session's own page. */
+test("Z3c: the root node marks the run being read, and its key goes back to it", async ({
+  page,
+  appBase,
+  mock,
+}) => {
+  await delegatingSession(page, appBase, mock);
+  const sessionUrl = page.url().replace(/\?.*$/, "");
+
+  await page.getByTestId("graph-toggle").click();
+  // On the session's own page the root is the run being read.
+  const current = page.locator('[data-testid^="agent-node-"][data-current="true"]');
+  await expect(current).toHaveAttribute("data-kind", "main");
+
+  const sub = page.locator('[data-testid^="agent-node-"][data-kind="subagent"]');
+  await page.getByTestId(`agent-jump-${await nodeId(sub)}`).click();
+  await expect(page).toHaveURL(/\/agents\//);
+
+  // The graph is the session's whichever run you are on, and the mark moves.
+  await page.getByTestId("graph-toggle").click();
+  await expect(current).toHaveAttribute("data-kind", "subagent");
+
+  const root = page.locator('[data-testid^="agent-node-"][data-kind="main"]');
+  await page.getByTestId(`agent-jump-${await nodeId(root)}`).click();
+  await expect(page).toHaveURL(sessionUrl);
+  await expect(page.getByTestId("transcript-scroll")).toBeVisible();
 });
 
 test("Z4: the view is in the URL, so it survives a reload and can be sent", async ({
@@ -232,7 +278,7 @@ test("Z6: a sub session is drawn under the session it branched from, and opens f
   await expect(page.getByTestId("agent-panel")).toBeVisible();
   await expect(page.getByTestId("agent-panel-readout")).toHaveText("sub session");
 
-  await page.locator('[data-testid^="agent-jump-"]').click();
+  await page.getByTestId(`agent-jump-${await nodeId(branched)}`).click();
   await expect(page).toHaveURL(subSessionUrl.replace(/\?.*$/, ""));
 });
 

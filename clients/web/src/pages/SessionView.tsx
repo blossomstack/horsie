@@ -255,6 +255,34 @@ export function SessionView() {
    * again — its anchors do not exist while the timeline has the pane. */
   const [pendingSeek, setPendingSeek] = useState<string | null>(null);
 
+  /** The session's own agent, whose page is the session's page. */
+  const mainAgentId =
+    detail?.agents?.find((a) => !a.parent && a.depth === 0)?.id ??
+    detail?.agents?.[0]?.id ??
+    MAIN_AGENT;
+
+  /**
+   * Leave a structural view for one run's transcript.
+   *
+   * Landing in the *transcript* is the whole point of the key, and it used not
+   * to: the remembered view is what a page with nothing in its URL opens in,
+   * so pressing "open this agent's transcript" from the timeline opened that
+   * agent's timeline — the same picture, one run over, with the thing you
+   * pressed for nowhere in sight. Reading a transcript is also a view someone
+   * picked, so it is remembered like any other rather than smuggled past the
+   * memory.
+   *
+   * The selection goes with it. It belongs to the picture being left, and
+   * carrying it over meant arriving with a panel open on the run you had just
+   * come from.
+   */
+  const openRun = (agent: string) => {
+    setLastView("transcript");
+    setSelection(null);
+    const own = agent === mainAgentId || agent === MAIN_AGENT;
+    navigate(own ? `/sessions/${id}` : `/sessions/${id}/agents/${agent}`);
+  };
+
   /** Agents whose own work is being drawn on their lane, and the histories
    * fetched for them.
    *
@@ -838,7 +866,7 @@ export function SessionView() {
                 // place is the panel's own key.
                 onSelectEntry={(entryId) => setSelection({ kind: "entry", id: entryId })}
                 onSelectAgent={(agent) => setSelection({ kind: "agent", id: agent })}
-                onOpenAgent={(agent) => navigate(`/sessions/${id}/agents/${agent}`)}
+                onOpenAgent={openRun}
                 selectedAgent={selection?.kind === "agent" ? selection.id : undefined}
                 selectedEntry={selection?.kind === "entry" ? selection.id : undefined}
               />
@@ -857,9 +885,14 @@ export function SessionView() {
                   )
                 }
                 onSelectAgent={(agent) => setSelection({ kind: "agent", id: agent })}
-                onOpenAgent={(agent) => navigate(`/sessions/${id}/agents/${agent}`)}
+                onOpenAgent={openRun}
                 selected={selection?.kind === "agent" ? selection.id : undefined}
-                current={agentId}
+                // The run being read. On the session's own page that is its
+                // main agent, which the graph draws as the root — `agentId` is
+                // absent there, and a root that never lit up was the picture
+                // failing to say "you are here" on the one page everyone
+                // starts from.
+                current={agentId ?? mainAgentId}
               />
             </SessionPane>
           )}
@@ -1054,13 +1087,7 @@ export function SessionView() {
           <AgentInfoPanel
             agent={selectedAgent}
             onClose={() => setSelection(null)}
-            onOpenTranscript={(agent) =>
-              navigate(
-                agent === MAIN_AGENT || agent === detail?.agents?.[0]?.id
-                  ? `/sessions/${id}`
-                  : `/sessions/${id}/agents/${agent}`,
-              )
-            }
+            onOpenTranscript={openRun}
             onDelete={
               selectedAgent.kind === "subagent" || selectedAgent.kind === "sub_session"
                 ? (agent) => void deleteRun(agent, selectedAgent.title)

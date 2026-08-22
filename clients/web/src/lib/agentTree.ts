@@ -1,5 +1,6 @@
 import { MAIN_AGENT } from "../api/client";
 import type { SubAgentView, SubSessionView } from "../api/types";
+import { clockTime, humanDuration } from "./format";
 
 /**
  * Placing everything a session hosts as one tree: its agents *and* its sub
@@ -75,8 +76,16 @@ export interface AgentTree {
   hidden: number;
 }
 
-/** Statuses that mean the agent has not stopped, so it has no duration yet. */
+/** Statuses that mean the agent has not stopped, so it has no duration yet.
+ *
+ * Exported because three views ask the same question of the same word — the
+ * graph, the timeline and the agent panel — and a fourth list of live statuses
+ * is a fourth chance to disagree about whether `awaiting_input` is running. */
 const LIVE_STATUS = new Set(["running", "provisioning", "awaiting_input"]);
+
+export function isLive(status: string): boolean {
+  return LIVE_STATUS.has(status);
+}
 
 /** What a drawn node is.
  *
@@ -106,6 +115,25 @@ interface Member {
   kind: AgentKind;
   /** When it came into being — the order siblings are drawn in. */
   at: number;
+}
+
+/**
+ * Where a member sits among its siblings: delegated work first, then the
+ * sessions branched off.
+ *
+ * Two kinds of thing hang off one agent and they are not the same kind of
+ * thing — a subagent or a step is work inside a turn, and a sub session is
+ * another session, talked to rather than delegated to. Ordered purely by when
+ * they started they interleaved, and the reader had to do the sorting. The
+ * timeline used to say it with a rule drawn across the lanes instead; grouping
+ * says it without spending a row on it, and the graph gets it for free.
+ *
+ * Oldest first inside each group, and by id when two share a stamp, so nothing
+ * moves because a sibling was relabelled.
+ */
+function bySibling(x: Member, y: Member): number {
+  const group = (m: Member) => (m.kind === "sub_session" ? 1 : 0);
+  return group(x) - group(y) || x.at - y.at || x.id.localeCompare(y.id);
 }
 
 function agentMember(a: SubAgentView): Member {
@@ -205,9 +233,7 @@ export function hostedTree(
     const key = linked && m.parent !== rootId ? (m.parent ?? "") : "";
     kids.set(key, [...(kids.get(key) ?? []), m]);
   }
-  for (const level of kids.values()) {
-    level.sort((x, y) => x.at - y.at || x.id.localeCompare(y.id));
-  }
+  for (const level of kids.values()) level.sort(bySibling);
   const bucket = (id: string) => (id === rootId ? "" : id);
   const descendantsOf = countDescendants(kids, bucket);
 
@@ -301,10 +327,7 @@ export function layoutAgentTree(
     const key = linked && m.parent !== mainId ? (m.parent ?? "") : "";
     kids.set(key, [...(kids.get(key) ?? []), m]);
   }
-  // Oldest first, so a member does not move because a sibling was relabelled.
-  for (const level of kids.values()) {
-    level.sort((x, y) => x.at - y.at || x.id.localeCompare(y.id));
-  }
+  for (const level of kids.values()) level.sort(bySibling);
   const bucket = (id: string) => (id === mainId ? "" : id);
 
   const descendantsOf = countDescendants(kids, bucket);
@@ -457,24 +480,9 @@ function countDescendants(
 function describeAgent(status: string, startMs: number, endMs: number): string {
   const parts = [status.replace(/_/g, " ")];
   if (startMs > 0 && endMs > startMs && !LIVE_STATUS.has(status)) {
-    parts.push(humanMs(endMs - startMs));
+    parts.push(humanDuration(endMs - startMs));
   }
   if (startMs > 0) parts.push(`started ${clockTime(startMs)}`);
   return parts.join(" · ");
 }
 
-function humanMs(ms: number): string {
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`;
-  return `${Math.floor(ms / 3_600_000)}h ${Math.round((ms % 3_600_000) / 60_000)}m`;
-}
-
-/** 24-hour, so a label is five characters wide however long the session ran. */
-function clockTime(ms: number): string {
-  return new Date(ms).toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
-}

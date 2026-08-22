@@ -16,7 +16,8 @@ import { MAIN_AGENT } from "../api/client";
 import type { SubSessionView, SubAgentView } from "../api/types";
 import type { RenderedMessage, TranscriptItem } from "../hooks/useSessionStream";
 import { isAskCall } from "./askUser";
-import { type AgentKind, hostedTree } from "./agentTree";
+import { type AgentKind, hostedTree, isLive } from "./agentTree";
+import { clockTime, humanDuration } from "./format";
 
 /** A gap longer than this is dead air, not part of the work. */
 export const GAP_THRESHOLD_MS = 60_000;
@@ -192,13 +193,6 @@ interface Entry {
   turnStart: boolean;
 }
 
-function humanMs(ms: number): string {
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`;
-  return `${Math.floor(ms / 3_600_000)}h ${Math.round((ms % 3_600_000) / 60_000)}m`;
-}
-
 /** When a subagent or step reached its result; zero while it is still going. */
 function endOfAgent(agents: SubAgentView[], id: string): number {
   return agents.find((a) => a.id === id)?.endedAtMs ?? 0;
@@ -215,15 +209,6 @@ function sessionTitleFallback(kind: LaneKind): string {
   return kind === "main" ? "this session" : "this agent";
 }
 
-/** 24-hour, so a label is five characters wide however long the session ran. */
-function clockTime(ms: number): string {
-  return new Date(ms).toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
-}
-
 /**
  * How close two turn-start labels may sit before the later one is dropped.
  *
@@ -233,10 +218,6 @@ function clockTime(ms: number): string {
  * orientation aid — it is better to have four of them than forty.
  */
 const TICK_MIN_GAP_PX = 120;
-
-/** Statuses that mean the agent has not stopped, so its lane runs to the edge
- * rather than ending at whatever it last did. */
-const LIVE_STATUS = new Set(["running", "provisioning", "awaiting_input"]);
 
 /**
  * Flatten one message into the things the timeline draws.
@@ -380,7 +361,7 @@ export function buildTimeline(
       width: Math.max(MIN_BAR_PX, scale.toX(e.endMs) - x),
       entryId: e.entryId,
       title: e.title,
-      detail: e.endMs > e.startMs ? humanMs(e.endMs - e.startMs) : clockTime(e.startMs),
+      detail: e.endMs > e.startMs ? humanDuration(e.endMs - e.startMs) : clockTime(e.startMs),
       live: e.live || undefined,
     };
   });
@@ -417,7 +398,7 @@ export function buildTimeline(
         width: Math.max(MIN_BAR_PX, scale.toX(e.endMs) - x),
         entryId: e.entryId,
         title: e.title,
-        detail: e.endMs > e.startMs ? humanMs(e.endMs - e.startMs) : clockTime(e.startMs),
+        detail: e.endMs > e.startMs ? humanDuration(e.endMs - e.startMs) : clockTime(e.startMs),
         live: e.live || undefined,
       };
     });
@@ -453,6 +434,14 @@ export function buildTimeline(
   // Orphans belong to the session, not to one agent inside it: scoped to a
   // subagent, the tree is that subagent's own subtree.
   const members = hostedTree(agents, subSessions, rootId, collapsed, rootKind === "main");
+  // Whether the root hosts anything is a question about the *roster*, and a
+  // fold must not be able to change the answer: folded, `members` is empty, so
+  // the root reported no children, so it was drawn without the chevron that
+  // unfolds it — collapsing the root was a one-way door. Every other lane was
+  // fine, because a member's own child count is counted off the roster.
+  const rootHasChildren = collapsed.includes(rootId)
+    ? hostedTree(agents, subSessions, rootId, [], rootKind === "main").length > 0
+    : members.length > 0;
 
   const lanes: Lane[] = [
     {
@@ -467,7 +456,7 @@ export function buildTimeline(
       depth: 0,
       bars,
       placed: true,
-      hasChildren: members.length > 0,
+      hasChildren: rootHasChildren,
       detail: rootSubSession?.status ?? rootAgent?.status ?? "idle",
     },
   ];
@@ -480,7 +469,9 @@ export function buildTimeline(
   const spanOf = (startMs: number, endMs: number, status: string) => {
     if (startMs <= 0) return undefined;
     const x = scale.toX(startMs);
-    const open = LIVE_STATUS.has(status) || endMs <= 0;
+    // Still going, so the lane runs to the edge rather than ending at
+    // whatever it last did.
+    const open = isLive(status) || endMs <= 0;
     return { x, width: Math.max(MIN_BAR_PX, (open ? scale.width : scale.toX(endMs)) - x), open };
   };
 

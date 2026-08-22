@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, ExternalLink } from "lucide-react";
+import { ChevronDown, ChevronRight, MessageSquareText } from "lucide-react";
 import type { Bar, BarKind, Lane, Timeline } from "../lib/timeline";
 import { cn } from "../lib/cn";
 
@@ -17,9 +17,12 @@ import { cn } from "../lib/cn";
 
 const LANE_H = 30;
 const BAR_H = 20;
-const SIDEBAR_W = 170;
-/** The "branched sessions" rule, which is a row of its own in the stack. */
-const DIVIDER_H = 26;
+/** The name column. Wide enough for a real title: at 170 a name had about
+ * twenty characters between the chevron and the jump key, so most agents read
+ * as a truncation with an ellipsis where the distinguishing part had been.
+ * It costs the bars nothing — the pane scrolls sideways, and the sidebar is
+ * pinned over it rather than sharing the width. */
+const SIDEBAR_W = 240;
 
 /** Solid, square and borderless: a bar is a block of colour, nothing else.
  *
@@ -99,17 +102,20 @@ export function SessionTimeline({
   // are decided in one place.
   const placed = timeline.lanes.filter((l) => l.placed);
   const unplaced = timeline.lanes.filter((l) => !l.placed);
-  // Subagents are work inside a turn; sub sessions are other sessions. The same
-  // distinction `SubAgentCard` and `SubSessionMarker` already draw, carried here.
-  const firstSubSessionAt = placed.findIndex((l) => l.kind === "sub_session");
 
   // Every lane's top, so a connector can be drawn from a lane all the way back
   // up to the one it branched from. Computed here rather than in the model
-  // because it depends on the divider, which is a rendering decision.
+  // because a row's height is a rendering decision.
+  //
+  // Subagents come before sub sessions under every agent, which is the model's
+  // doing — `bySibling` in `agentTree`. There used to be a labelled rule drawn
+  // between the two groups as well, and it could only ever be drawn once, at
+  // the first sub session in a flat list of lanes: under a tree where each
+  // agent has both, it landed in the middle of one agent's children and said
+  // nothing true about the rest. The grouping carries it.
   const tops = new Map<string, number>();
   let y = 0;
-  placed.forEach((lane, i) => {
-    if (i === firstSubSessionAt && firstSubSessionAt > 0) y += DIVIDER_H;
+  placed.forEach((lane) => {
     tops.set(lane.agentId, y);
     y += LANE_H;
   });
@@ -149,31 +155,21 @@ export function SessionTimeline({
           ))}
         </div>
 
-        {placed.map((lane, i) => (
-          <div key={lane.agentId}>
-            {i === firstSubSessionAt && firstSubSessionAt > 0 && (
-              <div
-                className="flex items-center gap-3 pr-6 pl-3"
-                style={{ height: DIVIDER_H }}
-              >
-                <span className="legend whitespace-nowrap">sub sessions</span>
-                <span className="h-px flex-1 bg-[var(--rule)]" />
-              </div>
-            )}
-            <LaneRow
-              lane={lane}
-              rise={(tops.get(lane.agentId) ?? 0) - (tops.get(lane.anchor?.parentAgentId ?? "") ?? 0)}
-              expanded={expanded.includes(lane.agentId)}
-              collapsed={collapsed.includes(lane.agentId)}
-              onToggleCollapse={onToggleCollapse}
-              onToggleExpand={onToggleExpand}
-              onSelectEntry={onSelectEntry}
-              onSelectAgent={onSelectAgent}
-              onOpenAgent={onOpenAgent}
-              selectedAgent={selectedAgent}
-              selectedEntry={selectedEntry}
-            />
-          </div>
+        {placed.map((lane) => (
+          <LaneRow
+            key={lane.agentId}
+            lane={lane}
+            rise={(tops.get(lane.agentId) ?? 0) - (tops.get(lane.anchor?.parentAgentId ?? "") ?? 0)}
+            expanded={expanded.includes(lane.agentId)}
+            collapsed={collapsed.includes(lane.agentId)}
+            onToggleCollapse={onToggleCollapse}
+            onToggleExpand={onToggleExpand}
+            onSelectEntry={onSelectEntry}
+            onSelectAgent={onSelectAgent}
+            onOpenAgent={onOpenAgent}
+            selectedAgent={selectedAgent}
+            selectedEntry={selectedEntry}
+          />
         ))}
 
         {unplaced.length > 0 && (
@@ -300,7 +296,9 @@ function LaneRow({
             aria-label={`Open ${lane.label}'s transcript`}
             onClick={() => onOpenAgent(lane.agentId)}
           >
-            <ExternalLink size={11} aria-hidden />
+            {/* The transcript's own glyph, the one a graph node's key and
+                both panels carry. One action, one icon. */}
+            <MessageSquareText size={12} aria-hidden />
           </button>
         )}
 
