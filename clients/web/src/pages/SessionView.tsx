@@ -90,11 +90,21 @@ const VIEWS: {
  * editable control where a page title goes and gave the header a hover state
  * that meant "you can type here" on the one line that names what you are
  * looking at. Renaming moved to the session's actions menu in the rail, next
- * to its tags and its delete. */
-function SessionTitle({ name }: { name: string | undefined }) {
+ * to its tags and its delete.
+ *
+ * While the session document is in flight there is no name to show — and no
+ * "New session" either: that title belongs to a session that genuinely has
+ * none, and the read being slow is not a new session. */
+function SessionTitle({
+  name,
+  loading,
+}: {
+  name: string | undefined;
+  loading?: boolean;
+}) {
   return (
     <h1 data-testid="session-title" className="page-title min-w-0 flex-1 truncate">
-      {sessionTitle(name)}
+      {loading ? "Loading…" : sessionTitle(name)}
     </h1>
   );
 }
@@ -750,7 +760,7 @@ export function SessionView() {
                 context that the rail already carries — and did it for one kind
                 of run only, so the header said different amounts about
                 different agents. */}
-            <SessionTitle name={runTitle} />
+            <SessionTitle name={runTitle} loading={detail === undefined} />
             {/* Beside the title rather than in the key cluster on the right:
                 this changes *what you are looking at*, and that cluster is for
                 acting on what you are already looking at. */}

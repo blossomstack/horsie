@@ -113,7 +113,7 @@ export function useDeleteSession() {
  *
  * The agent's title tool used to be the only writer of a session name, so a
  * session the model never titled kept its raw first message as its name for
- * good. Reported inline by the header that owns the field, hence no global
+ * good. Reported inline by the rail row that owns the field, hence no global
  * notice. */
 export function useRenameSession() {
   const client = useQueryClient();

@@ -14,7 +14,7 @@ import { SessionStatusKind } from "../api/types";
 import { SessionRow } from "./SessionRow";
 
 vi.mock("../api/client", () => ({
-  api: { sessions: { setAnnotations: vi.fn(), remove: vi.fn() } },
+  api: { sessions: { setAnnotations: vi.fn(), remove: vi.fn(), rename: vi.fn() } },
 }));
 
 afterEach(() => {
@@ -101,5 +101,35 @@ describe("SessionRow tag menu", () => {
     fireEvent.change(input, { target: { value: "  !!  " } });
     fireEvent.keyDown(input, { key: "Enter" });
     expect(api.sessions.setAnnotations).not.toHaveBeenCalled();
+  });
+});
+
+describe("SessionRow rename", () => {
+  const rename = () => {
+    row(tagged, []);
+    fireEvent.click(screen.getByTestId("session-row-menu-s1"));
+    const input = screen.getByTestId("session-title-input");
+    fireEvent.change(input, { target: { value: "a new name" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+  };
+
+  it("sends the new name for a name that differs", async () => {
+    vi.mocked(api.sessions.rename).mockResolvedValue({});
+    rename();
+    await waitFor(() =>
+      expect(api.sessions.rename).toHaveBeenCalledWith("s1", "a new name"),
+    );
+  });
+
+  it("says why a refused rename failed, next to the field", async () => {
+    vi.mocked(api.sessions.rename).mockRejectedValue(
+      new Error("name: at most 60 characters"),
+    );
+    rename();
+    await waitFor(() =>
+      expect(screen.getByTestId("rename-error").textContent).toContain(
+        "at most 60 characters",
+      ),
+    );
   });
 });

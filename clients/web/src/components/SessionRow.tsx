@@ -170,6 +170,19 @@ export function SessionRow({
                 if (next && next !== s.name) rename.mutate({ id: s.id, name: next });
               }}
             />
+            {/* The hook opts out of the global notice, so the row is where a
+                refused rename says why. It used to vanish — the row kept its
+                old name and nothing on screen acknowledged the attempt. */}
+            {rename.error && (
+              <p
+                className="mt-1.5 px-0.5 text-xs leading-relaxed text-red-ink"
+                data-testid="rename-error"
+              >
+                {rename.error instanceof Error
+                  ? rename.error.message
+                  : "The rename failed."}
+              </p>
+            )}
           </div>
           <MenuItem
             danger
