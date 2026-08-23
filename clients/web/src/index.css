@@ -1079,6 +1079,46 @@
   line-height: 1.5;
 }
 
+/* The same prose, read in an 18rem column.
+ *
+ * The side panel's own voice is 0.6875–0.8125rem, so transcript prose dropped
+ * in unmodified came out larger than every label around it: a brief in the
+ * panel out-shouted the numbers it sat under. Only the scale changes — the
+ * headings, the code tint, the list markers are the ones the transcript uses,
+ * because a task is the same kind of text wherever it is read. */
+.prose-compact {
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  /* Dim, as the panel's other body text is. `.prose` sets its own colour, so
+   * a `text-dim` on a wrapper never reached it — the class was there and had
+   * no effect. */
+  color: var(--legend-dim);
+}
+.prose-compact p {
+  margin: 0.5em 0;
+}
+/* Every level down to body size. In the transcript a heading outranks the
+ * text under it and nothing else is competing; in the panel the section legend
+ * above it — "Task", "Result" — is the heading, and a 1.08em `##` inside the
+ * block was visibly larger and brighter than the label naming the block. Weight
+ * still separates them, which is all a heading needs at this scale. */
+.prose-compact h1,
+.prose-compact h2,
+.prose-compact h3,
+.prose-compact h4 {
+  margin: 0.9em 0 0.3em;
+  font-size: 1em;
+}
+.prose-compact ul,
+.prose-compact ol {
+  margin: 0.4em 0;
+  padding-left: 1.1em;
+}
+.prose-compact pre {
+  margin: 0.55em 0;
+  padding: 0.55em 0.7em;
+}
+
 /* A table's own scroller, so a 12-column table scrolls instead of widening
  * the transcript. */
 .prose-scroll {

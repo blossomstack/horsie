@@ -16,15 +16,20 @@ const Markdown = lazy(() => chunk);
 export function Prose({
   text,
   streaming = false,
+  compact = false,
 }: {
   text: string;
   /** Suppresses syntax highlighting until the text stops changing — see
    *  `Markdown` for why that mattered enough to thread a flag down here. */
   streaming?: boolean;
+  /** Read in a side panel rather than the transcript column: same rendering,
+   *  scaled to the panel's own voice. */
+  compact?: boolean;
 }) {
+  const cls = compact ? "prose prose-compact" : "prose";
   return (
-    <Suspense fallback={<div className="prose whitespace-pre-wrap">{text}</div>}>
-      <Markdown text={text} highlight={!streaming} />
+    <Suspense fallback={<div className={`${cls} whitespace-pre-wrap`}>{text}</div>}>
+      <Markdown text={text} highlight={!streaming} compact={compact} />
     </Suspense>
   );
 }

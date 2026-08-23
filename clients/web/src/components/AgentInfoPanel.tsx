@@ -10,6 +10,7 @@ import {
 } from "../lib/agentTree";
 import { absoluteTime, clockTime, compactNumber, humanDuration } from "../lib/format";
 import { cn } from "../lib/cn";
+import { Prose } from "./Prose";
 import { SidePanel } from "./SidePanel";
 
 /**
@@ -410,25 +411,26 @@ export function AgentInfoPanel({
           </Section>
         )}
 
+        {/* Both of these are markdown: a brief is written by an agent (or by
+            the person briefing one) and a result is written by a model, so
+            both arrive with headings, lists, fences and links in them. Held as
+            pre-wrapped plain text they rendered as their own source — `##` and
+            `- ` and bare fence markers down a 18rem column — which is the one
+            rendering nobody wanted, least of all for the two blocks in this
+            panel anyone actually reads at length. */}
         {agent.input && (
           <Section title={agent.kind === "sub_session" ? "Brief" : "Task"}>
-            <p
-              className="text-[0.8125rem] leading-snug break-words whitespace-pre-wrap text-dim"
-              data-testid="agent-panel-input"
-            >
-              {agent.input}
-            </p>
+            <div data-testid="agent-panel-input">
+              <Prose text={agent.input} compact />
+            </div>
           </Section>
         )}
 
         {agent.output && (
           <Section title="Result">
-            <p
-              className="text-[0.8125rem] leading-snug break-words whitespace-pre-wrap text-dim"
-              data-testid="agent-panel-output"
-            >
-              {agent.output}
-            </p>
+            <div data-testid="agent-panel-output">
+              <Prose text={agent.output} compact />
+            </div>
           </Section>
         )}
       </div>

@@ -60,14 +60,17 @@ const directionalComponents = {
 const Markdown = memo(function Markdown({
   text,
   highlight = true,
+  compact = false,
 }: {
   text: string;
   /** False while the text is still arriving. */
   highlight?: boolean;
+  /** Scaled down for a side panel — see `.prose-compact`. */
+  compact?: boolean;
 }) {
   const highlighting = highlight && text.length <= HIGHLIGHT_MAX_CHARS;
   return (
-    <div className="prose">
+    <div className={compact ? "prose prose-compact" : "prose"}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={
