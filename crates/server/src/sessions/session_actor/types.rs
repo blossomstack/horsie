@@ -1349,6 +1349,15 @@ pub struct AgentEntry {
     /// an agent is still running.
     pub started_at_ms: u64,
     pub ended_at_ms: u64,
+    /// The run this execution belongs to, and the workflow that run was
+    /// started from. Set for a step and for nothing else.
+    ///
+    /// A session can host several runs — its own, if it is one, and one per
+    /// `invoke_workflow` any of its agents called — and the roster lists every
+    /// execution of all of them. Without this they are one flat list of steps,
+    /// which is not enough to draw either run as the sequence it is.
+    pub run: Option<Uuid>,
+    pub workflow: Option<String>,
 }
 
 /// What kind of work one roster entry is.

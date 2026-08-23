@@ -18,12 +18,12 @@ import type { RenderedMessage, TranscriptItem } from "../hooks/useSessionStream"
 import { isAskCall } from "./askUser";
 import {
   type AgentKind,
-  RUN_ROOT,
+  type RunGroup,
   describeRun,
   hostedTree,
   isLive,
+  runGroups,
   runStatus,
-  stepRuns,
 } from "./agentTree";
 import { clockTime, humanDuration } from "./format";
 
@@ -373,8 +373,12 @@ export function buildTimeline(
    * after. The steps are the spans the axis is built from instead, and each
    * one's own bars arrive the way an expanded lane's always have.
    */
-  const steps = stepRuns(agents);
-  const run = runTitle != null && steps.length > 0;
+  // The run this session *is*, if it is one. A run invoked inside an ordinary
+  // session is not this: it has a lane of its own further down, and the axis
+  // stays the session's.
+  const rootRun: RunGroup | undefined = runGroups(agents, runTitle).find((g) => g.root);
+  const run = rootRun !== undefined;
+  const steps = rootRun?.steps ?? [];
   const stepSpans = steps.map((s) => ({
     startMs: s.spawnedAtMs,
     // A step still going has no end, so it is measured against now — the same
@@ -466,7 +470,7 @@ export function buildTimeline(
   // A run is rooted on the run, not on whichever step this page is: every step
   // belongs to it, and rooted on one step the others were orphans rescued onto
   // it — a step drawn as though it had spawned the rest of the run.
-  const rootId = run ? RUN_ROOT : (rootAgentId ?? main?.id ?? MAIN_AGENT);
+  const rootId = rootRun ? rootRun.nodeId : (rootAgentId ?? main?.id ?? MAIN_AGENT);
   const rootAgent = agents.find((a) => a.id === rootId);
   const rootSubSession = subSessions.find((f) => f.id === rootId);
   const rootKind: LaneKind = run
@@ -497,8 +501,8 @@ export function buildTimeline(
     {
       agentId: rootId,
       kind: rootKind,
-      label: run
-        ? runTitle
+      label: rootRun
+        ? rootRun.label
         : (rootSubSession?.title ??
           rootAgent?.title ??
           rootAgent?.agentType ??

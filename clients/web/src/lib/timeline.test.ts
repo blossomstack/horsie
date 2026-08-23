@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { SubSessionView, SubAgentView } from "../api/types";
 import type { TranscriptItem } from "../hooks/useSessionStream";
-import { RUN_ROOT } from "./agentTree";
+import { runNodeId } from "./agentTree";
 import {
   buildScale,
   buildTimeline,
@@ -482,7 +482,17 @@ describe("folding", () => {
  * first step's page the two that followed drew as slivers *inside* it. */
 describe("workflow runs", () => {
   const step = (id: string, at: number, took: number, status = "completed"): SubAgentView =>
-    agent({ id, kind: "step", title: id, status, spawnedAtMs: at, endedAtMs: at + took });
+    agent({
+      id,
+      kind: "step",
+      title: id,
+      status,
+      spawnedAtMs: at,
+      endedAtMs: at + took,
+      run: "run-1",
+      workflow: "nightly-audit",
+    });
+  const RUN_ROOT = runNodeId("run-1");
 
   const RUN = [step("gather", 1_000, 4_000), step("review", 5_000, 2_000), step("report", 7_000, 1_000)];
 
@@ -531,13 +541,20 @@ describe("workflow runs", () => {
     expect(t.ticks[0].x).toBe(0);
   });
 
-  /* The same gate the graph has: an ordinary session whose agent invoked a
-     workflow has step executions in its roster and is not a run. */
-  it("leaves a session that merely invoked a workflow rooted on its own agent", () => {
+  /* An ordinary session whose agent invoked a workflow is not a run: it keeps
+     its own root and its axis, and the run is a lane under it with its
+     executions beneath — foldable, like any other. */
+  it("gives a run an agent invoked a lane of its own under that session", () => {
     const roster = [agent({ id: "main", kind: "main", title: undefined }), ...RUN];
     const t = buildTimeline(SESSION, roster, [], 20_000, {}, undefined, []);
     expect(t.lanes[0]).toMatchObject({ agentId: "main", kind: "main" });
-    expect(t.lanes.map((l) => l.agentId)).not.toContain(RUN_ROOT);
+    expect(t.lanes.map((l) => [l.agentId, l.depth])).toEqual([
+      ["main", 0],
+      [RUN_ROOT, 1],
+      ["gather", 2],
+      ["review", 2],
+      ["report", 2],
+    ]);
   });
 
   it("keeps the run's own chevron while the run is folded", () => {

@@ -1,6 +1,13 @@
 import { MessageSquareText, Trash2 } from "lucide-react";
 import type { AgentStats, SubAgentView, SubSessionView, UsageView } from "../api/types";
-import { KIND_LABEL, RUN_ROOT, isLive, runStatus, stepRuns, type AgentKind } from "../lib/agentTree";
+import {
+  KIND_LABEL,
+  isLive,
+  isRunNode,
+  runGroups,
+  runStatus,
+  type AgentKind,
+} from "../lib/agentTree";
 import { absoluteTime, clockTime, compactNumber, humanDuration } from "../lib/format";
 import { cn } from "../lib/cn";
 import { SidePanel } from "./SidePanel";
@@ -55,9 +62,14 @@ export interface SelectedAgent {
  * over each step's *subtree*, so the work a step delegated is counted once and
  * counted here.
  */
-function selectRun(agents: SubAgentView[], runTitle: string | undefined): SelectedAgent | null {
-  const steps = stepRuns(agents);
-  if (steps.length === 0 || !runTitle) return null;
+function selectRun(
+  nodeId: string,
+  agents: SubAgentView[],
+  runTitle: string | undefined,
+): SelectedAgent | null {
+  const group = runGroups(agents, runTitle).find((g) => g.nodeId === nodeId);
+  const steps = group?.steps ?? [];
+  if (!group || steps.length === 0) return null;
   const usage = steps.reduce(
     (total, s) => ({
       inputTokens: total.inputTokens + s.stats.subtreeUsage.inputTokens,
@@ -66,8 +78,8 @@ function selectRun(agents: SubAgentView[], runTitle: string | undefined): Select
     { inputTokens: 0, outputTokens: 0 } as UsageView,
   );
   return {
-    id: RUN_ROOT,
-    title: runTitle,
+    id: nodeId,
+    title: group.label,
     kind: "run",
     status: runStatus(steps),
     startedAtMs: steps[0].spawnedAtMs,
@@ -87,7 +99,7 @@ export function selectAgent(
   /** What this run is called, when the session is one. */
   runTitle?: string,
 ): SelectedAgent | null {
-  if (id === RUN_ROOT) return selectRun(agents, runTitle);
+  if (isRunNode(id)) return selectRun(id, agents, runTitle);
   const sub = subSessions.find((s) => s.id === id);
   if (sub) {
     return {

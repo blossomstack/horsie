@@ -77,4 +77,21 @@ export interface SubAgentView {
    */
   spawnedAtMs: number;
   endedAtMs: number;
+  /**
+   * The workflow run this execution belongs to, for a step; absent for
+   * every other kind.
+   *
+   * A session can host more than one: its own, if it is a run, and one per
+   * `invoke_workflow` any of its agents called. Without this they arrive as
+   * one flat list of steps, and a client redrawing the run as the sequence
+   * it is has no way to tell two runs apart — or to tell an invoked run
+   * from the session's own.
+   */
+  run?: string;
+  /**
+   * The workflow that run was started from — its name, for display. On
+   * every step of the run rather than in a list of its own, so one read of
+   * a session is still all a picture of it needs.
+   */
+  workflow?: string;
 }

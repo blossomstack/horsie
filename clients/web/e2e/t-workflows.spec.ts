@@ -340,8 +340,11 @@ test("T5: a run's steps are drawn as the sequence they are, under the run", asyn
   await page.getByTestId("graph-toggle").click();
   await expect(page.getByTestId("agent-graph")).toBeVisible();
   await expect(page.locator('[data-testid^="agent-node-"]')).toHaveCount(4);
-  const run = page.getByTestId("agent-node-workflow-run");
+  const run = page.locator('[data-testid^="agent-node-run:"]');
   await expect(run).toHaveAttribute("data-kind", "run");
+  // The run's members, boxed — one box per run, so a session hosting several
+  // never draws them as one.
+  await expect(page.locator('[data-testid^="agent-group-"]')).toHaveCount(1);
   const steps = page.locator('[data-testid^="agent-node-"][data-kind="step"]');
   await expect(steps).toHaveCount(3);
   // The step being read is marked, root included: it is a run like any other.
@@ -359,7 +362,8 @@ test("T5: a run's steps are drawn as the sequence they are, under the run", asyn
   const xs = places.map((p) => p.x).sort((a, b) => a - b);
   expect(new Set(xs).size).toBe(3);
   expect(new Set(places.map((p) => p.y)).size).toBe(1);
-  const atRun = await nodeAt(page, "agent-node-workflow-run");
+  const runId = ((await run.getAttribute("data-testid")) ?? "").slice("agent-node-".length);
+  const atRun = await nodeAt(page, `agent-node-${runId}`);
   expect(atRun.x).toBeLessThan(xs[0]);
 
   // The timeline: the same four, and the run is a parent that folds.
@@ -367,7 +371,7 @@ test("T5: a run's steps are drawn as the sequence they are, under the run", asyn
   await expect(page.getByTestId("session-timeline")).toBeVisible();
   const lanes = page.locator('[data-testid^="timeline-lane-"]');
   await expect(lanes).toHaveCount(4);
-  await expect(page.getByTestId("timeline-lane-workflow-run")).toHaveAttribute("data-kind", "run");
+  await expect(page.getByTestId(`timeline-lane-${runId}`)).toHaveAttribute("data-kind", "run");
 
   // Every step is placed on the run's own axis, so none of them is stacked on
   // the step whose page this is.
@@ -378,14 +382,14 @@ test("T5: a run's steps are drawn as the sequence they are, under the run", asyn
 
   // The run folds away, and — the reason the root's own count is taken off the
   // roster — it can be unfolded again.
-  const fold = page.getByTestId("timeline-collapse-workflow-run");
+  const fold = page.getByTestId(`timeline-collapse-${runId}`);
   await fold.click();
   await expect(lanes).toHaveCount(1);
   await fold.click();
   await expect(lanes).toHaveCount(4);
 
   // And the panel answers for the run itself, which is on neither roster.
-  await page.getByTestId("timeline-select-workflow-run").click();
+  await page.getByTestId(`timeline-select-${runId}`).click();
   await expect(page.getByTestId("agent-panel-readout")).toHaveText("workflow run");
   await expect(page.getByTestId("agent-panel-title")).toHaveText(CHAIN_WORKFLOW);
 });

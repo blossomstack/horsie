@@ -148,11 +148,11 @@ export function AgentGraph({
     );
   }
 
-  const runNode = tree.nodes.find((n) => n.kind === "run");
+  const runNodes = tree.nodes.filter((n) => n.kind === "run");
   // A run's box is captioned above its own top edge, and a caption drawn above
   // the topmost row lands off the canvas. The extra ground is taken once, at
   // the origin, rather than by shifting the box down into the nodes it holds.
-  const top = runNode ? PAD + GROUP_PAD : PAD;
+  const top = runNodes.length > 0 ? PAD + GROUP_PAD : PAD;
   const at = (n: PlacedAgent) => ({
     x: PAD + n.depth * (NODE_W + GAP_X),
     y: top + n.lane * ROW_H,
@@ -185,28 +185,57 @@ export function AgentGraph({
    * inside the container it operates on is a control with nowhere to sit when
    * the container is folded away.
    */
-  const grouped = runNode ? tree.nodes.filter((n) => n.id !== runNode.id) : [];
-  // Where each execution sits in the run. "workflow step" on all three of them
-  // says what they are and nothing about which one this is; the run log's own
-  // numbering is the thing a reader is actually looking for, and a step
+  // Everything drawn below one node, by walking the drawn edges. A run's box
+  // is its own members, not "every node but the run": a session can host
+  // several runs at once — its own, and one per `invoke_workflow` any of its
+  // agents called — and one box around all of them would claim they were one.
+  const below = (rootId: string): PlacedAgent[] => {
+    const out: PlacedAgent[] = [];
+    const seen = new Set([rootId]);
+    let frontier = [rootId];
+    while (frontier.length > 0) {
+      const next: string[] = [];
+      for (const from of frontier) {
+        for (const e of tree.edges) {
+          if (e.from !== from || seen.has(e.to)) continue;
+          seen.add(e.to);
+          const node = placed.get(e.to);
+          if (node) out.push(node);
+          next.push(e.to);
+        }
+      }
+      frontier = next;
+    }
+    return out;
+  };
+
+  const boxes = runNodes.flatMap((run) => {
+    const members = below(run.id);
+    if (members.length === 0) return [];
+    const bounds = members.reduce(
+      (b, n) => {
+        const { x, y } = at(n);
+        return {
+          x: Math.min(b.x, x - GROUP_PAD),
+          y: Math.min(b.y, y - GROUP_PAD),
+          right: Math.max(b.right, x + NODE_W + GROUP_PAD),
+          bottom: Math.max(b.bottom, y + NODE_H + GROUP_PAD),
+        };
+      },
+      { x: Infinity, y: Infinity, right: 0, bottom: 0 },
+    );
+    return [{ id: run.id, label: run.label, ...bounds }];
+  });
+
+  // Where each execution sits in *its own* run. "workflow step" on all three of
+  // them says what they are and nothing about which one this is; the run log's
+  // own numbering is the thing a reader is actually looking for, and a step
   // reached twice by a loop is two numbers rather than one node seen twice.
-  const steps = tree.nodes.filter((n) => n.kind === "step");
-  const ordinals = new Map(steps.map((n, i) => [n.id, `step ${i + 1} of ${steps.length}`]));
-  const box =
-    grouped.length > 0
-      ? grouped.reduce(
-          (b, n) => {
-            const { x, y } = at(n);
-            return {
-              x: Math.min(b.x, x - GROUP_PAD),
-              y: Math.min(b.y, y - GROUP_PAD),
-              right: Math.max(b.right, x + NODE_W + GROUP_PAD),
-              bottom: Math.max(b.bottom, y + NODE_H + GROUP_PAD),
-            };
-          },
-          { x: Infinity, y: Infinity, right: 0, bottom: 0 },
-        )
-      : undefined;
+  const ordinals = new Map<string, string>();
+  for (const run of runNodes) {
+    const steps = below(run.id).filter((n) => n.kind === "step");
+    steps.forEach((n, i) => ordinals.set(n.id, `step ${i + 1} of ${steps.length}`));
+  }
 
   // Out of the parent's right edge, into the child's left edge. Flat-tangent
   // curves rather than elbows: at this rank spacing a fan of six children is
@@ -262,8 +291,8 @@ export function AgentGraph({
         className="mx-auto block"
       >
         {/* Behind everything: a container, not a mark on any one node. */}
-        {box && runNode && (
-          <g data-testid="agent-group-run" aria-hidden>
+        {boxes.map((box) => (
+          <g key={box.id} data-testid={`agent-group-${box.id}`} aria-hidden>
             <rect
               x={box.x}
               y={box.y}
@@ -289,12 +318,12 @@ export function AgentGraph({
               className="fill-faint text-[9px] tracking-[0.08em] uppercase"
             >
               {clip(
-                `${KIND_LABEL.run} · ${runNode.label}`,
+                `${KIND_LABEL.run} · ${box.label}`,
                 Math.floor((box.right - box.x) / CAPTION_CHAR_W),
               )}
             </text>
           </g>
-        )}
+        ))}
 
         <defs>
           {/* Two heads, because a marker cannot inherit the line's colour:

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RUN_ROOT, layoutAgentTree, runStatus, stepRuns } from "./agentTree";
+import { layoutAgentTree, runNodeId, runStatus, stepRuns } from "./agentTree";
 import type { SubAgentView, SubSessionView } from "../api/types";
 
 function agent(
@@ -43,8 +43,10 @@ function subSession(
   };
 }
 
-/** The main agent as the roster carries it: nothing spawned it. */
-const main = agent("main", undefined, 0, 0);
+/** The main agent as the roster carries it: nothing spawned it, and it says
+ *  so — `kind` is what tells a run (which has no main agent) from a session
+ *  that merely invoked one. */
+const main: SubAgentView = { ...agent("main", undefined, 0, 0), kind: "main" };
 
 function lanes(nodes: { id: string; lane: number }[]): Record<string, number> {
   return Object.fromEntries(nodes.map((n) => [n.id, n.lane]));
@@ -282,12 +284,24 @@ describe("layoutAgentTree", () => {
    *  three-step run drew as one step labelled "main session" that had somehow
    *  spawned the other two, in no particular order. */
   describe("workflow runs", () => {
-    const step = (id: string, at: number, status = "completed"): SubAgentView => ({
-      ...agent(id, undefined, 0, at),
+    /** One execution, as the roster reports it: named for the step it ran and
+     *  carrying the run it belongs to. */
+    const step = (
+      id: string,
+      at: number,
+      status = "completed",
+      run = "run-1",
+      workflow = "nightly-audit",
+      parent?: string,
+    ): SubAgentView => ({
+      ...agent(id, parent, 0, at),
       kind: "step",
       title: id,
       status,
+      run,
+      workflow,
     });
+    const RUN_ROOT = runNodeId("run-1");
 
     it("roots on the run, and chains its steps in the order they ran", () => {
       const tree = layoutAgentTree(
@@ -345,14 +359,57 @@ describe("layoutAgentTree", () => {
      *
      * An agent that calls `invoke_workflow` starts a run *inside* an ordinary
      * session, and the roster lists those executions too — the server says so:
-     * "every run's executions, the session's own and any invoked one's". Keyed
-     * off the steps, that session would be rooted on a run node with its own
-     * main agent swept inside it. The title is the gate, and only a session
-     * that *is* a run has one. */
-    it("leaves a session that merely invoked a workflow rooted on its own agent", () => {
+     * "every run's executions, the session's own and any invoked one's".
+     * Rooted on the steps, such a session came out with its own main agent
+     * swept inside a run it merely started. It has a main agent, so it is not
+     * a run; the run hangs off it like any other work it set going. */
+    it("hangs a run an agent invoked off that agent, without rerooting the session", () => {
       const tree = layoutAgentTree([main, step("gather", 10), step("review", 20)]);
-      expect(tree.nodes[0]).toMatchObject({ id: "main", kind: "main", depth: 0 });
-      expect(tree.nodes.map((n) => n.id)).not.toContain(RUN_ROOT);
+      expect(tree.nodes.map((n) => [n.id, n.kind, n.depth])).toEqual([
+        ["main", "main", 0],
+        [RUN_ROOT, "run", 1],
+        ["gather", "step", 2],
+        ["review", "step", 3],
+      ]);
+    });
+
+    /** A session can host several at once — its own and one per invocation,
+     *  or two invocations from different agents. Flattened into one list they
+     *  drew as a single impossible run whose steps interleaved. */
+    it("draws one run per run, not one run per session", () => {
+      const tree = layoutAgentTree([
+        main,
+        step("a1", 10, "completed", "run-1", "audit"),
+        step("b1", 20, "completed", "run-2", "release"),
+        step("a2", 30, "completed", "run-1", "audit"),
+      ]);
+      const runs = tree.nodes.filter((n) => n.kind === "run");
+      expect(runs.map((n) => [n.id, n.label])).toEqual([
+        [runNodeId("run-1"), "audit"],
+        [runNodeId("run-2"), "release"],
+      ]);
+      // Each run's own executions chain under it, and never across runs.
+      expect(tree.edges).toEqual([
+        { from: "main", to: runNodeId("run-1") },
+        { from: runNodeId("run-1"), to: "a1" },
+        { from: "a1", to: "a2" },
+        { from: "main", to: runNodeId("run-2") },
+        { from: runNodeId("run-2"), to: "b1" },
+      ]);
+    });
+
+    it("groups a run the roster hangs off a subagent under that subagent", () => {
+      const tree = layoutAgentTree([
+        main,
+        agent("worker", undefined, 1, 5),
+        step("gather", 10, "completed", "run-1", "audit", "worker"),
+      ]);
+      expect(tree.nodes.map((n) => [n.id, n.depth])).toEqual([
+        ["main", 0],
+        ["worker", 1],
+        [runNodeId("run-1"), 2],
+        ["gather", 3],
+      ]);
     });
 
     it("orders the run log by when each execution began", () => {
