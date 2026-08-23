@@ -6,7 +6,8 @@ app = 'horsie'
 primary_region = 'iad'
 
 [build]
-  image = 'ghcr.io/blossomstack/horsie:latest'
+  # Pinned to a release, not `latest` — see the note in render.yaml.
+  image = 'ghcr.io/blossomstack/horsie:0.3.0'
 
 [http_service]
   internal_port = 3789

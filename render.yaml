@@ -12,7 +12,11 @@ services:
     runtime: image
     plan: free
     image:
-      url: ghcr.io/blossomstack/horsie:latest
+      # Pinned to a release, not `latest`: `latest` tracks main, and a runtime
+      # from get.horsie.dev is built from the newest release, so `latest` pairs
+      # the two across a link with no version handshake. publish.yml's
+      # version-guard fails a release that leaves this stale.
+      url: ghcr.io/blossomstack/horsie:0.3.0
     healthCheckPath: /api/health
     envVars:
       - key: PORT
