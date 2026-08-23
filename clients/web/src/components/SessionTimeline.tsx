@@ -295,7 +295,7 @@ function LaneRow({
         {/* Straight to that agent's transcript. Only on hover or focus: a key
             on every row at rest turns a sidebar of names into a sidebar of
             controls. */}
-        {lane.kind !== "main" && (
+        {lane.kind !== "main" && (lane.kind !== "run" || lane.depth === 0) && (
           <button
             type="button"
             data-testid={`timeline-open-${lane.agentId}`}
@@ -460,7 +460,12 @@ function BarView({
   );
 }
 
-/** What a lane's jump key opens, in the words of what it opens. */
+/** What a lane's jump key opens, in the words of what it opens.
+ *
+ * Drawn only where there is somewhere to go: an agent's transcript, or — for
+ * the session's own run, the lane at the top — its run view. A run an agent
+ * invoked has no page of its own, and a key that went to the session instead
+ * was answering a different question than the one it asked. */
 function openLabel(lane: Lane): string {
   return lane.kind === "run"
     ? `Open the ${lane.label} run`

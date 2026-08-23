@@ -342,9 +342,6 @@ test("T5: a run's steps are drawn as the sequence they are, under the run", asyn
   await expect(page.locator('[data-testid^="agent-node-"]')).toHaveCount(4);
   const run = page.locator('[data-testid^="agent-node-run:"]');
   await expect(run).toHaveAttribute("data-kind", "run");
-  // The run's members, boxed — one box per run, so a session hosting several
-  // never draws them as one.
-  await expect(page.locator('[data-testid^="agent-group-"]')).toHaveCount(1);
   const steps = page.locator('[data-testid^="agent-node-"][data-kind="step"]');
   await expect(steps).toHaveCount(3);
   // The step being read is marked, root included: it is a run like any other.

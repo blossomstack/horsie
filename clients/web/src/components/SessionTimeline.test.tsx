@@ -117,6 +117,34 @@ describe("SessionTimeline", () => {
     expect(open).not.toHaveBeenCalled();
   });
 
+  /** A key only where there is somewhere to go.
+   *
+   * The session's own run is the lane at the top, and its page is the run
+   * view — which is what a step's page needs to get back to. A run an agent
+   * *invoked* is a lane further down and has no page at all: nothing renders
+   * one on its own, and the key used to go to the inviting session's
+   * transcript, which is neither the run nor what the key said it opened. */
+  it("offers no jump key on a run that has no page of its own", () => {
+    const runLane = (agentId: string, depth: number) => ({
+      agentId,
+      kind: "run" as const,
+      label: "nightly-audit",
+      status: "completed",
+      depth,
+      placed: true,
+      hasChildren: true,
+      detail: "completed",
+      bars: [],
+      span: { x: 10, width: 40, open: false },
+    });
+    view({
+      ...TIMELINE,
+      lanes: [runLane("run:own", 0), runLane("run:invoked", 1)],
+    });
+    expect(screen.queryByTestId("timeline-open-run:own")).toBeTruthy();
+    expect(screen.queryByTestId("timeline-open-run:invoked")).toBeNull();
+  });
+
   it("leaves for an agent's transcript from the jump key beside its name", () => {
     const agent = vi.fn();
     const open = vi.fn();

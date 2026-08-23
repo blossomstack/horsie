@@ -51,6 +51,12 @@ export interface SelectedAgent {
    */
   startedAtMs: number;
   endedAtMs: number;
+  /**
+   * Whether this has a page to open. False for a run an agent invoked: it is
+   * not a session, nothing renders it on its own, and the key went to the
+   * inviting session's transcript — which is not the run.
+   */
+  opens: boolean;
 }
 
 /**
@@ -84,6 +90,8 @@ function selectRun(
     status: runStatus(steps),
     startedAtMs: steps[0].spawnedAtMs,
     endedAtMs: steps.reduce((last, s) => Math.max(last, s.endedAtMs), 0),
+    // The session's own run is its page; one an agent invoked has none.
+    opens: group.root,
     // No context figure: a run has no single window to fill, which is why its
     // own page carries no gauge either.
     stats: { usage, subtreeUsage: usage, contextTokens: 0 },
@@ -113,6 +121,7 @@ export function selectAgent(
       // Not an end — nothing closes a session — which is why the panel names
       // it for what it is rather than filing it under "ended".
       endedAtMs: sub.lastActivityMs,
+      opens: true,
     };
   }
   const agent = agents.find((a) => a.id === id);
@@ -133,6 +142,7 @@ export function selectAgent(
     error: agent.error,
     startedAtMs: agent.spawnedAtMs,
     endedAtMs: agent.endedAtMs,
+    opens: true,
   };
 }
 
@@ -424,6 +434,7 @@ export function AgentInfoPanel({
       </div>
 
       <div className="flex shrink-0 items-center gap-2 border-t px-3 py-2">
+        {agent.opens && (
         <button
           className="key key-flat !px-2 !py-1 text-xs"
           onClick={() => onOpenTranscript(agent.id)}
@@ -435,6 +446,7 @@ export function AgentInfoPanel({
           {/* A run's page is its graph; every other kind has a transcript. */}
           {agent.kind === "run" ? "Run" : "Transcript"}
         </button>
+        )}
         {onDelete && (
           <button
             className="key-icon ml-auto hover:!bg-red-quiet hover:!text-red-ink"
