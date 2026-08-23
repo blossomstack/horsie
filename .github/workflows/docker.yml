@@ -220,10 +220,15 @@ jobs:
           # tags. Those are immutable, and are what ops pins its deployments to.
           #
           # `latest` moves with main, and exists for the self-host surfaces that
-          # cannot carry a pin a user has to bump by hand: the Deploy to Render
-          # blueprint, fly.toml, and docker/docker-compose.yml. Without it those
-          # three reference a tag CI never publishes, which is how they spent two
+          # carry no pin: the Deploy to Render blueprint and fly.toml. Without it
+          # those reference a tag CI never publishes, which is how they spent two
           # weeks serving a hand-pushed image predating the PostgreSQL backend.
+          #
+          # docker/docker-compose.yml no longer uses it: the quick start hands a
+          # user that server AND a CLI installed from the newest release, and on
+          # `latest` those are a release apart across a link with no version
+          # handshake. It pins the release tag instead, guarded in publish.yml.
+          # Render and fly.toml still take `latest` and still have that skew.
           # A raw tag defaults to priority 200 and would outrank the SHA tag's
           # 100 (tags sort highest-first), taking over the action's `version`
           # output that the inspect step below reads. Hence the explicit 50.
