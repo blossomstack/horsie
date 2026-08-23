@@ -46,7 +46,7 @@ import {
 import { cn } from "../lib/cn";
 import { sessionTitle } from "../lib/format";
 import { buildTimeline } from "../lib/timeline";
-import { RUN_ROOT, layoutAgentTree } from "../lib/agentTree";
+import { isRunNode, layoutAgentTree } from "../lib/agentTree";
 import { progressionLabel, showsProgression, statusMeta } from "../lib/status";
 
 type SessionViewId = "transcript" | "timeline" | "graph";
@@ -295,7 +295,7 @@ export function SessionView() {
     // The run node is the session — and a workflow run's session page is its
     // graph, not a transcript, which is the one place worth landing from a
     // step. `RUN_ROOT` is not an agent, so it has no page of its own.
-    const own = agent === mainAgentId || agent === MAIN_AGENT || agent === RUN_ROOT;
+    const own = agent === mainAgentId || agent === MAIN_AGENT || isRunNode(agent);
     navigate(own ? `/sessions/${id}` : `/sessions/${id}/agents/${agent}`);
   };
 

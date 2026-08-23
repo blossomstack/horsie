@@ -16,7 +16,7 @@ use crate::agent_loop::AgentCommand;
 use crate::agent_loop::AgentUsageSnapshot;
 use crate::agent_loop::ReadCommand as AgentReadCommand;
 use crate::sessions::addressing::SessionInbox;
-use crate::sessions::run_forest::{SubAgentRun, SubAgentStatus, SubSessionRun};
+use crate::sessions::run_forest::{RunId, SubAgentRun, SubAgentStatus, SubSessionRun, WorkflowRun};
 use crate::sessions::spec::SessionStatus;
 use crate::sessions::workflow::{StepRun, StepStatus};
 use horsie_actor::ActorContext;
@@ -196,16 +196,43 @@ fn main_entry(
         model,
         started_at_ms: 0,
         ended_at_ms: 0,
+        // Only a step belongs to a run.
+        run: None,
+        workflow: None,
     }
 }
 
 /// One execution of a workflow step. A step reached twice has two of these, and
 /// each is its own agent.
-fn step_entry(execution: &StepRun, state: &SessionState, model: Option<String>) -> AgentEntry {
+fn step_entry(
+    run_id: RunId,
+    run: &WorkflowRun,
+    execution: &StepRun,
+    state: &SessionState,
+    model: Option<String>,
+) -> AgentEntry {
     AgentEntry {
         id: execution.agent.to_string(),
-        // The definition chose this step, so no agent is its parent.
-        parent: None,
+        // The agent that *invoked the run* — which is not "what spawned this
+        // step", because nothing did: the definition chose it. `None` for the
+        // session's own run, which nobody invited and which is the session.
+        //
+        // It used to be `None` for every step, and that is only true of a root
+        // run: a run an agent started with `invoke_workflow` belongs to that
+        // agent, and dropped here its executions arrived rootless and drew as
+        // work the session had done directly.
+        //
+        // Filtered to rows the client actually holds, exactly as `sub_entry`
+        // filters its own: the main agent is on the roster under a well-known
+        // id rather than its uuid, and the schema already says an absent
+        // parent means "rooted on this session's primary agent".
+        parent: state
+            .forest
+            .entry(run_id)
+            .and_then(|e| e.parent)
+            .filter(|pid| {
+                state.forest.sub(*pid).is_some() || state.forest.sub_session(*pid).is_some()
+            }),
         title: Some(execution.step.clone()),
         depth: 0,
         agent_type: None,
@@ -229,6 +256,10 @@ fn step_entry(execution: &StepRun, state: &SessionState, model: Option<String>) 
         model,
         started_at_ms: execution.started_at_ms,
         ended_at_ms: execution.ended_at_ms.unwrap_or(0),
+        // Which run, and which definition it came from. One flat list of steps
+        // cannot say either, and a session may host several runs at once.
+        run: Some(run_id.0),
+        workflow: Some(run.workflow.clone()),
     }
 }
 
@@ -291,6 +322,9 @@ fn sub_session_as_agent(entry: &SubSessionEntry) -> AgentEntry {
         started_at_ms: entry.created_at_ms,
         // A session is never *done*, so it has no end.
         ended_at_ms: 0,
+        // Only a step belongs to a run.
+        run: None,
+        workflow: None,
     }
 }
 
@@ -335,6 +369,9 @@ fn sub_entry(
         model,
         started_at_ms: rec.started_at_ms,
         ended_at_ms: rec.ended_at_ms,
+        // Only a step belongs to a run.
+        run: None,
+        workflow: None,
     }
 }
 
@@ -373,10 +410,10 @@ impl SessionActor {
             state
                 .forest
                 .workflows()
-                .flat_map(|(_, w)| w.run.steps.iter())
-                .map(|execution| {
+                .flat_map(|(id, w)| w.run.steps.iter().map(move |execution| (id, w, execution)))
+                .map(|(id, w, execution)| {
                     let model = self.model_of(state, &execution.agent.to_string());
-                    step_entry(execution, state, model)
+                    step_entry(id, w, execution, state, model)
                 }),
         );
         agents.extend(state.forest.sub_ids().into_iter().filter_map(|id| {
@@ -462,11 +499,13 @@ impl SessionActor {
         agent_id: Option<&str>,
     ) -> Option<AgentDetail> {
         let (key, agent) = self.resolve_agent(state, ctx, agent_id)?;
+        // The run as well as the execution: a step's roster entry names both,
+        // and this read builds the same entry the roster does.
         let execution = match key {
-            AgentKey::Step(id) => state
-                .forest
-                .step_of_agent(id)
-                .and_then(|(run, index)| state.forest.workflow(run).and_then(|w| w.run.get(index))),
+            AgentKey::Step(id) => state.forest.step_of_agent(id).and_then(|(run, index)| {
+                let w = state.forest.workflow(run)?;
+                Some((run, w, w.run.get(index)?))
+            }),
             AgentKey::Main | AgentKey::Sub(_) | AgentKey::SubSession(_) => None,
         };
         let node = match key {
@@ -476,7 +515,10 @@ impl SessionActor {
         let model = self.effective_settings(state, key).map(|s| s.model.clone());
         let mut entry = match key {
             AgentKey::Main => main_entry(self.id, state, &state.status(), model),
-            AgentKey::Step(_) => step_entry(execution?, state, model),
+            AgentKey::Step(_) => {
+                let (run_id, run, step) = execution?;
+                step_entry(run_id, run, step, state, model)
+            }
             AgentKey::Sub(id) => sub_entry(id, state, node?, model),
             AgentKey::SubSession(id) => sub_session_as_agent(&sub_session_entry(
                 id,
@@ -502,7 +544,7 @@ impl SessionActor {
             task: node.map(|node| node.task.clone()),
             output: match (node, execution) {
                 (Some(node), _) => node.output.clone(),
-                (None, Some(execution)) => execution
+                (None, Some((_, _, step))) => step
                     .output
                     .as_ref()
                     .map(crate::sessions::workflow::output_as_input),
@@ -714,6 +756,32 @@ mod tests {
         assert_eq!(agents[0].id, run.steps[0].agent.to_string());
         assert_eq!(agents[0].title.as_deref(), Some(run.steps[0].step.as_str()));
         assert_eq!(agents[0].status, AgentStatus::Running);
+    }
+
+    /// Which run an execution belongs to, and what that run was started from.
+    ///
+    /// The roster lists every execution of every run a session hosts — its own
+    /// and any an agent invoked — and it used to list them flat and
+    /// parentless, on the reasoning that the definition chose each step so no
+    /// agent is its parent. True of the step, and not enough: a client drawing
+    /// the run as the sequence it is has nothing to group by, and two runs in
+    /// one session are indistinguishable from one run with twice the steps.
+    #[tokio::test]
+    async fn a_step_names_the_run_it_belongs_to_and_the_workflow_it_came_from() {
+        let (_f, session, id, journal) = spawn_run_with_provider(BlockingProvider::new()).await;
+        wait_for_run(&journal, id, |r| r.current().is_some()).await;
+
+        let agents = roster(&session).await;
+        let step = &agents[0];
+        assert_eq!(step.kind, AgentKind::Step);
+        assert!(step.run.is_some(), "a step names its run: {step:?}");
+        assert!(
+            step.workflow.is_some(),
+            "a step names the workflow its run was started from: {step:?}"
+        );
+        // The session's *own* run: nobody invited it, so there is no inviting
+        // agent to name. An invoked run's steps carry that agent instead.
+        assert_eq!(step.parent, None);
     }
 
     /// What became of a step is the run log's answer, and a step that concluded

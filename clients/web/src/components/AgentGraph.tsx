@@ -38,9 +38,6 @@ const TOGGLE_R = 8;
 const JUMP_W = 20;
 /** The glyph inside it, which is the transcript's own icon at key size. */
 const JUMP_ICON = 13;
-/** Air between a run's outermost members and the box drawn around them. Under
- * `PAD`, so the box never reaches the edge of the canvas it is measured in. */
-const GROUP_PAD = 14;
 
 /** A node is a panel key lit by the same lamps the rest of the console uses:
  * live for work in motion, ok for an agent that landed, red for a fault.
@@ -77,12 +74,23 @@ const NAME_MAX_2 = 30;
 const DETAIL_MAX = 38;
 /** One character of the `+3` a fold carries, at 10px. */
 const BADGE_CHAR_W = 6;
-/** One character of a run box's caption: 9px, upper case, letter-spaced. */
-const CAPTION_CHAR_W = 7;
 
 /** What the jump key on a node opens, said in the words of what it opens. */
 function openLabel(kind: AgentKind, label: string): string {
   return kind === "run" ? `Open the ${label} run` : `Open ${label}'s transcript`;
+}
+
+/**
+ * Whether there is anywhere to go.
+ *
+ * Every agent has a transcript, and the session's own run has a page — its run
+ * view, which is what a step's page has to be able to get back to. A run an
+ * agent *invoked* has neither: it is not a session, and nothing renders it on
+ * its own. Its key used to be drawn anyway and went to the inviting session's
+ * transcript, which is not the run and is not what the key said it was.
+ */
+function opens(n: PlacedAgent): boolean {
+  return n.kind !== "run" || n.depth === 0;
 }
 
 function clip(text: string, max: number): string {
@@ -148,14 +156,10 @@ export function AgentGraph({
     );
   }
 
-  const runNode = tree.nodes.find((n) => n.kind === "run");
-  // A run's box is captioned above its own top edge, and a caption drawn above
-  // the topmost row lands off the canvas. The extra ground is taken once, at
-  // the origin, rather than by shifting the box down into the nodes it holds.
-  const top = runNode ? PAD + GROUP_PAD : PAD;
+  const runNodes = tree.nodes.filter((n) => n.kind === "run");
   const at = (n: PlacedAgent) => ({
     x: PAD + n.depth * (NODE_W + GAP_X),
-    y: top + n.lane * ROW_H,
+    y: PAD + n.lane * ROW_H,
   });
   const placed = new Map(tree.nodes.map((n) => [n.id, n]));
 
@@ -169,44 +173,45 @@ export function AgentGraph({
       const toggle = n.children > 0 ? TOGGLE_R : 0;
       return Math.max(right, at(n).x + NODE_W + toggle + badge);
     }, 0);
-  const height = top + PAD + (tree.rows - 1) * ROW_H + NODE_H;
+  const height = PAD * 2 + (tree.rows - 1) * ROW_H + NODE_H;
 
   /**
-   * What a run contains, boxed.
+   * Everything drawn below one node, by walking the drawn edges.
    *
-   * A run is one thing made of several, and edges alone cannot say so: they
-   * say "this came after that", which is true of a chain of steps and equally
-   * true of a chain of anything else. The box is the claim the edges cannot
-   * make — everything inside it is this run — and it is what tells a reader
-   * where the run ends when a step has spawned subagents of its own.
-   *
-   * Drawn around the members rather than around the run node too: the node is
-   * the run's handle, the thing you fold, select and open it by, and a handle
-   * inside the container it operates on is a control with nowhere to sit when
-   * the container is folded away.
+   * Per run rather than "every step in the session": a session can host
+   * several at once — its own, and one per `invoke_workflow` any of its agents
+   * called — and numbering them together would count one run's steps into
+   * another's.
    */
-  const grouped = runNode ? tree.nodes.filter((n) => n.id !== runNode.id) : [];
-  // Where each execution sits in the run. "workflow step" on all three of them
-  // says what they are and nothing about which one this is; the run log's own
-  // numbering is the thing a reader is actually looking for, and a step
+  const below = (rootId: string): PlacedAgent[] => {
+    const out: PlacedAgent[] = [];
+    const seen = new Set([rootId]);
+    let frontier = [rootId];
+    while (frontier.length > 0) {
+      const next: string[] = [];
+      for (const from of frontier) {
+        for (const e of tree.edges) {
+          if (e.from !== from || seen.has(e.to)) continue;
+          seen.add(e.to);
+          const node = placed.get(e.to);
+          if (node) out.push(node);
+          next.push(e.to);
+        }
+      }
+      frontier = next;
+    }
+    return out;
+  };
+
+  // Where each execution sits in *its own* run. "workflow step" on all three of
+  // them says what they are and nothing about which one this is; the run log's
+  // own numbering is the thing a reader is actually looking for, and a step
   // reached twice by a loop is two numbers rather than one node seen twice.
-  const steps = tree.nodes.filter((n) => n.kind === "step");
-  const ordinals = new Map(steps.map((n, i) => [n.id, `step ${i + 1} of ${steps.length}`]));
-  const box =
-    grouped.length > 0
-      ? grouped.reduce(
-          (b, n) => {
-            const { x, y } = at(n);
-            return {
-              x: Math.min(b.x, x - GROUP_PAD),
-              y: Math.min(b.y, y - GROUP_PAD),
-              right: Math.max(b.right, x + NODE_W + GROUP_PAD),
-              bottom: Math.max(b.bottom, y + NODE_H + GROUP_PAD),
-            };
-          },
-          { x: Infinity, y: Infinity, right: 0, bottom: 0 },
-        )
-      : undefined;
+  const ordinals = new Map<string, string>();
+  for (const run of runNodes) {
+    const steps = below(run.id).filter((n) => n.kind === "step");
+    steps.forEach((n, i) => ordinals.set(n.id, `step ${i + 1} of ${steps.length}`));
+  }
 
   // Out of the parent's right edge, into the child's left edge. Flat-tangent
   // curves rather than elbows: at this rank spacing a fan of six children is
@@ -261,41 +266,6 @@ export function AgentGraph({
         // fill a screen it never needed.
         className="mx-auto block"
       >
-        {/* Behind everything: a container, not a mark on any one node. */}
-        {box && runNode && (
-          <g data-testid="agent-group-run" aria-hidden>
-            <rect
-              x={box.x}
-              y={box.y}
-              width={box.right - box.x}
-              height={box.bottom - box.y}
-              rx={14}
-              // Dashed, quiet, and unfilled: a boundary rather than a surface.
-              // A fill would put a second background behind cards whose own
-              // fill is how each of them reports its status, and no pointer
-              // events, so the box can never take a click meant for a node.
-              className="pointer-events-none fill-none stroke-rule-strong opacity-60"
-              strokeDasharray="5 5"
-            />
-            {/* Above the border, not on it: set inside the box it labels, a
-                caption sits on the dashes and is read through them.
-                Named, because the box is what a reader's eye lands on first
-                and "workflow run" alone leaves them to work out *which* run by
-                reading the card outside it. Cut to the box's own width — a
-                caption wider than the thing it captions is not a caption. */}
-            <text
-              x={box.x + 2}
-              y={box.y - 6}
-              className="fill-faint text-[9px] tracking-[0.08em] uppercase"
-            >
-              {clip(
-                `${KIND_LABEL.run} · ${runNode.label}`,
-                Math.floor((box.right - box.x) / CAPTION_CHAR_W),
-              )}
-            </text>
-          </g>
-        )}
-
         <defs>
           {/* Two heads, because a marker cannot inherit the line's colour:
               `context-stroke` is not in Safari, and a lit edge with a grey
@@ -460,6 +430,7 @@ export function AgentGraph({
                   is not what the key does anyway: it takes you to a transcript,
                   and from the graph that is a move whichever node you press.
                   A run scoped page had no way back to the session at all. */}
+              {opens(n) && (
               <g
                 data-testid={`agent-jump-${n.id}`}
                 onClick={(e) => {
@@ -515,6 +486,7 @@ export function AgentGraph({
                   aria-hidden
                 />
               </g>
+              )}
 
               {/* The fold sits on the edge the children leave by, so what it
                   discloses is the thing it is pointing at. Its own <g>, outside

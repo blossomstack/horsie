@@ -290,6 +290,8 @@ fn to_wire_agent(agent: &AgentEntry, windows: &ContextWindows) -> SubAgentView {
         error: agent.error.clone(),
         spawned_at_ms: agent.started_at_ms,
         ended_at_ms: agent.ended_at_ms,
+        run: agent.run.map(|id| id.to_string()),
+        workflow: agent.workflow.clone(),
     }
 }
 
@@ -516,6 +518,7 @@ mod tests {
     fn an_agent_crosses_the_wire_verbatim() {
         let parent = Uuid::new_v4();
         let id = Uuid::new_v4();
+        let run = Uuid::new_v4();
         let view = to_wire_agent(
             &AgentEntry {
                 id: id.to_string(),
@@ -536,6 +539,8 @@ mod tests {
                 preset: Some("reviewer".into()),
                 started_at_ms: 100,
                 ended_at_ms: 400,
+                run: Some(run),
+                workflow: Some("nightly-audit".into()),
             },
             &ContextWindows::from([("m".to_string(), 200_000)]),
         );
@@ -557,6 +562,11 @@ mod tests {
         assert_eq!(view.status, "failed");
         assert_eq!(view.error.as_deref(), Some("boom"));
         assert_eq!((view.spawned_at_ms, view.ended_at_ms), (100, 400));
+        // Which run an execution belongs to, and what that run was started
+        // from: a session can host several, and one flat list of steps says
+        // neither which is which nor how many there are.
+        assert_eq!(view.run, Some(run.to_string()));
+        assert_eq!(view.workflow.as_deref(), Some("nightly-audit"));
     }
 
     /// A session's sub sessions belong on its own document, not only on the

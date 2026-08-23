@@ -3,7 +3,7 @@
 // the popovers have to hand the focus back when they close.
 
 import { test, expect } from "./fixtures";
-import { createSession, sendMessage } from "./helpers";
+import { createSession, expectStatus, sendMessage } from "./helpers";
 
 test.beforeEach(async ({ mock }) => {
   await mock.reset();
@@ -65,6 +65,14 @@ test("V3: a config key opens from the keyboard and says what it opened", async (
   await mock.queueText("ok");
   await createSession(page, appBase);
   await sendMessage(page, "hello");
+  // Settled first, and deliberately: the bar swaps rendition when the
+  // session's agent document arrives — a draft's pickers for a readout of what
+  // was chosen — and both renditions carry this key. Focus taken before the
+  // swap is focus on a key that is about to be unmounted, and the press then
+  // lands on the body, waiting thirty seconds for a panel nobody opened. It
+  // failed that way once in CI, where the read lands later than it does here.
+  await expect(page.getByTestId("assistant-text").last()).toContainText("ok");
+  await expectStatus(page, "Idle");
 
   // A created session's keys open a readout rather than a picker; the wiring
   // that names the surface has to be there on that rendition too.
