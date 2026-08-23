@@ -131,3 +131,39 @@ test("H4: the plan hides and re-opens from the session header", async ({
   await page.reload();
   await expect(page.getByTestId("task-list-panel")).toBeVisible();
 });
+
+test("H5: the plan updates while the turn is still running", async ({
+  page,
+  appBase,
+  mock,
+}) => {
+  // The panel used to catch up only at a turn boundary, because the list
+  // reached it through the agent document and nothing re-read that document
+  // mid-turn. A plan is written to be watched *while* the agent works, so the
+  // list now rides the agent's log like everything else the transcript folds.
+  await mock.queueToolCall("task_list", {
+    action: "create",
+    tasks: ["First step", "Second step"],
+  });
+  // The answer that would end the turn is held back, so what follows is read
+  // while the turn is genuinely in flight.
+  await mock.queueText("Plan created.", 8000);
+  await createSession(page, appBase);
+  await sendMessage(page, "make a plan");
+
+  const panel = await openPlan(page);
+  await expectStatus(page, "Running");
+  // Bounded well inside the held answer on purpose: with the suite's 30s
+  // default this would simply wait for the turn to end, which is exactly the
+  // behaviour being ruled out.
+  await expect(panel.getByTestId("task-list-item")).toHaveCount(2, {
+    timeout: 4000,
+  });
+  await expect(panel.getByTestId("task-list-progress")).toHaveText("0/2 done", {
+    timeout: 4000,
+  });
+  await expectStatus(page, "Running");
+
+  // And the held answer still lands, so the case leaves the queue empty.
+  await expectStatus(page, "Idle");
+});

@@ -1,21 +1,10 @@
-//! Task-list wire mapping, and the session-state fold used by tests.
+//! The session-state fold used by tests.
 //!
 //! The broadcast plumbing that used to live here — an ephemeral event sink, a
 //! post-persist observer, and the frame unions both fed — is gone. Durable
 //! entries are read from the agent's own state through `AgentCommand::ReadLog`,
 //! and deltas reach the agent through its mailbox, so there is no second copy
 //! of the transcript in flight to keep ordered against the first.
-
-use crate::agent_loop::TaskStatus as AgentTaskStatus;
-use horsie_models::agent::{TaskItem, TaskStatus as WireTaskStatus};
-
-pub(crate) fn wire_task(t: &crate::agent_loop::TaskRecord) -> TaskItem {
-    TaskItem {
-        id: t.id,
-        content: t.content.clone(),
-        status: wire_task_status(t.status),
-    }
-}
 
 /// Fold a session's own journal into its [`SessionState`] — **tests only**.
 ///
@@ -115,12 +104,4 @@ pub(in crate::sessions) async fn session_events(
         }
     }
     out
-}
-
-fn wire_task_status(status: AgentTaskStatus) -> WireTaskStatus {
-    match status {
-        AgentTaskStatus::Pending => WireTaskStatus::Pending,
-        AgentTaskStatus::InProgress => WireTaskStatus::InProgress,
-        AgentTaskStatus::Completed => WireTaskStatus::Completed,
-    }
 }

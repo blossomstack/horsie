@@ -5,13 +5,20 @@
 import { test as base, expect } from "@playwright/test";
 import { readRuntimeInfo } from "./harness";
 
-export type MockResponse =
+export type MockResponse = (
   | { type: "text"; content: string }
   | { type: "text_stream"; chunks: string[] }
   | { type: "tool_call"; name: string; input: unknown }
   | { type: "tool_calls"; calls: [string, unknown][] }
   | { type: "error"; status: number; message: string }
-  | { type: "thinking"; text: string; signature: string };
+  | { type: "thinking"; text: string; signature: string }
+) & {
+  /** Hold this answer back before sending it. The only way an out-of-process
+   * test can make a turn *observably* in flight: a case that means to watch
+   * something change during a turn needs the turn to still be running when it
+   * looks. */
+  delayMs?: number;
+};
 
 /**
  * How long a held-back first answer waits, in milliseconds.
@@ -74,8 +81,8 @@ export class MockLlm {
   queue(r: MockResponse): Promise<void> {
     return this.post("/queue", r);
   }
-  queueText(content: string): Promise<void> {
-    return this.queue({ type: "text", content });
+  queueText(content: string, delayMs?: number): Promise<void> {
+    return this.queue({ type: "text", content, delayMs });
   }
   queueTextStream(chunks: string[]): Promise<void> {
     return this.queue({ type: "text_stream", chunks });

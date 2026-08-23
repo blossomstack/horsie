@@ -415,7 +415,7 @@ pub async fn get_agent(
             .state
             .tasks
             .iter()
-            .map(crate::sessions::events::wire_task)
+            .map(crate::agent_loop::wire_task)
             .collect(),
         usage: to_wire_usage(detail.state.usage_total),
         last_turn_usage: detail.state.last_turn_usage,
