@@ -5,7 +5,11 @@
 📖 **[docs.horsie.dev](https://docs.horsie.dev)** — guides, operations, CLI
 reference, and how it works.
 
-![One session in horsie's three views, fused into a single frame: the timeline of every agent and turn, the agent graph of subagents and sub sessions, and the transcript](docs/public/img/horsie-session-views.png)
+[![One session in horsie's three views, fused into a single frame: the timeline of every agent and turn, the agent graph of subagents and sub sessions, and the transcript](docs/public/img/horsie-session-views.png)](https://youtu.be/saoVBeuFrT4)
+
+▶ **[Watch the two-minute walkthrough](https://youtu.be/saoVBeuFrT4)** — a session
+end to end, a sandbox on your own machine, and an agent building a workflow that
+another agent then runs.
 
 ## Quick start
 
