@@ -16,7 +16,7 @@ services:
       # from get.horsie.dev is built from the newest release, so `latest` pairs
       # the two across a link with no version handshake. publish.yml's
       # version-guard fails a release that leaves this stale.
-      url: ghcr.io/blossomstack/horsie:0.3.0
+      url: ghcr.io/blossomstack/horsie:0.4.0
     healthCheckPath: /api/health
     envVars:
       - key: PORT

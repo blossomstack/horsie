@@ -13,7 +13,7 @@ services:
     # with a runtime up to a whole release behind it, across a link that
     # has no version handshake to notice. Bumped on every release, and
     # publish.yml's version-guard fails the release if it was not.
-    image: ghcr.io/blossomstack/horsie:0.3.0
+    image: ghcr.io/blossomstack/horsie:0.4.0
     container_name: horsie
     restart: unless-stopped
     ports:
