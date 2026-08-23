@@ -59,6 +59,23 @@ jobs:
           fi
           echo "all workspace crates at $tag_version, matches tag v$tag_version"
 
+      # The self-host compose file pins a release tag rather than `latest`, so
+      # that the server it starts and the CLI get.horsie.dev installs are the
+      # same release. That pin is hand-written, so nothing but this check keeps
+      # it from going stale — and a stale pin is invisible: the quick start
+      # still works, just one release behind, with a runtime link that has no
+      # version handshake to notice the mismatch.
+      - name: Compare tag to the pinned compose image
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          pinned=$(sed -n 's|^ *image: ghcr.io/blossomstack/horsie:\(.*\)$|\1|p' \
+            docker/docker-compose.yml)
+          if [ "$pinned" != "$tag_version" ]; then
+            echo "::error::docker/docker-compose.yml pins horsie:$pinned, but this release is v$tag_version. Bump the image tag to $tag_version before tagging."
+            exit 1
+          fi
+          echo "compose pins horsie:$pinned, matches tag v$tag_version"
+
   publish:
     name: Publish to crates.io
     needs: version-guard

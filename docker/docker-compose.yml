@@ -7,7 +7,13 @@ name: horsie
 
 services:
   horsie:
-    image: ghcr.io/blossomstack/horsie:latest
+    # Pinned to a release, not `latest`. `latest` tracks main, while the
+    # `horsie` CLI that `horsie connect` comes from is installed by
+    # get.horsie.dev off the newest *release* — so `latest` pairs a server
+    # with a runtime up to a whole release behind it, across a link that
+    # has no version handshake to notice. Bumped on every release, and
+    # publish.yml's version-guard fails the release if it was not.
+    image: ghcr.io/blossomstack/horsie:0.3.0
     container_name: horsie
     restart: unless-stopped
     ports:
