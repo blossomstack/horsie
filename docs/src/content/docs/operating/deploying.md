@@ -63,14 +63,22 @@ fly secrets set HORSIE_DATABASE_URL=postgres://user:password@host/horsie
 
 ## Which image tag
 
-All three paths above run `ghcr.io/blossomstack/horsie:latest`, which moves
-with the default branch. Images are only published for a commit whose full test
-suite passed, so `latest` never moves to a broken build.
+All three paths above pin a release tag — `ghcr.io/blossomstack/horsie:0.3.0`
+at the time of writing. Upgrading is a deliberate step: edit the tag, then
+`docker compose pull` or redeploy.
 
-Every build also publishes an immutable `sha-<short>` tag, and a release
-publishes `<version>` and `v<version>`. Pin to one of those if you want an
-upgrade to be a deliberate step rather than a `docker compose pull` or a
-redeploy.
+They pin rather than track because the server is only half of a horsie. The
+other half is the `horsie` CLI behind [the local runtime](/operating/local-runtime/),
+which `get.horsie.dev` installs from the newest *release*. A server on a
+moving tag and a CLI on a release tag drift apart between releases, and the
+link between them carries no version negotiation that would notice.
+
+`latest` still exists and moves with the default branch. Images are only
+published for a commit whose full test suite passed, so it never moves to a
+broken build — but a server on `latest` is ahead of any CLI installed from a
+release, so match it with a runtime built from the same commit. Every build
+also publishes an immutable `sha-<short>` tag, and a release publishes
+`<version>` and `v<version>`.
 
 ## Building it yourself
 

@@ -59,22 +59,42 @@ jobs:
           fi
           echo "all workspace crates at $tag_version, matches tag v$tag_version"
 
-      # The self-host compose file pins a release tag rather than `latest`, so
-      # that the server it starts and the CLI get.horsie.dev installs are the
-      # same release. That pin is hand-written, so nothing but this check keeps
-      # it from going stale — and a stale pin is invisible: the quick start
-      # still works, just one release behind, with a runtime link that has no
+      # The self-host surfaces — docker/docker-compose.yml, render.yaml,
+      # fly.toml — pin a release tag rather than `latest`, so that the server
+      # they start and the CLI get.horsie.dev installs are the same release.
+      # Those pins are hand-written, and a stale one is invisible: the deploy
+      # still works, just one release behind, over a runtime link with no
       # version handshake to notice the mismatch.
-      - name: Compare tag to the pinned compose image
+      #
+      # Scanned rather than listed, so a surface added later is covered without
+      # anyone remembering to add it here — being blind to a new pin is the
+      # exact failure this exists to prevent. A tag that does not start with a
+      # digit is deliberately not a pin: `latest` tracks main by design, and
+      # `sha-*` appears in historical design docs.
+      - name: Compare tag to every pinned image reference
         run: |
           tag_version="${GITHUB_REF_NAME#v}"
-          pinned=$(sed -n 's|^ *image: ghcr.io/blossomstack/horsie:\(.*\)$|\1|p' \
-            docker/docker-compose.yml)
-          if [ "$pinned" != "$tag_version" ]; then
-            echo "::error::docker/docker-compose.yml pins horsie:$pinned, but this release is v$tag_version. Bump the image tag to $tag_version before tagging."
+          stale=0
+          found=0
+          while IFS= read -r hit; do
+            file=${hit%%:*}
+            pinned=$(printf '%s' "${hit#*ghcr.io/blossomstack/horsie:}" | tr -d "'\"")
+            found=$((found + 1))
+            if [ "$pinned" != "$tag_version" ]; then
+              echo "::error file=$file::$file pins horsie:$pinned, but this release is v$tag_version. Bump it to $tag_version before tagging."
+              stale=1
+            else
+              echo "$file pins horsie:$pinned"
+            fi
+          done <<EOF
+          $(git grep -nE 'ghcr\.io/blossomstack/horsie:[0-9]' || true)
+          EOF
+          if [ "$found" -eq 0 ]; then
+            echo "::error::no pinned horsie image references found — the scan pattern has drifted from how the pins are written"
             exit 1
           fi
-          echo "compose pins horsie:$pinned, matches tag v$tag_version"
+          [ "$stale" -eq 0 ] || exit 1
+          echo "all $found pinned reference(s) match tag v$tag_version"
 
   publish:
     name: Publish to crates.io
