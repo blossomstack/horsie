@@ -123,6 +123,7 @@ pub(super) fn coarse_appends_an_entry(e: &AgentDomainEvent) -> bool {
             | AgentDomainEvent::ToolComplete { .. }
             | AgentDomainEvent::HookRan { .. }
             | AgentDomainEvent::LifecycleRecorded { .. }
+            | AgentDomainEvent::TaskListChanged { .. }
     )
 }
 

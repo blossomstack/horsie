@@ -13,7 +13,8 @@
 //!
 //! See `docs/superpowers/specs/2026-07-20-task-list-tool-design.md`.
 
-use horsie_agentcore::{ToolCallError, ToolSpec};
+use horsie_agentcore::{TaskItem, ToolCallError, ToolSpec};
+use horsie_models::agent::TaskStatus as WireTaskStatus;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -45,6 +46,23 @@ pub struct TaskRecord {
     pub status: TaskStatus,
 }
 
+/// One task, as a client reads it.
+///
+/// The durable record and the wire item are deliberately separate types — one
+/// is journaled and the other is generated — so the crossing is written once,
+/// here, beside the state it reads.
+pub fn wire_task(t: &TaskRecord) -> TaskItem {
+    TaskItem {
+        id: t.id,
+        content: t.content.clone(),
+        status: match t.status {
+            TaskStatus::Pending => WireTaskStatus::Pending,
+            TaskStatus::InProgress => WireTaskStatus::InProgress,
+            TaskStatus::Completed => WireTaskStatus::Completed,
+        },
+    }
+}
+
 /// Durable per-agent task list. Journaled whole (not as deltas) on every
 /// mutation, mirroring how `MessageComplete`/`ToolComplete` events carry full
 /// content rather than diffs — replay never needs to re-derive or re-validate
@@ -69,6 +87,13 @@ impl TaskListState {
     /// the session server) that project this state onto a wire event.
     pub fn tasks(&self) -> &[TaskRecord] {
         &self.tasks
+    }
+
+    /// The same list, as the wire names it — what the log entry every mutation
+    /// writes carries, and what the agent document reports.
+    #[must_use]
+    pub fn wire_tasks(&self) -> Vec<TaskItem> {
+        self.tasks.iter().map(wire_task).collect()
     }
 
     pub fn render(&self) -> String {
