@@ -3,7 +3,7 @@ name = "horsie-runtime-host"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/blossomstack/horsie"
 description = "The host side of the horsie runtime wire: dialling into a runtime, and supplying one"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 
 [features]
@@ -12,9 +12,9 @@ edition = "2024"
 test-util = ["horsie-agentcore/test-util"]
 
 [dependencies]
-horsie-models = { version = "0.3.0", path = "../models" }
-horsie-agentcore = { version = "0.3.0", path = "../agentcore" }
-horsie-support = { version = "0.3.0", path = "../support" }
+horsie-models = { version = "0.4.0", path = "../models" }
+horsie-agentcore = { version = "0.4.0", path = "../agentcore" }
+horsie-support = { version = "0.4.0", path = "../support" }
 async-trait       = { workspace = true }
 thiserror         = { workspace = true }
 tokio             = { workspace = true, features = ["process", "net"] }
