@@ -37,27 +37,27 @@ configs:
           "data_dir": "/data/data"
         }
       }
-      # Running this node as one of a cluster needs all three of the blocks
-      # below, and the boot refuses the configuration if any is missing or
-      # wrong — a node that believes it is clustered and is not looks healthy
-      # while losing everything meant to cross between nodes.
-      # Full guide: https://docs.horsie.dev/operating/clustering/
-      #
-      #   "database": { "url": "postgres://user:pass@host/horsie" },
-      #   "bus":      { "url": "redis://host:6379" },
-      #   "cluster":  {
-      #     "node_id":  1,
-      #     "bind":     "0.0.0.0:7100",
-      #     "peers":    { "2": "node2:7100", "3": "node3:7100" },
-      #     "secret":   "<the same value on every node>",
-      #     "raft_dir": "/raft"
-      #   }
-      #
-      # SQLite is refused: three nodes need one journal, and a file per node
-      # gives three divergent histories. `peers` seeds consensus only on a
-      # first boot; after that membership lives in the Raft log, so editing it
-      # will not reshape a running cluster. `secret` authenticates peers but
-      # does not encrypt them — keep that port on a private network.
+# Running this node as one of a cluster needs all three of the blocks
+# below, and the boot refuses the configuration if any is missing or
+# wrong — a node that believes it is clustered and is not looks healthy
+# while losing everything meant to cross between nodes.
+# Full guide: https://docs.horsie.dev/operating/clustering/
+#
+#   "database": { "url": "postgres://user:pass@host/horsie" },
+#   "bus":      { "url": "redis://host:6379" },
+#   "cluster":  {
+#     "node_id":  1,
+#     "bind":     "0.0.0.0:7100",
+#     "peers":    { "2": "node2:7100", "3": "node3:7100" },
+#     "secret":   "<the same value on every node>",
+#     "raft_dir": "/raft"
+#   }
+#
+# SQLite is refused: three nodes need one journal, and a file per node
+# gives three divergent histories. `peers` seeds consensus only on a
+# first boot; after that membership lives in the Raft log, so editing it
+# will not reshape a running cluster. `secret` authenticates peers but
+# does not encrypt them — keep that port on a private network.
 
 volumes:
   horsie-data:

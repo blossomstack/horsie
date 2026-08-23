@@ -81,6 +81,16 @@ jobs:
       - name: docker compose config
         run: docker compose -f docker/docker-compose.yml config
 
+      # `config` alone only proves the YAML parses. The server config is a
+      # block scalar inside it, and a `#` line indented into that scalar is
+      # file content, not a comment — which is how the one-command quick start
+      # shipped a config.json the server refused to parse, crash-looping behind
+      # a `docker compose up -d` that still exited 0.
+      - name: Generated server config is valid JSON
+        run: |
+          docker compose -f docker/docker-compose.yml config --format json \
+            | python3 -c 'import sys, json; json.loads(json.load(sys.stdin)["configs"]["horsie_config"]["content"])'
+
   # One leg per arch. The server step builds the shared `build` stage (all
   # two binaries) + web stage; the runtime step reuses it CACHED
   # from this job's local buildkit instance, so deps compile once per arch
