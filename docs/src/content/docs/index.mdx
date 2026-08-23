@@ -9,6 +9,10 @@ hero:
     - text: Quickstart
       link: /start-here/quickstart/
       icon: right-arrow
+    - text: Watch the walkthrough
+      link: https://youtu.be/saoVBeuFrT4
+      variant: minimal
+      icon: external
     - text: What horsie is
       link: /start-here/what-horsie-is/
       variant: minimal
@@ -23,6 +27,15 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
 An agent is a model plus a harness — the loop that assembles context, calls the
 model, decides whether a tool call is allowed, runs it, and writes down what
 happened. horsie is the harness. You bring the model.
+
+<iframe
+  src="https://www.youtube-nocookie.com/embed/saoVBeuFrT4"
+  title="horsie — a two-minute walkthrough"
+  loading="lazy"
+  allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+  allowfullscreen
+  style="width: 100%; aspect-ratio: 16 / 9; border: 1px solid var(--sl-color-gray-5); border-radius: 0.5rem;"
+></iframe>
 
 <CardGrid>
   <Card title="Run one" icon="rocket">
