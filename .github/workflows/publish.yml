@@ -78,7 +78,11 @@ jobs:
           found=0
           while IFS= read -r hit; do
             file=${hit%%:*}
-            pinned=$(printf '%s' "${hit#*ghcr.io/blossomstack/horsie:}" | tr -d "'\"")
+            # Take the tag as the token after the colon, not the rest of the
+            # line: a pin is quoted for the syntax of the file it sits in —
+            # bare in YAML, single-quoted in TOML, in backticks in the prose
+            # that quotes it — and only a token stops at all three.
+            pinned=$(printf '%s' "${hit#*ghcr.io/blossomstack/horsie:}" | grep -oE '^[0-9][0-9A-Za-z.+-]*')
             found=$((found + 1))
             if [ "$pinned" != "$tag_version" ]; then
               echo "::error file=$file::$file pins horsie:$pinned, but this release is v$tag_version. Bump it to $tag_version before tagging."
