@@ -109,7 +109,10 @@ impl AuthoredService {
     pub async fn delete_plugin(&self, name: &str) -> Result<(), String> {
         self.require_authored(name).await?;
         self.store.delete_plugin(name).await?;
-        self.plugins.remove(name).await
+        // `purge`, not `remove`: the published row is this plugin's projection
+        // and goes with it, which is the one case uninstalling an authored
+        // bundle is the right thing to do.
+        self.plugins.purge(name).await
     }
 
     pub async fn list_skills(
@@ -267,20 +270,16 @@ impl AuthoredService {
 
     /// Re-render and re-record the `plugins` row this plugin publishes through.
     ///
-    /// A plugin with no skills publishes nothing: the reader refuses a tree
-    /// that offers nothing runnable, so the row is removed rather than left
-    /// pointing at a package that cannot be installed.
+    /// Every authored plugin publishes, including one with no skills in it yet.
+    /// The rendered tree always carries a manifest, so the reader accepts it —
+    /// and it has to, because a plugin is assigned to an agent by *name* and
+    /// filled in afterwards. Withholding the row until the first skill landed
+    /// meant the plugin could not be picked during the very period it was being
+    /// written, which is when someone tuning an agent wants to pick it.
     async fn republish(&self, name: &str) -> Result<(), String> {
-        match pack(&self.store, name).await {
-            Ok((bundle, generation)) => {
-                self.plugins.persist_authored(bundle, generation).await?;
-                Ok(())
-            }
-            Err(e) if e.contains("not a plugin bundle") => {
-                self.plugins.remove_if_authored(name).await
-            }
-            Err(e) => Err(e),
-        }
+        let (bundle, generation) = pack(&self.store, name).await?;
+        self.plugins.persist_authored(bundle, generation).await?;
+        Ok(())
     }
 
     /// Refuse to touch a bundle that came from a clone.
@@ -417,13 +416,56 @@ mod tests {
         assert_eq!(row.version.as_deref(), Some("0.0.2"));
     }
 
-    /// A plugin with nothing in it renders a tree the reader refuses, so it
-    /// must not sit in the library as an entry that cannot be installed.
+    /// A plugin with nothing in it still publishes, so it can be assigned to an
+    /// agent before the skill that fills it has been written.
     #[tokio::test]
-    async fn an_empty_plugin_publishes_nothing() {
+    async fn an_empty_plugin_publishes_an_empty_bundle() {
         let (authored, plugins) = service().await;
         authored.write_plugin("empty", None).await.unwrap();
-        assert!(plugins.row("empty").await.unwrap().is_none());
+        let row = plugins.row("empty").await.unwrap().expect("published");
+        assert!(crate::plugins::kind::is_authored(&row.kind));
+        assert!(row.catalog.is_empty(), "nothing to offer yet");
+        assert_eq!(row.version.as_deref(), Some("0.0.1"));
+    }
+
+    /// Emptying a plugin again leaves the row in place: the agents that named
+    /// it keep naming it, and the next skill lands under the same name.
+    #[tokio::test]
+    async fn deleting_the_last_skill_keeps_the_bundle_published() {
+        let (authored, plugins) = service().await;
+        authored.write_plugin("notes", None).await.unwrap();
+        authored
+            .write_skill(write("notes", "deploying", "how to deploy", "body"))
+            .await
+            .unwrap();
+        authored.delete_skill("notes", "deploying").await.unwrap();
+        let row = plugins
+            .row("notes")
+            .await
+            .unwrap()
+            .expect("still published");
+        assert!(row.catalog.is_empty());
+    }
+
+    /// The library row is a projection, so uninstalling it on its own would
+    /// leave the plugin authored but unpickable, with nothing to put it back.
+    #[tokio::test]
+    async fn an_authored_bundle_cannot_be_uninstalled_from_the_library() {
+        let (authored, plugins) = service().await;
+        authored.write_plugin("notes", None).await.unwrap();
+        let err = plugins.remove("notes").await.expect_err("must refuse");
+        assert!(err.contains("authored"), "{err}");
+        assert!(plugins.row("notes").await.unwrap().is_some());
+    }
+
+    /// Deleting the plugin itself does take the row with it — that is the one
+    /// case where the library losing it is correct.
+    #[tokio::test]
+    async fn deleting_the_plugin_takes_its_published_row() {
+        let (authored, plugins) = service().await;
+        authored.write_plugin("notes", None).await.unwrap();
+        authored.delete_plugin("notes").await.unwrap();
+        assert!(plugins.row("notes").await.unwrap().is_none());
     }
 
     /// Supplied fields replace, omitted ones are left alone — the difference
@@ -488,8 +530,12 @@ mod tests {
         authored.delete_skill("notes", "x").await.unwrap();
 
         assert!(
-            plugins.row("notes").await.unwrap().is_none(),
-            "the last skill leaving takes the published bundle with it"
+            plugins
+                .row("notes")
+                .await
+                .unwrap()
+                .is_some_and(|r| r.catalog.is_empty()),
+            "the last skill leaving empties the bundle without unpublishing it"
         );
         let history = authored.revisions("notes", "x").await.unwrap();
         assert_eq!(history.len(), 3, "two writes and the delete");
@@ -508,7 +554,14 @@ mod tests {
             restored.revision, 4,
             "restoring appends, it does not rewind"
         );
-        assert!(plugins.row("notes").await.unwrap().is_some());
+        assert!(
+            plugins
+                .row("notes")
+                .await
+                .unwrap()
+                .is_some_and(|r| !r.catalog.is_empty()),
+            "and the restored skill is on offer again"
+        );
     }
 
     /// The guard that keeps authoring from being a way to rewrite a plugin an

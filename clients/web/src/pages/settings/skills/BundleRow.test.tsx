@@ -88,18 +88,38 @@ describe("BundleRow", () => {
     expect(screen.getByText("nothing horsie runs")).toBeTruthy();
   });
 
-  /// An authored bundle has no upstream, and the server refuses to update one.
-  /// A button that can only ever produce an error is worse than no button.
-  it("offers Update for a clone but not for an authored bundle", () => {
+  /// Empty is where every authored plugin starts, and where it sits while it
+  /// is being filled in — so it reads as a beginning, not as a fault.
+  it("says an empty authored bundle has no skills yet", () => {
+    render(
+      <BundleRow
+        bundle={bundle({
+          catalog: [],
+          kind: { kind: "Authored", value: { generation: 1 } },
+        })}
+      />,
+    );
+    expect(screen.getByText("no skills written yet")).toBeTruthy();
+  });
+
+  /// An authored bundle has no upstream, and its library row is a projection
+  /// of the skills it renders from — so the server refuses both to update it
+  /// and to uninstall it. A button that can only ever produce an error is
+  /// worse than no button.
+  it("offers Update and Delete for a clone but not for an authored bundle", () => {
     const { unmount } = render(<BundleRow bundle={bundle()} />);
     expect(screen.queryByText("Update")).not.toBeNull();
+    expect(screen.queryByLabelText("Delete bundle")).not.toBeNull();
     unmount();
 
     render(
       <BundleRow
-        bundle={bundle({ kind: { kind: "Authored", value: { generation: 3 } } })}
+        bundle={bundle({
+          kind: { kind: "Authored", value: { generation: 3 } },
+        })}
       />,
     );
     expect(screen.queryByText("Update")).toBeNull();
+    expect(screen.queryByLabelText("Delete bundle")).toBeNull();
   });
 });

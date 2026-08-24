@@ -46,6 +46,10 @@ Per bundle, on the Skills page:
 - **Update** — re-clone at its ref to pull in changes.
 - **Delete** — remove it from the library.
 
+A bundle an agent authored offers neither: it has no upstream to re-read, and
+it is deleted where it is written. See
+[Skills an agent writes](#skills-an-agent-writes).
+
 ## Manage marketplaces
 
 Registered sources appear on the same page, each with a filter box and two
@@ -160,13 +164,20 @@ never loses what was there before and any past revision can be restored.
 **Settings → Skills → Authored here** lists what has been written, opens each
 plugin's skills, shows a skill's history and rolls one back. The bundle it
 publishes appears under **Installed bundles** like any other, which is where
-you switch it on for new sessions.
+you switch it on for new sessions. Delete an authored plugin from **Authored
+here** rather than from the library — the library entry is a view of the skills
+it holds, so it has no Delete of its own.
 
-Two things worth knowing:
+Three things worth knowing:
 
 - Selecting the authoring tools is the whole grant. A skill written this way is
   offered to every session this project starts afterwards, so treat it as
   authority rather than convenience.
+- A plugin can be selected from the moment it is created, before a single skill
+  has been written into it. An agent is assigned the plugin by name, and each
+  session it starts picks up whatever the plugin holds at that point — so the
+  usual loop is to attach an empty one to an agent and let it fill it in as it
+  learns.
 - A skill takes effect for the *next* session. A runtime is given its bundles
   when an agent loads, so one already running keeps the tree it started with.
 

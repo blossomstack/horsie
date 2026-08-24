@@ -106,6 +106,57 @@ async fn a_skill_written_by_an_agent_lands_in_a_runtimes_tree() {
     );
 }
 
+/// A plugin with no skills yet still travels the whole way, because it is
+/// assignable the moment it is created: someone tuning an agent picks the
+/// plugin by name and writes the skills into it afterwards. What arrives is an
+/// empty but well-formed tree, not an error.
+#[tokio::test]
+async fn an_empty_authored_plugin_provisions_as_an_empty_tree() {
+    let (authored, plugins, _tmp) = services().await;
+    authored.write_plugin("field-notes", None).await.unwrap();
+
+    let refs = plugins.resolve(&["field-notes".into()]).await.unwrap();
+    assert_eq!(refs.len(), 1);
+
+    let root = tempfile::tempdir().unwrap();
+    let store = horsie_runtime::plugin_store::PluginStore::new(root.path().to_path_buf());
+    let dir = store
+        .provision_agent("agent-1", &refs, &DirectBundles(plugins.clone()))
+        .await
+        .unwrap();
+
+    assert!(
+        dir.join("field-notes/plugin.json").is_file(),
+        "the manifest is what makes it a plugin before it holds anything"
+    );
+    assert!(
+        !dir.join("field-notes/skills").exists(),
+        "nothing has been written into it yet"
+    );
+
+    // And it keeps its name across the fill: the same reference now carries the
+    // skill, which is what makes assigning an empty plugin worth doing.
+    authored
+        .write_skill(AuthoredSkillWriteInput {
+            plugin: "field-notes".into(),
+            name: "rolling-back".into(),
+            description: Some("How to roll back a bad deploy".into()),
+            body: Some("Stop the rollout.".into()),
+            files: None,
+        })
+        .await
+        .unwrap();
+    let refs = plugins.resolve(&["field-notes".into()]).await.unwrap();
+    let dir = store
+        .provision_agent("agent-2", &refs, &DirectBundles(plugins.clone()))
+        .await
+        .unwrap();
+    assert!(
+        dir.join("field-notes/skills/rolling-back/SKILL.md")
+            .is_file()
+    );
+}
+
 /// An edit changes the generation, so the tree is rebuilt rather than served
 /// out of the entry the last generation left behind.
 #[tokio::test]

@@ -18,8 +18,15 @@ export function sigilFor(kind: string): string {
   return kind === "agent" ? "@" : "/";
 }
 
-/** `2 commands · 1 skill`, in catalogue order, with the empty kinds left out. */
-function summarise(catalog: CatalogEntryView[]): string {
+/**
+ * `2 commands · 1 skill`, in catalogue order, with the empty kinds left out.
+ *
+ * An empty authored bundle gets its own wording. It is the state every
+ * authored plugin starts in and is expected to sit in while it is being
+ * filled, so reporting it the way a clone with nothing in it is reported
+ * would read as a fault rather than as a beginning.
+ */
+function summarise(catalog: CatalogEntryView[], kind: PluginKind): string {
   const counts: [string, string][] = [
     ["command", "command"],
     ["skill", "skill"],
@@ -31,7 +38,10 @@ function summarise(catalog: CatalogEntryView[]): string {
       return n === 0 ? null : `${n} ${noun}${n === 1 ? "" : "s"}`;
     })
     .filter((p): p is string => p !== null);
-  return parts.length === 0 ? "nothing horsie runs" : parts.join(" · ");
+  if (parts.length > 0) return parts.join(" · ");
+  return kind.kind === "Authored"
+    ? "no skills written yet"
+    : "nothing horsie runs";
 }
 
 /** What a bundle is, in the fewest words that still distinguish the three. */
@@ -47,7 +57,9 @@ function kindLabel(kind: PluginKind): string {
 }
 
 function marketplaceOf(kind: PluginKind): string | undefined {
-  return kind.kind === "Authored" ? undefined : (kind.value.marketplace ?? undefined);
+  return kind.kind === "Authored"
+    ? undefined
+    : (kind.value.marketplace ?? undefined);
 }
 
 export function BundleRow({ bundle }: { bundle: PluginView }) {
@@ -68,7 +80,9 @@ export function BundleRow({ bundle }: { bundle: PluginView }) {
           <div className="flex items-center gap-2">
             <span className="item-title truncate">{bundle.name}</span>
             {bundle.version && (
-              <span className="chip !py-0 text-[0.625rem]">{bundle.version}</span>
+              <span className="chip !py-0 text-[0.625rem]">
+                {bundle.version}
+              </span>
             )}
             {/* What it is, so an authored bundle is not indistinguishable
                 from a clone — and so a portable one can say so. */}
@@ -105,7 +119,7 @@ export function BundleRow({ bundle }: { bundle: PluginView }) {
               size={11}
               className={cn("transition-transform", open && "rotate-90")}
             />
-            {summarise(catalog)}
+            {summarise(catalog, bundle.kind)}
           </button>
           {open && catalog.length > 0 && (
             <ul className="mt-1.5 space-y-1">
@@ -144,34 +158,39 @@ export function BundleRow({ bundle }: { bundle: PluginView }) {
               })
             }
           />
-          {/* Only a clone has an upstream to re-read. An authored bundle is
-              changed by editing its skills, and the server refuses to update
-              one — so offering the button here would be offering an error. */}
+          {/* Only a clone has an upstream to re-read, and only a clone can be
+              uninstalled: an authored bundle is changed by editing its skills,
+              and its library row is a projection of them. The server refuses
+              both — so offering either button would be offering an error. An
+              authored plugin is deleted in the Authored section above, beside
+              where it is written. */}
           {bundle.kind.kind !== "Authored" && (
-            <button
-              className="key shrink-0 key-sm"
-              onClick={() => update.mutate(bundle.name)}
-              disabled={update.isPending}
-            >
-              {update.isPending ? (
-                <Loader2 size={13} className="animate-spin" />
-              ) : (
-                <RotateCcw size={13} />
-              )}
-              Update
-            </button>
+            <>
+              <button
+                className="key shrink-0 key-sm"
+                onClick={() => update.mutate(bundle.name)}
+                disabled={update.isPending}
+              >
+                {update.isPending ? (
+                  <Loader2 size={13} className="animate-spin" />
+                ) : (
+                  <RotateCcw size={13} />
+                )}
+                Update
+              </button>
+              <button
+                className="key-icon shrink-0 text-faint hover:text-red-ink"
+                onClick={async () => {
+                  if (await askConfirm(`Delete skill bundle "${bundle.name}"?`))
+                    remove.mutate(bundle.name);
+                }}
+                disabled={remove.isPending}
+                aria-label="Delete bundle"
+              >
+                <Trash2 size={15} />
+              </button>
+            </>
           )}
-          <button
-            className="key-icon shrink-0 text-faint hover:text-red-ink"
-            onClick={async () => {
-              if (await askConfirm(`Delete skill bundle "${bundle.name}"?`))
-                remove.mutate(bundle.name);
-            }}
-            disabled={remove.isPending}
-            aria-label="Delete bundle"
-          >
-            <Trash2 size={15} />
-          </button>
         </div>
       </div>
     </div>
