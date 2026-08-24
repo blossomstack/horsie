@@ -26,10 +26,7 @@ use tokio::sync::Mutex;
 use tokio_tungstenite::{WebSocketStream, client_async, connect_async, tungstenite::Message};
 use tracing_subscriber::EnvFilter;
 
-/// What is logged when `RUST_LOG` says nothing usable. `info` because a
-/// runtime's whole narration is a handful of lines — it dials, it says who it
-/// serves, it reports what it could not do — and an operator reading a
-/// container's log is there precisely because one of them is missing.
+/// What is logged when `RUST_LOG` says nothing usable.
 const DEFAULT_LOG_FILTER: &str = "info";
 
 /// Default retry policy for the initial server connection. A long-lived
@@ -145,13 +142,16 @@ fn parse_endpoint(s: &str) -> Result<Endpoint, String> {
 }
 
 fn main() {
-    init_tracing();
     let cli = Cli::parse();
 
     // Credential mode: answer git and exit. Runs before endpoint parsing and
     // before the sandbox, because this process *is* a child of a git command
     // already running inside one — it inherits that confinement rather than
     // applying its own.
+    //
+    // No subscriber is installed here: git parses this process's stdout, and
+    // its stderr reaches the model as part of the tool that ran the git
+    // command. A subscriber would put every crate's events on both.
     if let Some(Commands::GitCredential { operation }) = &cli.command {
         let operation = operation.clone();
         match tokio::runtime::Builder::new_current_thread()
@@ -159,10 +159,12 @@ fn main() {
             .build()
         {
             Ok(rt) => rt.block_on(horsie_runtime::git_credential::run(&operation)),
-            Err(e) => tracing::error!(error = %e, "failed to build tokio runtime"),
+            Err(e) => eprintln!("failed to build tokio runtime: {e}"),
         }
         std::process::exit(0);
     }
+
+    init_tracing();
 
     // Probe mode: apply the sandbox and exit — before endpoint parsing, the tokio
     // runtime, provisioning, and any connect attempt.
@@ -229,22 +231,8 @@ fn main() {
     runtime.block_on(run(cli, runtime_id, endpoint));
 }
 
-/// Install the subscriber that decides where this process's `tracing` events
-/// go.
-///
-/// Without one they go nowhere, and this binary emits them from the places
-/// with the least other evidence: a plugin hook that did not run, an MCP
-/// server that would not start, an http hook whose response was clamped. Every
-/// one of those was silent for as long as no subscriber was installed, so a
-/// runtime missing half its tools reported exactly what a healthy one does.
-///
-/// **stderr, not stdout.** `tracing_subscriber::fmt` writes to stdout by
-/// default, and this binary's `git-credential` subcommand speaks git's
-/// credential protocol on stdout — a log line interleaved there is a parse
-/// error in git, not a stray line in a log.
-///
-/// First thing in `main`, ahead of argument parsing, so a failure during
-/// startup is narrated too.
+/// stderr, not the default stdout: `git-credential` speaks git's credential
+/// protocol on stdout.
 fn init_tracing() {
     tracing_subscriber::fmt()
         .with_env_filter(log_filter(std::env::var("RUST_LOG").ok().as_deref()))
@@ -252,16 +240,9 @@ fn init_tracing() {
         .init();
 }
 
-/// Resolve `RUST_LOG` into the filter to install.
-///
-/// An *empty* value is treated as unset, not as "log nothing" — that is the
-/// value a deployment produces by accident, since `RUST_LOG: ${RUST_LOG:-info}`
-/// in a compose file substitutes the empty string when the variable is merely
-/// undefined, and an empty filter passes no event at any level.
-///
-/// A malformed directive downgrades to the default rather than aborting: losing
-/// the filter someone asked for is a smaller loss than a runtime that will not
-/// start, and the complaint says which it did.
+/// Empty is unset, not "log nothing": `${RUST_LOG:-info}` in a compose file
+/// substitutes empty when the variable is undefined. A malformed directive
+/// costs the filter, never the process.
 fn log_filter(requested: Option<&str>) -> EnvFilter {
     match requested
         .filter(|v| !v.trim().is_empty())
@@ -1051,10 +1032,8 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    /// The accident a deployment produces: `RUST_LOG: ${RUST_LOG:-info}` in a
-    /// compose file substitutes the empty string when the variable is merely
-    /// undefined, and an empty filter passes no event at any level — the exact
-    /// silence a subscriber was installed to end.
+    /// The empty string is what a compose file substitutes for an undefined
+    /// variable, and an empty filter passes nothing at any level.
     #[test]
     fn an_empty_rust_log_is_unset_not_silent() {
         assert_eq!(log_filter(Some("")).to_string(), DEFAULT_LOG_FILTER);

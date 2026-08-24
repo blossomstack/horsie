@@ -5,10 +5,8 @@
 /// tool stdout into the next LLM turn. nono's network block does not close that
 /// channel, so the spawn does `env_clear()` + this allowlist.
 ///
-/// `RUST_LOG` is on the list because the runtime child is the process whose
-/// logs are hardest to reach, and a scrubbed child could not be turned up at
-/// all: the operator sets it on the vendor and every runtime it spawns
-/// inherits it. It names log levels, never a secret.
+/// `RUST_LOG` is on it so a sandboxed runtime's log level can be raised at all:
+/// it names levels, never a secret.
 pub const SANDBOX_ENV_ALLOWLIST: &[&str] = &[
     "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "RUST_LOG",
 ];
@@ -41,9 +39,8 @@ mod tests {
         );
     }
 
-    /// Without this the sandboxed runtime child's log level could not be
-    /// raised from anywhere: `env_clear()` drops the vendor's `RUST_LOG`, and
-    /// the child installs its filter from its own environment.
+    /// `env_clear()` drops it otherwise, and the child reads its own
+    /// environment.
     #[test]
     fn the_log_filter_survives_the_scrub() {
         assert!(SANDBOX_ENV_ALLOWLIST.contains(&"RUST_LOG"));
