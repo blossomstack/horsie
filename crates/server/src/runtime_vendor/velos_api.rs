@@ -1,8 +1,15 @@
 //! REST client for the velos container API (`/api/v1/containers`).
 //!
 //! Scope is deliberately tiny — the vendor only ever *schedules* a container
-//! (whose command dials back to us), *observes* its phase to fail fast, and
-//! *reclaims* it. No watch streams, no listing, no status writes.
+//! (whose command dials back to us), *observes* its phase to fail fast,
+//! *suspends and resumes* it, and *reclaims* it. No watch streams, no listing,
+//! no status writes.
+//!
+//! Suspend and resume are velos subresources rather than fields: a POST to
+//! `/hibernate` or `/resume` records the user's intent in `spec.desiredState`
+//! and the owning worker converges the micro-VM on its next pass. So both calls
+//! return the moment velos has *recorded* the intent, and the phase is what
+//! says whether the worker has acted on it yet.
 //!
 //! The missing listing is why `VelosRuntimeVendor` takes the default (no-op)
 //! `sweep_orphans`: it has no way to ask velos what it owns. A container is
@@ -34,6 +41,10 @@ pub enum ContainerPhase {
     Pending,
     Scheduled,
     Running,
+    /// Stopped by a hibernate, with its disk intact. Revivable — and the one
+    /// phase that will never dial back on its own, so it is also the one an
+    /// acquisition has to act on rather than wait out.
+    Hibernated,
     Succeeded,
     Failed,
     Unknown,
@@ -45,6 +56,7 @@ impl ContainerPhase {
             "Pending" => ContainerPhase::Pending,
             "Scheduled" => ContainerPhase::Scheduled,
             "Running" => ContainerPhase::Running,
+            "Hibernated" => ContainerPhase::Hibernated,
             "Succeeded" => ContainerPhase::Succeeded,
             "Failed" => ContainerPhase::Failed,
             _ => ContainerPhase::Unknown,
@@ -85,6 +97,19 @@ pub trait ContainerApi: Send + Sync {
 
     /// The container's current phase, or `None` if it no longer exists.
     async fn container_phase(&self, name: &str) -> Result<Option<ContainerPhase>, VelosError>;
+
+    /// Suspend a container, keeping its disk. Idempotent, and a missing
+    /// container is success: there is nothing left to suspend, and hibernate is
+    /// advisory, so failing here would only turn a runtime that had already
+    /// died into a error nobody acts on.
+    async fn hibernate_container(&self, name: &str) -> Result<(), VelosError>;
+
+    /// Wake a suspended container back onto the same disk. Idempotent.
+    ///
+    /// Not defaulted, and not paired with `hibernate` behind one call: an
+    /// implementation that suspends but cannot resume would strand a session's
+    /// workspace asleep, so the two are required together or not at all.
+    async fn resume_container(&self, name: &str) -> Result<(), VelosError>;
 
     /// Prove the server is there and the token is good, without scheduling
     /// anything. Defaulted so a double that only models containers is
@@ -243,6 +268,40 @@ impl ContainerApi for VelosClient {
             .map(ContainerPhase::parse))
     }
 
+    async fn hibernate_container(&self, name: &str) -> Result<(), VelosError> {
+        let resp = self
+            .auth(
+                self.http
+                    .post(self.url(&format!("/api/v1/containers/{name}/hibernate"))),
+            )
+            .send()
+            .await
+            .map_err(request_err)?;
+        // 404 covers both "no such container" and a velos too old to serve the
+        // subresource at all. Neither is worth failing an advisory suspend
+        // over; what a hibernate must never do is take the workspace with it,
+        // and doing nothing satisfies that in both cases.
+        if resp.status().as_u16() == 404 {
+            return Ok(());
+        }
+        ensure_success(resp).await
+    }
+
+    async fn resume_container(&self, name: &str) -> Result<(), VelosError> {
+        let resp = self
+            .auth(
+                self.http
+                    .post(self.url(&format!("/api/v1/containers/{name}/resume"))),
+            )
+            .send()
+            .await
+            .map_err(request_err)?;
+        // No 404 leg here, unlike hibernate: a resume is asked for because a
+        // phase said there was something to wake, so a container that is not
+        // there is a real answer the caller has to see rather than a no-op.
+        ensure_success(resp).await
+    }
+
     async fn preflight(&self) -> Result<(), VelosError> {
         self.whoami().await.map(|_| ())
     }
@@ -272,6 +331,10 @@ mod tests {
         phase: Arc<Mutex<Option<String>>>,
         /// Status code the POST handler returns (default 201).
         create_status: Arc<Mutex<u16>>,
+        /// `POST`s to the `hibernate`/`resume` subresources, as `"<verb>:<name>"`.
+        run_state: Arc<Mutex<Vec<String>>>,
+        /// Status code the subresource handlers return (default 200).
+        run_state_status: Arc<Mutex<u16>>,
         /// Status code the `/auth/v1/me` handler returns (default 200).
         whoami_status: Arc<Mutex<u16>>,
         /// Body the `/auth/v1/me` handler returns (default `{"identity": "admin"}`).
@@ -316,6 +379,31 @@ mod tests {
         StatusCode::NO_CONTENT
     }
 
+    async fn mock_hibernate(
+        State(st): State<MockState>,
+        Path(name): Path<String>,
+    ) -> impl IntoResponse {
+        st.run_state
+            .lock()
+            .unwrap()
+            .push(format!("hibernate:{name}"));
+        run_state_response(&st)
+    }
+
+    async fn mock_resume(
+        State(st): State<MockState>,
+        Path(name): Path<String>,
+    ) -> impl IntoResponse {
+        st.run_state.lock().unwrap().push(format!("resume:{name}"));
+        run_state_response(&st)
+    }
+
+    fn run_state_response(st: &MockState) -> axum::response::Response {
+        let code = *st.run_state_status.lock().unwrap();
+        let status = StatusCode::from_u16(code).unwrap_or(StatusCode::OK);
+        (status, Json(serde_json::json!({}))).into_response()
+    }
+
     async fn mock_whoami(State(st): State<MockState>) -> impl IntoResponse {
         let status = *st.whoami_status.lock().unwrap();
         let body = st.whoami_body.lock().unwrap().clone();
@@ -328,6 +416,7 @@ mod tests {
     async fn spawn_mock() -> (String, MockState) {
         let st = MockState::default();
         *st.create_status.lock().unwrap() = 201;
+        *st.run_state_status.lock().unwrap() = 200;
         *st.whoami_status.lock().unwrap() = 200;
         *st.whoami_body.lock().unwrap() = serde_json::json!({ "identity": "admin" });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -338,6 +427,8 @@ mod tests {
                 "/api/v1/containers/{name}",
                 get(mock_get).delete(mock_delete),
             )
+            .route("/api/v1/containers/{name}/hibernate", post(mock_hibernate))
+            .route("/api/v1/containers/{name}/resume", post(mock_resume))
             .route("/auth/v1/me", get(mock_whoami))
             .with_state(st.clone());
         tokio::spawn(async move {
@@ -434,6 +525,78 @@ mod tests {
         assert_eq!(ContainerPhase::parse("Weird"), ContainerPhase::Unknown);
         assert!(!ContainerPhase::Unknown.is_dead());
         assert!(ContainerPhase::Succeeded.is_dead());
+    }
+
+    /// A hibernated container is stopped, not finished. Reading it as dead
+    /// would have the vendor delete a suspended session's workspace to tidy up
+    /// after a container it thought had crashed.
+    #[test]
+    fn a_hibernated_phase_parses_and_is_not_dead() {
+        assert_eq!(
+            ContainerPhase::parse("Hibernated"),
+            ContainerPhase::Hibernated
+        );
+        assert!(!ContainerPhase::Hibernated.is_dead());
+    }
+
+    #[tokio::test]
+    async fn hibernate_and_resume_post_to_the_subresources() {
+        let (base, st) = spawn_mock().await;
+        let client = VelosClient::new(base, Some(Secret::from("tok-123"))).unwrap();
+        client.hibernate_container("horsie-abc").await.unwrap();
+        client.resume_container("horsie-abc").await.unwrap();
+        assert_eq!(
+            *st.run_state.lock().unwrap(),
+            vec![
+                "hibernate:horsie-abc".to_string(),
+                "resume:horsie-abc".to_string()
+            ]
+        );
+        let auths = st.auths.lock().unwrap();
+        assert!(
+            auths.iter().all(|a| a == "Bearer tok-123"),
+            "both calls must carry the credential: {auths:?}"
+        );
+    }
+
+    /// 404 is both "no such container" and "this velos is too old to know the
+    /// subresource". Neither is worth failing an advisory suspend over, and the
+    /// alternative — an error the caller discards — would be noise that looks
+    /// like a real outage.
+    #[tokio::test]
+    async fn hibernate_treats_404_as_nothing_to_suspend() {
+        let (base, st) = spawn_mock().await;
+        *st.run_state_status.lock().unwrap() = 404;
+        let client = VelosClient::new(base, None).unwrap();
+        client.hibernate_container("gone").await.unwrap();
+    }
+
+    /// A resume is only ever asked for because a phase said there was something
+    /// asleep, so an absent container is news the acquisition has to act on —
+    /// swallowing it would report a workspace as reviving that is not there.
+    #[tokio::test]
+    async fn resume_surfaces_a_missing_container() {
+        let (base, st) = spawn_mock().await;
+        *st.run_state_status.lock().unwrap() = 404;
+        let client = VelosClient::new(base, None).unwrap();
+        match client.resume_container("gone").await {
+            Err(VelosError::Status { status, .. }) => assert_eq!(status, 404),
+            other => panic!("expected a 404 status error, got {other:?}"),
+        }
+    }
+
+    /// velos refuses to suspend a container that already ran to completion
+    /// (409). Advisory or not, the vendor must not paper over it: the phase it
+    /// leaves behind is what a later acquisition reads.
+    #[tokio::test]
+    async fn hibernate_surfaces_a_conflict() {
+        let (base, st) = spawn_mock().await;
+        *st.run_state_status.lock().unwrap() = 409;
+        let client = VelosClient::new(base, None).unwrap();
+        match client.hibernate_container("done").await {
+            Err(VelosError::Status { status, .. }) => assert_eq!(status, 409),
+            other => panic!("expected a 409 status error, got {other:?}"),
+        }
     }
 
     #[tokio::test]

@@ -108,17 +108,21 @@ vendor's **Image** field.
 
 ## What an idle session costs
 
-This is the one place the two kinds are not interchangeable.
+Both kinds suspend an idle session and wake it on the next message, and both
+find their workspace as they left it.
 
-A **Fly** machine is stopped when its session goes cold, and started again on
-the next message. It keeps its volume, so the session finds its workspace as it
-left it.
+A **Fly** machine is stopped and keeps its volume. A **velos** container is
+stopped and keeps its disk — velos suspends by shutting the micro-VM down
+without removing it, so what wakes up is the same container.
 
-**velos** has no way to stop a container — only to delete one, which would
-throw the workspace away. So an idle velos session keeps its container, and its
-compute, until the session is deleted.
+What a suspend does not keep is anything a process was holding: the runtime
+restarts, so a working directory or a background command from before does not
+survive. Files do. Your transcript is safe either way — it lives on the server,
+not in the sandbox.
 
-Your transcript is safe either way: it lives on the server, not in the sandbox.
+A velos older than its `hibernate` and `resume` subresources has nothing to
+suspend with. horsie keeps such a container running rather than deleting it, so
+an idle session there costs compute until the session is deleted.
 
 ## Choosing a vendor per session
 
@@ -138,9 +142,10 @@ crate against your substrate's API, and add a variant to the settings union so
 it can be configured. Four lifecycle methods: create, get, hibernate, delete.
 
 The Fly and velos vendors are deliberately structural twins and are the worked
-examples. What each substrate can do — Fly keeps a workspace across a
-hibernate, velos rebuilds it — stays inside its implementation and never
-reaches the trait. See [Runtimes & vendors](/internals/runtimes-and-vendors/)
+examples. What each substrate can do — Fly stops a machine and keeps its
+volume, velos stops a micro-VM and keeps its disk, a substrate that can do
+neither declines the hint and stays up — stays inside its implementation and
+never reaches the trait. See [Runtimes & vendors](/internals/runtimes-and-vendors/)
 for why the contract is shaped that way.
 
 If the runtimes must live somewhere the server cannot reach, you want

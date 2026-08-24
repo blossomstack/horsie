@@ -5,13 +5,16 @@
 //! taxonomy are testable without a network, and a container is named
 //! `horsie-{runtime_id}` so nothing has to be written down to find it again.
 //!
-//! **This vendor cannot hibernate, and says so by doing nothing.** velos has no
-//! suspend — its API is create and delete — and deleting a container is not
-//! suspending it: it destroys the workspace and everything in flight to free a
-//! slot on a worker. So a hibernate here is advice declined, which the vendor
-//! contract explicitly allows and prefers. A Fly vendor stops its machine and
-//! keeps the volume; same trait, different capability, and the difference stays
+//! **A hibernate suspends the container; it never deletes one.** velos suspends
+//! by stopping the micro-VM and keeping its disk, so a hibernate here is a real
+//! suspend and an acquisition wakes the *same* container back onto the *same*
+//! workspace. This is the Fly vendor's shape — stop the machine, keep the
+//! volume — reached through a different substrate, and the difference stays
 //! inside the implementations exactly as intended.
+//!
+//! Deleting a container would also free the worker slot, and is never the
+//! answer: it destroys the workspace and everything in flight, which is the
+//! trade an advisory suspend must never make on the user's behalf.
 //!
 //! The consequence is that a container only ever disappears because it died.
 //! So an acquisition that finds none answers `Gone` rather than scheduling a
@@ -25,7 +28,9 @@
 //! later rather than a gap.
 
 use crate::runtime_vendor::runtime_command::{build_runtime_command, workspace_paths};
-use crate::runtime_vendor::velos_api::{ContainerApi, ContainerLaunchSpec, VelosError};
+use crate::runtime_vendor::velos_api::{
+    ContainerApi, ContainerLaunchSpec, ContainerPhase, VelosError,
+};
 use crate::runtime_vendor::{RuntimeVendor, RuntimeVendorError};
 use async_trait::async_trait;
 use horsie_models::runtime_vendor::{RuntimeSpec, RuntimeVendorCapabilities};
@@ -294,11 +299,25 @@ impl<A: ContainerApi + 'static> RuntimeVendor for VelosRuntimeVendor<A> {
         // one at all — a fact the session's own journalled status knows and no
         // node-local table can be trusted for once a session may be acquired
         // from a node that never ran its create.
-        let alive = self
-            .api
-            .container_phase(&container_name(runtime_id))
-            .await?
-            .is_some_and(|phase| !phase.is_dead());
+        let name = container_name(runtime_id);
+        let phase = self.api.container_phase(&name).await?;
+
+        // The one phase that will never resolve itself. Everything else this
+        // vendor observes is either moving under its own power or dead, but a
+        // hibernated container is stopped on purpose and stays stopped until
+        // someone asks for it back — so an acquisition has to ask, and this is
+        // the only place that knows one is happening. Its disk is intact, which
+        // is what makes waking the same container the right move rather than
+        // scheduling a replacement.
+        if phase == Some(ContainerPhase::Hibernated) {
+            self.api.resume_container(&name).await?;
+            self.watch_substrate(runtime_id, progress);
+            return Ok(RuntimeProgress::Starting {
+                detail: "the container is resuming".to_string(),
+            });
+        }
+
+        let alive = phase.is_some_and(|phase| !phase.is_dead());
         if alive || provisioning {
             self.watch_substrate(runtime_id, progress);
             return Ok(RuntimeProgress::Starting {
@@ -318,22 +337,17 @@ impl<A: ContainerApi + 'static> RuntimeVendor for VelosRuntimeVendor<A> {
 
     async fn hibernate(
         &self,
-        _runtime_id: &str,
+        runtime_id: &str,
         _progress: RuntimeProgressSink,
     ) -> Result<RuntimeProgress, RuntimeVendorError> {
-        // Declined, and that is a correct implementation of an advisory
-        // suspend. velos has no suspend: its API is create and delete, and
-        // deleting a container is not hibernating it — it destroys the
-        // workspace and everything in flight to save a slot on a worker.
-        // Keeping the runtime running costs compute; the alternative costs the
-        // user's work.
-        //
-        // Never `Stopped`: nothing was stopped. The container was left exactly
-        // as it was, and a later `get` is what discovers whether it is still
-        // coming up or gone.
-        Ok(RuntimeProgress::Starting {
-            detail: "velos cannot suspend; the container was left as it is".to_string(),
-        })
+        // A suspend, not a delete: velos stops the micro-VM and keeps its disk,
+        // so the workspace and everything on it survives to be woken by the
+        // next `get`. Nothing here is watched afterwards — a stopped container
+        // has no progress to make until something asks for it back.
+        self.api
+            .hibernate_container(&container_name(runtime_id))
+            .await?;
+        Ok(RuntimeProgress::Stopped)
     }
 
     async fn delete(
@@ -359,7 +373,6 @@ impl<A: ContainerApi + 'static> RuntimeVendor for VelosRuntimeVendor<A> {
 )]
 mod tests {
     use super::*;
-    use crate::runtime_vendor::velos_api::ContainerPhase;
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -400,6 +413,19 @@ mod tests {
         }
         async fn container_phase(&self, _name: &str) -> Result<Option<ContainerPhase>, VelosError> {
             Ok(*self.phase.lock().unwrap())
+        }
+        async fn hibernate_container(&self, name: &str) -> Result<(), VelosError> {
+            self.calls.lock().unwrap().push(format!("hibernate:{name}"));
+            // Models the substrate, not just the call: velos leaves a
+            // hibernated container in place, phase `Hibernated`, which is what
+            // the next acquisition has to recognise.
+            *self.phase.lock().unwrap() = Some(ContainerPhase::Hibernated);
+            Ok(())
+        }
+        async fn resume_container(&self, name: &str) -> Result<(), VelosError> {
+            self.calls.lock().unwrap().push(format!("resume:{name}"));
+            *self.phase.lock().unwrap() = Some(ContainerPhase::Running);
+            Ok(())
         }
         async fn preflight(&self) -> Result<(), VelosError> {
             self.calls.lock().unwrap().push("preflight".to_string());
@@ -572,19 +598,77 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_hibernate_leaves_the_container_alone() {
-        // Deleting a container is not suspending it. velos has no suspend, so
-        // the honest implementation of an advisory one is to decline — the
-        // contract says as much, and the alternative trades the user's work for
-        // a slot on a worker.
-        let v = vendor(FakeVelos::default());
+    async fn a_hibernate_suspends_the_container_and_never_destroys_it() {
+        // Deleting a container would free the same worker slot and take the
+        // workspace with it. The whole value of the suspend is that it does
+        // not make that trade.
+        let api = FakeVelos::default();
+        *api.phase.lock().unwrap() = Some(ContainerPhase::Running);
+        let v = vendor(api);
         let (tx, _rx) = sink();
         let progress = v.hibernate("s1", tx).await.unwrap();
         assert!(
-            matches!(progress, RuntimeProgress::Starting { .. }),
-            "nothing was stopped, so nothing may report Stopped: {progress:?}"
+            matches!(progress, RuntimeProgress::Stopped),
+            "a container that was really stopped reports Stopped: {progress:?}"
         );
-        assert!(v.api.calls().is_empty(), "nothing may be destroyed here");
+        assert_eq!(v.api.calls(), vec!["hibernate:horsie-s1".to_string()]);
+    }
+
+    /// The round trip that is the point of the whole feature: what comes back
+    /// is the *same* container, so the workspace the session left behind is
+    /// still under it. A resume that scheduled a replacement would satisfy
+    /// every type in this file and lose the user's work.
+    #[tokio::test]
+    async fn a_hibernated_container_is_resumed_by_the_next_acquisition() {
+        let api = FakeVelos::default();
+        *api.phase.lock().unwrap() = Some(ContainerPhase::Running);
+        let v = vendor(api);
+
+        let (tx, _rx) = sink();
+        v.hibernate("s1", tx).await.unwrap();
+
+        let (tx, _rx) = sink();
+        let progress = v.get("s1", &spec(), false, tx).await.unwrap();
+
+        assert!(matches!(progress, RuntimeProgress::Starting { .. }));
+        assert_eq!(
+            v.api.calls(),
+            vec![
+                "hibernate:horsie-s1".to_string(),
+                "resume:horsie-s1".to_string()
+            ],
+            "the acquisition must wake the container it hibernated, and build nothing"
+        );
+    }
+
+    /// A hibernated container is stopped on purpose, so nothing else will ever
+    /// move it. Waiting for it to dial back — the correct answer for every
+    /// other live phase — would hang the acquisition for the full ready window
+    /// and then declare a perfectly good workspace gone.
+    #[tokio::test]
+    async fn an_acquisition_of_a_hibernated_container_does_not_merely_wait() {
+        let api = FakeVelos::default();
+        *api.phase.lock().unwrap() = Some(ContainerPhase::Hibernated);
+        let v = vendor(api);
+        let (tx, _rx) = sink();
+        v.get("s1", &spec(), false, tx).await.unwrap();
+        assert_eq!(v.api.calls(), vec!["resume:horsie-s1".to_string()]);
+    }
+
+    /// Hibernate is advisory and the caller discards its outcome, so the only
+    /// way this can hurt is by destroying something. A runtime that already
+    /// died is exactly when a "tidy up while we're here" delete would fire.
+    #[tokio::test]
+    async fn a_hibernate_of_a_container_that_is_already_gone_destroys_nothing() {
+        let v = vendor(FakeVelos::default());
+        let (tx, _rx) = sink();
+        let progress = v.hibernate("s1", tx).await.unwrap();
+        assert!(matches!(progress, RuntimeProgress::Stopped), "{progress:?}");
+        assert!(
+            !v.api.calls().iter().any(|c| c.starts_with("delete:")),
+            "an advisory suspend must never delete: {:?}",
+            v.api.calls()
+        );
     }
 
     #[tokio::test]
