@@ -23,12 +23,26 @@ test.describe("authored plugins", () => {
     // edit, so it starts at 1 and is worth showing.
     await expect(row.getByText("gen 1")).toBeVisible();
 
-    // With no skills in it there is nothing installable, so it does not
-    // publish a bundle: the library still holds only the cloned fixture, and
-    // that one says it is a clone.
+    // It publishes empty. The plugin is what an agent is assigned, and the
+    // skills are written into it afterwards — so it has to be pickable during
+    // the period it is still being filled in.
     const bundles = page.getByTestId("bundle-row");
-    await expect(bundles).toHaveCount(1);
-    await expect(bundles.first().getByText("claude")).toBeVisible();
+    await expect(bundles).toHaveCount(2);
+    const authored = bundles.filter({ hasText: "field-notes" });
+    await expect(authored.getByText("authored here")).toBeVisible();
+    // Nothing to re-read and nothing to uninstall: it is deleted where it is
+    // written, in the section above.
+    await expect(authored.getByText("Update")).toHaveCount(0);
+    await expect(authored.getByLabel("Delete bundle")).toHaveCount(0);
+
+    // And an agent can select it, which is the whole point of publishing it
+    // before it holds anything.
+    await page.goto(`${appBase}/`);
+    await page.getByTestId("new-session-button").click();
+    await page.getByTestId("config-skills").click();
+    await expect(
+      page.locator("label").filter({ hasText: "field-notes" }),
+    ).toBeVisible();
   });
 
   test("the e2e fixture bundle reports which packaging it uses", async ({

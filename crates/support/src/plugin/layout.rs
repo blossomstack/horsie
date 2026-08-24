@@ -61,14 +61,24 @@ impl PluginRoot {
             .and_then(|m| m.description.as_deref())
     }
 
-    /// A plugin is installable when it provides something horsie runs: skills,
-    /// hooks, agents, or commands.
+    /// A plugin is installable when it declares itself one with a manifest, or
+    /// provides something horsie runs: skills, hooks, agents, or commands.
     ///
     /// This was skills-only, which refused a hooks-only plugin at install even
     /// though horsie would have run its hooks perfectly well — the whole class
     /// of guard-only plugins, and MCP-only ones once Phase 4 lands.
+    ///
+    /// A manifest counts on its own because content is not always a property of
+    /// the tree at the moment it is read. An authored plugin is created empty
+    /// and filled in afterwards, so judging it by content alone made it
+    /// unpublishable — and therefore unassignable — for the whole window in
+    /// which it was being written. A manifest is the author saying this *is* a
+    /// plugin, which is exactly the question being asked; the content check
+    /// stays for the trees that never declared anything, which is where this
+    /// guard earns its keep: a repo horsie was pointed at by mistake.
     pub fn is_installable(&self) -> bool {
-        !self.skill_dirs.is_empty()
+        self.manifest.is_some()
+            || !self.skill_dirs.is_empty()
             || !self.agent_files.is_empty()
             || !self.command_files.is_empty()
             || self.declares_hooks()
@@ -96,8 +106,10 @@ impl PluginRoot {
                 .join(", ")
         };
         format!(
-            "nothing horsie can run: no */SKILL.md under {}, no *.md under {} or {}, \
-             no hooks/hooks.json",
+            "no manifest and nothing horsie can run: no {} or {}, no */SKILL.md \
+             under {}, no *.md under {} or {}, no hooks/hooks.json",
+            relative(vec![PluginManifest::claude_path(&self.dir)]),
+            relative(vec![PluginManifest::agent_plugin_path(&self.dir)]),
             relative(skills::skill_locations(&self.dir, self.manifest.as_ref())),
             relative(agents::agent_locations(&self.dir, self.manifest.as_ref())),
             relative(commands::command_locations(
@@ -178,6 +190,30 @@ mod tests {
                 msg.contains(expected),
                 "rejection should name {expected}: {msg}"
             );
+        }
+    }
+
+    /// A manifest and nothing else. This is what an authored plugin renders to
+    /// between being created and having its first skill written, and refusing
+    /// it there meant it never reached the library an agent picks from.
+    #[test]
+    fn a_manifest_alone_is_installable_in_either_dialect() {
+        for (path, body) in [
+            (
+                ".claude-plugin/plugin.json",
+                r#"{"name":"empty","version":"0.0.1"}"#,
+            ),
+            (
+                "plugin.json",
+                r#"{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+                    "name":"empty","version":"0.0.1"}"#,
+            ),
+        ] {
+            let dir = TempDir::new().unwrap();
+            write(&dir.path().join(path), body);
+            let root = PluginRoot::inspect(dir.path()).unwrap();
+            assert!(root.is_installable(), "{path} alone must install");
+            assert!(root.skill_dirs.is_empty());
         }
     }
 

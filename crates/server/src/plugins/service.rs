@@ -76,16 +76,6 @@ impl PluginService {
         self.persist(bundle, kind).await
     }
 
-    /// Drop the published row for an authored plugin that no longer renders
-    /// anything installable. Silent when there is nothing to remove, and never
-    /// touches a bundle that came from a clone.
-    pub async fn remove_if_authored(&self, name: &str) -> Result<(), String> {
-        match self.store.get(name).await? {
-            Some(row) if kind::is_authored(&row.kind) => self.remove(name).await,
-            _ => Ok(()),
-        }
-    }
-
     /// The zip a runtime fetches, for either kind of bundle.
     ///
     /// An external bundle is read from the artifact store by its hash. An
@@ -431,7 +421,29 @@ impl PluginService {
         Ok(row_to_view(row))
     }
 
+    /// Uninstall a bundle.
+    ///
+    /// An authored one is refused. Its `plugins` row is a projection of the
+    /// tables it renders from, so dropping the row here would leave the plugin
+    /// still authored and still listed under Skills, but absent from the
+    /// library, with nothing that would put it back until its next edit.
+    /// Deleting the plugin itself is what `AuthoredService::delete_plugin` is
+    /// for, and that goes through [`Self::purge`].
     pub async fn remove(&self, name: &str) -> Result<(), String> {
+        if let Some(row) = self.store.get(name).await?
+            && kind::is_authored(&row.kind)
+        {
+            return Err(format!(
+                "'{name}' was authored on this server, not installed — \
+                 delete the authored plugin to remove it"
+            ));
+        }
+        self.purge(name).await
+    }
+
+    /// Drop the row and collect its artifact, whatever kind it is. The caller
+    /// is responsible for the plugin still existing somewhere else, or not.
+    pub(super) async fn purge(&self, name: &str) -> Result<(), String> {
         self.store.delete(name).await?;
         self.gc().await
     }
