@@ -119,7 +119,7 @@ Writing either side never destroys the other's keys.
 | `HORSIE_BUS_URL` | Overrides `bus.url`. Takes precedence over the config file. |
 | `HORSIE_MODEL_CARDS_SEED` | Same as `--model-cards-seed`. |
 | `HORSIE_TOKEN` | **CLI.** Bearer token to send instead of reading stored credentials. For scripts and CI. |
-| `RUST_LOG` | Which log events the server prints. Unset, empty, or unparseable → `info`. |
+| `RUST_LOG` | Which log events a horsie process prints — the server, a vendor's runtimes, or both. Unset, empty, or unparseable → `info`. |
 
 ### Logs
 
@@ -134,6 +134,20 @@ is an endpoint answering `500`.
 defining it still logs at `info`, because a stack that had quietly stopped
 logging looked exactly like a stack with nothing to say. To actually silence
 the server, ask for it — `RUST_LOG=off`.
+
+**Runtimes log too**, by the same rules, to stderr — so they land wherever the
+thing that started the runtime sends it: your terminal or process manager for
+`horsie connect`, the container's log for a cloud vendor. That log is where a
+plugin hook that did not run, an MCP server that would not start, or a dial
+that keeps being refused says so; the runtime otherwise reports none of it,
+because a tool it could not load and a tool the session never selected look
+identical from the outside.
+
+Nothing turns that on and no session configures it: a runtime logs at `info`
+wherever it runs — its own container, or a child on your laptop. Moving it off
+that default is the same variable in the runtime's own environment, so
+`RUST_LOG=debug horsie connect …` covers every runtime that process spawns,
+sandboxed or not.
 
 ### Running more than one node
 

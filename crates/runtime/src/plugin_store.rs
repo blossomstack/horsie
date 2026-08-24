@@ -300,7 +300,7 @@ impl PluginStore {
                 let link = agent_dir.join(&name);
                 let target = Path::new("../..").join(&name);
                 if let Err(e) = std::os::unix::fs::symlink(&target, &link) {
-                    eprintln!("plugins: cannot link host plugin {name:?}: {e}");
+                    tracing::warn!(plugin = ?name, error = %e, "cannot link host plugin");
                 }
             }
         }

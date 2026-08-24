@@ -24,6 +24,13 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Mutex;
 use tokio_tungstenite::{WebSocketStream, client_async, connect_async, tungstenite::Message};
+use tracing_subscriber::EnvFilter;
+
+/// What is logged when `RUST_LOG` says nothing usable. `info` because a
+/// runtime's whole narration is a handful of lines — it dials, it says who it
+/// serves, it reports what it could not do — and an operator reading a
+/// container's log is there precisely because one of them is missing.
+const DEFAULT_LOG_FILTER: &str = "info";
 
 /// Default retry policy for the initial server connection. A long-lived
 /// `horsie connect` daemon should tolerate transient server restarts, so we
@@ -138,6 +145,7 @@ fn parse_endpoint(s: &str) -> Result<Endpoint, String> {
 }
 
 fn main() {
+    init_tracing();
     let cli = Cli::parse();
 
     // Credential mode: answer git and exit. Runs before endpoint parsing and
@@ -151,7 +159,7 @@ fn main() {
             .build()
         {
             Ok(rt) => rt.block_on(horsie_runtime::git_credential::run(&operation)),
-            Err(e) => eprintln!("failed to build tokio runtime: {e}"),
+            Err(e) => tracing::error!(error = %e, "failed to build tokio runtime"),
         }
         std::process::exit(0);
     }
@@ -214,11 +222,58 @@ fn main() {
     {
         Ok(rt) => rt,
         Err(e) => {
-            eprintln!("failed to build tokio runtime: {e}");
+            tracing::error!(error = %e, "failed to build tokio runtime");
             std::process::exit(1);
         }
     };
     runtime.block_on(run(cli, runtime_id, endpoint));
+}
+
+/// Install the subscriber that decides where this process's `tracing` events
+/// go.
+///
+/// Without one they go nowhere, and this binary emits them from the places
+/// with the least other evidence: a plugin hook that did not run, an MCP
+/// server that would not start, an http hook whose response was clamped. Every
+/// one of those was silent for as long as no subscriber was installed, so a
+/// runtime missing half its tools reported exactly what a healthy one does.
+///
+/// **stderr, not stdout.** `tracing_subscriber::fmt` writes to stdout by
+/// default, and this binary's `git-credential` subcommand speaks git's
+/// credential protocol on stdout — a log line interleaved there is a parse
+/// error in git, not a stray line in a log.
+///
+/// First thing in `main`, ahead of argument parsing, so a failure during
+/// startup is narrated too.
+fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(log_filter(std::env::var("RUST_LOG").ok().as_deref()))
+        .with_writer(std::io::stderr)
+        .init();
+}
+
+/// Resolve `RUST_LOG` into the filter to install.
+///
+/// An *empty* value is treated as unset, not as "log nothing" — that is the
+/// value a deployment produces by accident, since `RUST_LOG: ${RUST_LOG:-info}`
+/// in a compose file substitutes the empty string when the variable is merely
+/// undefined, and an empty filter passes no event at any level.
+///
+/// A malformed directive downgrades to the default rather than aborting: losing
+/// the filter someone asked for is a smaller loss than a runtime that will not
+/// start, and the complaint says which it did.
+fn log_filter(requested: Option<&str>) -> EnvFilter {
+    match requested
+        .filter(|v| !v.trim().is_empty())
+        .map(EnvFilter::try_new)
+    {
+        Some(Ok(filter)) => filter,
+        Some(Err(e)) => {
+            eprintln!("ignoring RUST_LOG: {e}");
+            EnvFilter::new(DEFAULT_LOG_FILTER)
+        }
+        None => EnvFilter::new(DEFAULT_LOG_FILTER),
+    }
 }
 
 /// Point git at this binary's credential helper, for every process this runtime
@@ -281,14 +336,16 @@ fn apply_sandbox_or_exit(
     #[cfg(feature = "sandbox")]
     {
         if let Err(e) = horsie_runtime::sandbox::apply(dirs, socket, caps_file) {
-            eprintln!("sandbox apply failed: {e}");
+            tracing::error!(error = %e, "sandbox apply failed");
             std::process::exit(3);
         }
     }
     #[cfg(not(feature = "sandbox"))]
     {
         let _ = (dirs, socket, caps_file);
-        eprintln!("--sandbox-caps given but this binary was built without the `sandbox` feature");
+        tracing::error!(
+            "--sandbox-caps given but this binary was built without the `sandbox` feature"
+        );
         std::process::exit(3);
     }
 }
@@ -336,7 +393,7 @@ async fn run(cli: Cli, runtime_id: String, endpoint: Endpoint) {
     let request = match dial_request(&dial_url, token.as_deref()) {
         Ok(request) => request,
         Err(e) => {
-            eprintln!("cannot dial {dial_url}: {e}");
+            tracing::error!(endpoint = %dial_url, error = %e, "cannot dial");
             std::process::exit(1);
         }
     };
@@ -441,21 +498,21 @@ async fn serve_until_disconnected<S, C, Fut>(
         let ws = match connected {
             Ok((ws, _)) => ws,
             Err(e) => {
-                eprintln!("failed to {label}: {e}");
+                tracing::error!(error = %e, "failed to {label}");
                 std::process::exit(1);
             }
         };
         if !first {
-            eprintln!("reconnected: {label}");
+            tracing::info!("reconnected: {label}");
         }
         first = false;
 
         run_loop(ws, registry.clone(), runtime_id.clone(), state.clone()).await;
         if !reconnect {
-            eprintln!("link closed; the vendor that owns this runtime is gone");
+            tracing::info!("link closed; the vendor that owns this runtime is gone");
             return;
         }
-        eprintln!("link closed; reconnecting");
+        tracing::warn!("link closed; reconnecting");
     }
 }
 
@@ -490,12 +547,13 @@ where
             Ok(t) => return Ok(t),
             Err(e) if attempt == max_attempts => return Err(e),
             Err(e) if !is_retryable(&e.to_string()) => {
-                eprintln!("{label} was refused, which no retry can change: {e}");
+                tracing::error!(error = %e, "{label} was refused, which no retry can change");
                 return Err(e);
             }
             Err(e) => {
-                eprintln!(
-                    "{label} attempt {attempt}/{max_attempts} failed: {e}; retrying in {delay:?}"
+                tracing::warn!(
+                    error = %e,
+                    "{label} attempt {attempt}/{max_attempts} failed; retrying in {delay:?}"
                 );
                 tokio::time::sleep(delay).await;
                 delay = (delay * 2).min(max_delay);
@@ -553,12 +611,12 @@ async fn run_loop<S>(
     })) {
         Ok(json) => json,
         Err(e) => {
-            eprintln!("serialization error: {e}");
+            tracing::error!(error = %e, "serialization error");
             std::process::exit(1);
         }
     };
     if let Err(e) = sink.lock().await.send(Message::Text(ready.into())).await {
-        eprintln!("failed to send RuntimeReady: {e}");
+        tracing::error!(error = %e, "failed to send RuntimeReady");
         std::process::exit(1);
     }
 
@@ -992,6 +1050,34 @@ async fn run_loop<S>(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// The accident a deployment produces: `RUST_LOG: ${RUST_LOG:-info}` in a
+    /// compose file substitutes the empty string when the variable is merely
+    /// undefined, and an empty filter passes no event at any level — the exact
+    /// silence a subscriber was installed to end.
+    #[test]
+    fn an_empty_rust_log_is_unset_not_silent() {
+        assert_eq!(log_filter(Some("")).to_string(), DEFAULT_LOG_FILTER);
+        assert_eq!(log_filter(Some("  ")).to_string(), DEFAULT_LOG_FILTER);
+        assert_eq!(log_filter(None).to_string(), DEFAULT_LOG_FILTER);
+    }
+
+    #[test]
+    fn a_usable_rust_log_is_what_gets_installed() {
+        assert_eq!(
+            log_filter(Some("horsie_runtime=debug")).to_string(),
+            "horsie_runtime=debug"
+        );
+    }
+
+    /// A typo in the filter costs the filter, never the runtime.
+    #[test]
+    fn a_malformed_rust_log_falls_back_to_the_default() {
+        assert_eq!(
+            log_filter(Some("horsie_runtime=nonsense")).to_string(),
+            DEFAULT_LOG_FILTER
+        );
+    }
 
     #[tokio::test]
     async fn retry_succeeds_after_failures() {
