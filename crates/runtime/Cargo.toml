@@ -24,6 +24,10 @@ serde         = { workspace = true }
 serde_json    = { workspace = true }
 clap          = { version = "4", features = ["derive"] }
 tracing       = { workspace = true }
+# The subscriber. Without one every `tracing` event this binary emits is
+# dropped, which is what made a runtime that could not reach its plugins,
+# its MCP servers, or a hook look like one with nothing to say.
+tracing-subscriber = { workspace = true }
 async-trait   = { workspace = true }
 regex         = "1"
 # Ignore-aware traversal for grep/glob/list_files: standard filters (hidden,

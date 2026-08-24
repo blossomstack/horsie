@@ -4,8 +4,11 @@
 /// MUST NOT inherit: a sandboxed `bash` could otherwise echo them back through
 /// tool stdout into the next LLM turn. nono's network block does not close that
 /// channel, so the spawn does `env_clear()` + this allowlist.
+///
+/// `RUST_LOG` is on it so a sandboxed runtime's log level can be raised at all:
+/// it names levels, never a secret.
 pub const SANDBOX_ENV_ALLOWLIST: &[&str] = &[
-    "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TERM",
+    "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "RUST_LOG",
 ];
 
 /// Resolve the allowlisted env vars present in the current process.
@@ -34,6 +37,13 @@ mod tests {
                 .iter()
                 .any(|k| k.contains("KEY") || k.contains("TOKEN") || k.contains("SECRET"))
         );
+    }
+
+    /// `env_clear()` drops it otherwise, and the child reads its own
+    /// environment.
+    #[test]
+    fn the_log_filter_survives_the_scrub() {
+        assert!(SANDBOX_ENV_ALLOWLIST.contains(&"RUST_LOG"));
     }
 
     #[test]

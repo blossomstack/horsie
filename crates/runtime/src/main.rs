@@ -24,6 +24,10 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Mutex;
 use tokio_tungstenite::{WebSocketStream, client_async, connect_async, tungstenite::Message};
+use tracing_subscriber::EnvFilter;
+
+/// What is logged when `RUST_LOG` says nothing usable.
+const DEFAULT_LOG_FILTER: &str = "info";
 
 /// Default retry policy for the initial server connection. A long-lived
 /// `horsie connect` daemon should tolerate transient server restarts, so we
@@ -144,6 +148,10 @@ fn main() {
     // before the sandbox, because this process *is* a child of a git command
     // already running inside one — it inherits that confinement rather than
     // applying its own.
+    //
+    // No subscriber is installed here: git parses this process's stdout, and
+    // its stderr reaches the model as part of the tool that ran the git
+    // command. A subscriber would put every crate's events on both.
     if let Some(Commands::GitCredential { operation }) = &cli.command {
         let operation = operation.clone();
         match tokio::runtime::Builder::new_current_thread()
@@ -155,6 +163,8 @@ fn main() {
         }
         std::process::exit(0);
     }
+
+    init_tracing();
 
     // Probe mode: apply the sandbox and exit — before endpoint parsing, the tokio
     // runtime, provisioning, and any connect attempt.
@@ -214,11 +224,37 @@ fn main() {
     {
         Ok(rt) => rt,
         Err(e) => {
-            eprintln!("failed to build tokio runtime: {e}");
+            tracing::error!(error = %e, "failed to build tokio runtime");
             std::process::exit(1);
         }
     };
     runtime.block_on(run(cli, runtime_id, endpoint));
+}
+
+/// stderr, not the default stdout: `git-credential` speaks git's credential
+/// protocol on stdout.
+fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(log_filter(std::env::var("RUST_LOG").ok().as_deref()))
+        .with_writer(std::io::stderr)
+        .init();
+}
+
+/// Empty is unset, not "log nothing": `${RUST_LOG:-info}` in a compose file
+/// substitutes empty when the variable is undefined. A malformed directive
+/// costs the filter, never the process.
+fn log_filter(requested: Option<&str>) -> EnvFilter {
+    match requested
+        .filter(|v| !v.trim().is_empty())
+        .map(EnvFilter::try_new)
+    {
+        Some(Ok(filter)) => filter,
+        Some(Err(e)) => {
+            eprintln!("ignoring RUST_LOG: {e}");
+            EnvFilter::new(DEFAULT_LOG_FILTER)
+        }
+        None => EnvFilter::new(DEFAULT_LOG_FILTER),
+    }
 }
 
 /// Point git at this binary's credential helper, for every process this runtime
@@ -281,14 +317,16 @@ fn apply_sandbox_or_exit(
     #[cfg(feature = "sandbox")]
     {
         if let Err(e) = horsie_runtime::sandbox::apply(dirs, socket, caps_file) {
-            eprintln!("sandbox apply failed: {e}");
+            tracing::error!(error = %e, "sandbox apply failed");
             std::process::exit(3);
         }
     }
     #[cfg(not(feature = "sandbox"))]
     {
         let _ = (dirs, socket, caps_file);
-        eprintln!("--sandbox-caps given but this binary was built without the `sandbox` feature");
+        tracing::error!(
+            "--sandbox-caps given but this binary was built without the `sandbox` feature"
+        );
         std::process::exit(3);
     }
 }
@@ -336,7 +374,7 @@ async fn run(cli: Cli, runtime_id: String, endpoint: Endpoint) {
     let request = match dial_request(&dial_url, token.as_deref()) {
         Ok(request) => request,
         Err(e) => {
-            eprintln!("cannot dial {dial_url}: {e}");
+            tracing::error!(endpoint = %dial_url, error = %e, "cannot dial");
             std::process::exit(1);
         }
     };
@@ -441,21 +479,21 @@ async fn serve_until_disconnected<S, C, Fut>(
         let ws = match connected {
             Ok((ws, _)) => ws,
             Err(e) => {
-                eprintln!("failed to {label}: {e}");
+                tracing::error!(error = %e, "failed to {label}");
                 std::process::exit(1);
             }
         };
         if !first {
-            eprintln!("reconnected: {label}");
+            tracing::info!("reconnected: {label}");
         }
         first = false;
 
         run_loop(ws, registry.clone(), runtime_id.clone(), state.clone()).await;
         if !reconnect {
-            eprintln!("link closed; the vendor that owns this runtime is gone");
+            tracing::info!("link closed; the vendor that owns this runtime is gone");
             return;
         }
-        eprintln!("link closed; reconnecting");
+        tracing::warn!("link closed; reconnecting");
     }
 }
 
@@ -490,12 +528,13 @@ where
             Ok(t) => return Ok(t),
             Err(e) if attempt == max_attempts => return Err(e),
             Err(e) if !is_retryable(&e.to_string()) => {
-                eprintln!("{label} was refused, which no retry can change: {e}");
+                tracing::error!(error = %e, "{label} was refused, which no retry can change");
                 return Err(e);
             }
             Err(e) => {
-                eprintln!(
-                    "{label} attempt {attempt}/{max_attempts} failed: {e}; retrying in {delay:?}"
+                tracing::warn!(
+                    error = %e,
+                    "{label} attempt {attempt}/{max_attempts} failed; retrying in {delay:?}"
                 );
                 tokio::time::sleep(delay).await;
                 delay = (delay * 2).min(max_delay);
@@ -553,12 +592,12 @@ async fn run_loop<S>(
     })) {
         Ok(json) => json,
         Err(e) => {
-            eprintln!("serialization error: {e}");
+            tracing::error!(error = %e, "serialization error");
             std::process::exit(1);
         }
     };
     if let Err(e) = sink.lock().await.send(Message::Text(ready.into())).await {
-        eprintln!("failed to send RuntimeReady: {e}");
+        tracing::error!(error = %e, "failed to send RuntimeReady");
         std::process::exit(1);
     }
 
@@ -992,6 +1031,32 @@ async fn run_loop<S>(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// The empty string is what a compose file substitutes for an undefined
+    /// variable, and an empty filter passes nothing at any level.
+    #[test]
+    fn an_empty_rust_log_is_unset_not_silent() {
+        assert_eq!(log_filter(Some("")).to_string(), DEFAULT_LOG_FILTER);
+        assert_eq!(log_filter(Some("  ")).to_string(), DEFAULT_LOG_FILTER);
+        assert_eq!(log_filter(None).to_string(), DEFAULT_LOG_FILTER);
+    }
+
+    #[test]
+    fn a_usable_rust_log_is_what_gets_installed() {
+        assert_eq!(
+            log_filter(Some("horsie_runtime=debug")).to_string(),
+            "horsie_runtime=debug"
+        );
+    }
+
+    /// A typo in the filter costs the filter, never the runtime.
+    #[test]
+    fn a_malformed_rust_log_falls_back_to_the_default() {
+        assert_eq!(
+            log_filter(Some("horsie_runtime=nonsense")).to_string(),
+            DEFAULT_LOG_FILTER
+        );
+    }
 
     #[tokio::test]
     async fn retry_succeeds_after_failures() {
