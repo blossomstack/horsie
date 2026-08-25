@@ -2683,13 +2683,14 @@ dependencies = [
 
 [[package]]
 name = "nono"
-version = "0.73.0"
+version = "0.74.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbb6d831da2eee52b88217f7379005a3b3706cdf024d9d8d09d68157df2ccdd8"
+checksum = "14d8733fba69f455f1a0aacb77e4df46862d7b80fc4d42b81a77a820f008b0e5"
 dependencies = [
  "der 0.8.1",
  "getrandom 0.4.2",
  "globset",
+ "idna",
  "ignore",
  "landlock",
  "libc",
