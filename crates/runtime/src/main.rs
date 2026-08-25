@@ -483,7 +483,14 @@ async fn serve_until_disconnected<S, C, Fut>(
                 std::process::exit(1);
             }
         };
-        if !first {
+        // Said on every connection, not only on reconnections. A first dial
+        // that worked used to print nothing at all, so a healthy runtime and one
+        // wedged mid-handshake produced the identical empty log — which is how a
+        // sandbox that was connected, provisioned and idle came to be diagnosed
+        // as a runtime that never called back.
+        if first {
+            tracing::info!("{label} succeeded");
+        } else {
             tracing::info!("reconnected: {label}");
         }
         first = false;
@@ -600,6 +607,10 @@ async fn run_loop<S>(
         tracing::error!(error = %e, "failed to send RuntimeReady");
         std::process::exit(1);
     }
+    // The handshake is sent exactly once per connection, and the server's
+    // acquisition used to have nothing else to go on — so which side dropped it
+    // was the first question worth being able to answer from a log.
+    tracing::info!(runtime_id = %runtime_id, "announced RuntimeReady; serving requests");
 
     // in-flight task map: call_id → AbortHandle
     // Plugin-declared MCP servers, live for as long as this connection: a stdio

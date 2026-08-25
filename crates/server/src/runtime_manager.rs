@@ -83,6 +83,13 @@ enum Awaited {
     Substrate(horsie_runtime_host::RuntimeProgress),
     /// The runtime announced itself on its out topic.
     Dialled,
+    /// The runtime answered when it was asked.
+    ///
+    /// Distinct from [`Awaited::Dialled`] because the two are evidence of
+    /// different things. An announcement says a runtime *became* reachable and
+    /// can only be heard by somebody already listening; an answer says it *is*
+    /// reachable and depends on nothing but the round trip.
+    Answered,
     /// The out topic itself ended, so nothing can ever be observed on it.
     TopicClosed,
 }
@@ -101,6 +108,20 @@ const PROGRESS_BUFFER: usize = 32;
 /// is happy with, holding a runtime that never announces itself. Without it such
 /// an acquisition would park a turn forever.
 const ACQUIRE_WINDOW: std::time::Duration = std::time::Duration::from_secs(960);
+
+/// How long one probe waits for a pong before calling it "not yet".
+///
+/// A ping is answered by the runtime's dispatcher rather than queued behind
+/// whatever it is executing, so silence for this long means the runtime is not
+/// there — not that it is busy.
+const PROBE_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long to wait after an unanswered probe before asking again.
+///
+/// The probe that matters is the first one, which settles the common case in a
+/// round trip. Later ones only cover a runtime that arrives without its
+/// announcement being heard, so they can be unhurried.
+const PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Where an acquisition's running commentary goes, in the vendor's own words.
 ///
@@ -457,6 +478,14 @@ impl RuntimeManager {
     /// past. That is the whole of what a person waiting has to go on: this loop
     /// can sit here for minutes, and the vendor is describing the wait — first
     /// in the value it returned, then on the sink — the entire time.
+    ///
+    /// **Readiness is asked as well as heard.** The fold runs a [probe] beside
+    /// it, because an announcement is a one-shot: a runtime says `Ready` once
+    /// per connection, so every acquisition after the first is waiting on
+    /// something already spent. Asking is what makes the answer independent of
+    /// having been listening at the right moment.
+    ///
+    /// [probe]: RuntimeManager::probe
     async fn await_ready(
         &self,
         session: &str,
@@ -466,14 +495,49 @@ impl RuntimeManager {
         dialled: &mut crate::bus::Reader<horsie_models::runtime::RuntimeOutboundMessage>,
         narrate: Option<&NarrationSink>,
     ) -> Result<Arc<dyn horsie_runtime_host::RuntimeTransport>, RuntimeError> {
-        use Awaited::{Dialled, Substrate, TopicClosed};
+        use Awaited::{Answered, Dialled, Substrate, TopicClosed};
         use horsie_runtime_host::RuntimeProgress as P;
         let deadline = tokio::time::Instant::now() + ACQUIRE_WINDOW;
-        let mut progress = first;
+        // Settled before a probe is opened. A vendor that hands back a pipe owns
+        // one — `horsie connect` relays its runtimes through its own link — so
+        // there is no topic here to ask anything on, and opening one would cost
+        // every acquisition a subscription it will never use.
+        let mut progress = match first {
+            P::Ready(transport) => return Ok(transport),
+            waiting @ (P::Requested
+            | P::Starting { .. }
+            | P::Provisioning { .. }
+            | P::Stopping
+            | P::Stopped
+            | P::Gone { .. }) => waiting,
+        };
+        // Opened once, up front, and handed back however the wait ends: an
+        // announcement and an answer are two ways of learning the same thing,
+        // and what the caller wants is the sandbox, not the news.
+        let reachable: Arc<dyn horsie_runtime_host::RuntimeTransport> = Arc::new(
+            crate::runtime_vendor::BusTransport::open(
+                self.deps.bus.clone(),
+                &self.deps.account,
+                session,
+                incarnation,
+            )
+            .await
+            .map_err(|e| RuntimeError::Unavailable(e.to_string()))?,
+        );
+        // Pinned outside the loop so a vendor event arriving mid-probe does not
+        // restart the probe: the wait below is re-entered on every progress
+        // report, and a future recreated each time would never outlive one.
+        let probing = Self::probe(reachable.clone());
+        tokio::pin!(probing);
         // Whether the vendor's sink is still worth selecting on. A closed `mpsc`
         // receiver is always ready, so leaving one in the `select!` would spin
         // this loop at full speed for the rest of the window.
         let mut vendor_talking = true;
+        tracing::debug!(
+            runtime = %session,
+            window = ?ACQUIRE_WINDOW,
+            "waiting for a runtime to become reachable"
+        );
         loop {
             if let Some(sink) = narrate
                 && let Some(line) = Self::narration(&progress)
@@ -500,12 +564,13 @@ impl RuntimeManager {
                 }
                 P::Requested | P::Starting { .. } | P::Provisioning { .. } => {}
             }
-            // Two things can end this wait, and they come from different
+            // Three things can end this wait, and they come from different
             // places. The vendor reports on the *substrate* — a machine that
             // will never boot is a `Gone` nothing else would ever say. The
             // runtime reports on *itself*, by dialling in and announcing
-            // `Ready` on its out topic, which is the only evidence that
-            // something is actually there to talk to.
+            // `Ready` on its out topic. And this call asks it directly, which
+            // is the only one of the three that works on a runtime that dialled
+            // before anybody here was listening.
             let next = tokio::time::timeout_at(deadline, async {
                 loop {
                     tokio::select! {
@@ -543,22 +608,28 @@ impl RuntimeManager {
                                 None => return TopicClosed,
                             }
                         }
+                        // Resolves only on success, so it can sit in the
+                        // `select!` without ever ending the wait early: an
+                        // unanswered probe means "not yet", and the deadline
+                        // above is what decides when not-yet becomes never.
+                        () = &mut probing => return Answered,
                     }
                 }
             })
             .await;
 
             progress = match next {
-                Ok(Dialled) => {
-                    let transport = crate::runtime_vendor::BusTransport::open(
-                        self.deps.bus.clone(),
-                        &self.deps.account,
-                        session,
-                        incarnation,
-                    )
-                    .await
-                    .map_err(|e| RuntimeError::Unavailable(e.to_string()))?;
-                    return Ok(Arc::new(transport));
+                Ok(evidence @ (Dialled | Answered)) => {
+                    tracing::info!(
+                        runtime = %session,
+                        how = if matches!(evidence, Answered) {
+                            "answered a probe"
+                        } else {
+                            "announced itself"
+                        },
+                        "a runtime is reachable"
+                    );
+                    return Ok(reachable);
                 }
                 Ok(Substrate(next)) => next,
                 // The out topic ended. Nothing the runtime says can be observed
@@ -570,11 +641,62 @@ impl RuntimeManager {
                     )));
                 }
                 Err(_) => {
+                    // Said out loud as well as returned. The window is sixteen
+                    // minutes, and everything that happens in it happens
+                    // somewhere else — so without this the only trace of the
+                    // wait is the failure it ends in.
+                    tracing::warn!(
+                        runtime = %session,
+                        window = ?ACQUIRE_WINDOW,
+                        "a runtime neither announced itself nor answered a probe"
+                    );
                     return Err(RuntimeError::Unavailable(format!(
                         "runtime '{session}' was not reachable within the acquisition window"
                     )));
                 }
             };
+        }
+    }
+
+    /// Ask the runtime whether it is there, until it says yes.
+    ///
+    /// The half of an acquisition that does not depend on having been listening
+    /// at the right moment. `Ready` is announced once per connection, so a
+    /// runtime that dialled in before this acquisition began — which is every
+    /// acquisition after the first, since a connected runtime has no reason to
+    /// reconnect — will never announce itself again. A wait with only that to go
+    /// on burned the whole [`ACQUIRE_WINDOW`] against a sandbox sitting idle on
+    /// the other end of a live socket, and then failed the turn as unreachable.
+    ///
+    /// It also covers the announcement that was made and missed: the out topic
+    /// is a `broadcast`, and a receiver that lags drops frames rather than
+    /// queueing them, so `Ready` is not something an acquisition can be sure of
+    /// hearing even when it was subscribed in time.
+    ///
+    /// Resolves only on success, which is what lets it sit in a `select!`
+    /// without ever ending a wait early. A ping that goes unanswered means "not
+    /// yet"; the acquisition's own deadline decides when not-yet becomes never.
+    async fn probe(transport: Arc<dyn horsie_runtime_host::RuntimeTransport>) {
+        let mut attempt: u64 = 0;
+        loop {
+            attempt += 1;
+            // Prefixed rather than bare `ping-N` so it cannot be confused with
+            // the reconciler's, which rides the same pair of topics against the
+            // same runtime.
+            let call_id = format!("acquire-ping-{attempt}");
+            if matches!(
+                tokio::time::timeout(PROBE_WINDOW, transport.ping(&call_id)).await,
+                Ok(Ok(_))
+            ) {
+                return;
+            }
+            // A timeout drops the relay mid-await, which leaves its waiter
+            // registered — `relay` only unregisters one when the *publish*
+            // fails. This transport goes on to become the session's, so without
+            // this every unanswered probe would leave a dead entry behind in the
+            // correlation map it works from.
+            transport.abandon(&call_id).await;
+            tokio::time::sleep(PROBE_INTERVAL).await;
         }
     }
 
@@ -785,6 +907,38 @@ mod tests {
             ))
             .await
             .expect("publishing a handshake");
+    }
+
+    /// Be a runtime that dialled in *before* this acquisition: it answers what
+    /// it is asked, and it will never announce itself, because `Ready` goes out
+    /// once per connection and that connection is already open.
+    ///
+    /// Subscribes before returning, so a probe published the instant the
+    /// acquisition starts cannot land on a topic nobody is reading yet.
+    async fn already_connected(
+        bus: &Arc<dyn crate::bus::Bus>,
+        runtime: &str,
+        incarnation: &str,
+    ) -> tokio::task::JoinHandle<()> {
+        use horsie_models::runtime::{PongResponse, RuntimeInboundMessage};
+        let out = crate::bus::topics::runtime_out(bus.clone(), "acct-1", runtime, incarnation);
+        let mut requests =
+            crate::bus::topics::runtime_in(bus.clone(), "acct-1", runtime, incarnation)
+                .subscribe()
+                .await
+                .expect("subscribing as the runtime");
+        tokio::spawn(async move {
+            while let Some(request) = requests.recv().await {
+                if let RuntimeInboundMessage::Ping(ping) = request {
+                    let _ = out
+                        .publish(&RuntimeOutboundMessage::Pong(PongResponse {
+                            call_id: ping.call_id,
+                            in_flight: vec![],
+                        }))
+                        .await;
+                }
+            }
+        })
     }
 
     /// Long enough for a spawned acquisition to have reached its subscription,
@@ -1488,6 +1642,52 @@ mod tests {
                 .expect("the acquiring task")
                 .expect("both acquisitions must be answered by the one announcement");
         }
+    }
+
+    /// Generous next to the round trip this asserts on — microseconds, over an
+    /// in-process bus — and tiny next to [`ACQUIRE_WINDOW`]. Before the fix the
+    /// test below failed here, in twenty seconds, rather than sixteen minutes
+    /// later the way production did.
+    const NOT_A_WHOLE_WINDOW: std::time::Duration = std::time::Duration::from_secs(20);
+
+    /// The bug this exists to keep fixed, seen live on 2026-08-24.
+    ///
+    /// A velos container came up, dialled in, was provisioned and cloned its
+    /// repo — all inside three seconds. The acquisition that followed had only
+    /// `Ready` to wait on, and `Ready` had already gone out, once, on a
+    /// connection that was still open. So it waited out the whole window and
+    /// failed the turn as "not reachable" against a sandbox that had been
+    /// answering the entire time.
+    ///
+    /// The runtime here never announces itself. That is not a simplification of
+    /// the failure; it *is* the failure, because a connected runtime has no
+    /// second announcement to make.
+    #[tokio::test]
+    async fn an_already_connected_runtime_is_acquired_without_a_second_announcement() {
+        let bus: Arc<dyn crate::bus::Bus> = Arc::new(crate::bus::MemoryBus::new());
+        let _runtime = already_connected(&bus, "s1", "i1").await;
+        let m = manager_on(published_vendor(BootingVendor::silent()), bus.clone());
+
+        // Note what is absent: `announce_ready`. Every other acquisition test
+        // calls it, and this one must pass without it.
+        let acquired = tokio::time::timeout(
+            NOT_A_WHOLE_WINDOW,
+            m.get(
+                "s1",
+                "i1",
+                "v",
+                &SessionSpec::for_vendor("v")
+                    .runtime_env()
+                    .expect("a vendor spec has a runtime"),
+                false,
+                None,
+            ),
+        )
+        .await;
+
+        acquired
+            .expect("a runtime that answers must not be waited out")
+            .expect("acquiring a runtime that is already connected");
     }
 
     /// A session with steps to run has them run on *every* acquisition, not just
