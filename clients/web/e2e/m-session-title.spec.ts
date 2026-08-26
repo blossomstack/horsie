@@ -50,13 +50,19 @@ test("M2: a session can be renamed by hand when the model never titles it", asyn
   await expect(page.getByTestId("assistant-text")).toContainText("The answer is 4.");
   await expect(page.getByTestId("session-title")).toHaveText("what is 2 + 2");
 
-  // Renaming lives on the session's own actions menu in the rail, beside its
-  // tags and its delete — the header title is a title, not a control.
-  await page
-    .locator(`[data-testid="session-row"][data-session-id="${id}"]`)
-    .hover();
+  // Renaming starts from the session's own actions menu in the rail, beside
+  // its tags and its delete — the header title is a title, not a control —
+  // and the editing happens in the row itself.
+  const row = page.locator(
+    `[data-testid="session-row"][data-session-id="${id}"]`,
+  );
+  await row.hover();
   await page.getByTestId(`session-row-menu-${id}`).click();
+  await page.getByTestId(`rename-session-${id}`).click();
   const input = page.getByTestId("session-title-input");
+  // The row gives way to the field: the name is edited where the name is.
+  await expect(row).toHaveCount(0);
+  await expect(input).toBeFocused();
   await input.fill("Arithmetic");
   await input.press("Enter");
 
@@ -68,4 +74,32 @@ test("M2: a session can be renamed by hand when the model never titles it", asyn
   // Durable, not just on screen.
   await page.reload();
   await expect(page.getByTestId("session-title")).toHaveText("Arithmetic");
+});
+
+test("M3: Escape leaves a rename without changing the name", async ({
+  page,
+  appBase,
+  mock,
+}) => {
+  await mock.queueText("The answer is 4.");
+  await createSession(page, appBase);
+  const id = await sendMessage(page, "what is 2 + 2");
+  await expect(page.getByTestId("session-title")).toHaveText("what is 2 + 2");
+
+  const row = page.locator(
+    `[data-testid="session-row"][data-session-id="${id}"]`,
+  );
+  await row.hover();
+  await page.getByTestId(`session-row-menu-${id}`).click();
+  await page.getByTestId(`rename-session-${id}`).click();
+  const input = page.getByTestId("session-title-input");
+  await input.fill("Discarded");
+  await input.press("Escape");
+
+  // The row comes back wearing the name it already had, and a reload agrees:
+  // an abandoned edit must not have reached the server on the way out.
+  await expect(input).toHaveCount(0);
+  await expect(row).toContainText("what is 2 + 2");
+  await page.reload();
+  await expect(page.getByTestId("session-title")).toHaveText("what is 2 + 2");
 });

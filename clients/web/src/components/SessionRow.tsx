@@ -1,5 +1,5 @@
 import { Check } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { NavLink, useMatch, useNavigate } from "react-router-dom";
 import type { SessionSummary } from "../api/types";
 import { sessionTitle } from "../lib/format";
@@ -30,6 +30,11 @@ export function SessionRow({
   const navigate = useNavigate();
   const rename = useRenameSession();
   const [draft, setDraft] = useState("");
+  const [renaming, setRenaming] = useState(false);
+  // Set by Escape so the blur that may follow it stays quiet. Firefox fires
+  // blur when the focused field is removed; Chrome and Safari do not, so the
+  // browser the e2e drives is the one that cannot catch this missing.
+  const abandoned = useRef(false);
   const mine = new Set(sessionTags(s));
   // Whether this row is the session on screen — including when what is on
   // screen is one of its sub sessions or one of its workflow's steps, both of
@@ -61,6 +66,45 @@ export function SessionRow({
     setTag.mutate({ id: s.id, tag: name, on: true });
     setDraft("");
   };
+
+  const commitRename = (value: string) => {
+    const next = value.trim();
+    setRenaming(false);
+    if (next && next !== s.name) rename.mutate({ id: s.id, name: next });
+  };
+
+  // Renaming takes over the row itself rather than opening a field inside the
+  // menu: the name is edited where the name is, so what you type sits in the
+  // list next to the names it has to be told apart from.
+  if (renaming)
+    return (
+      <div className="px-0.5 py-1">
+        <input
+          data-testid="session-title-input"
+          aria-label="Rename session"
+          className="field !py-1 !text-[0.8125rem]"
+          defaultValue={title}
+          // The whole name is selected, because a rename usually replaces it.
+          autoFocus
+          onFocus={(e) => e.currentTarget.select()}
+          // Clicking away is a commit, not a discard — the row is gone from
+          // under the pointer either way, and losing the typing to a stray
+          // click is the worse of the two.
+          onBlur={(e) => {
+            if (!abandoned.current) commitRename(e.currentTarget.value);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commitRename(e.currentTarget.value);
+            // Escape discards. An unnamed session's field shows "New
+            // session", so a commit on the way out would name it that.
+            if (e.key === "Escape") {
+              abandoned.current = true;
+              setRenaming(false);
+            }
+          }}
+        />
+      </div>
+    );
 
   return (
     // The menu is a sibling of the link, not a child: a button inside an
@@ -152,31 +196,25 @@ export function SessionRow({
             />
           </div>
           <div className="my-1 " role="separator" />
-          {/* The header used to carry this as a click-to-edit title, which put
-              an editable control where a page title goes. A rename is an
-              action on a session, and this is where a session's actions are —
-              in the same shape as the tag field above it, rather than a
-              `window.prompt` that matches nothing else in the build. */}
-          <div className="px-2 py-1.5">
-            <input
-              data-testid="session-title-input"
-              aria-label="Rename session"
-              className="field !py-1 !text-[0.8125rem]"
-              placeholder="Rename…"
-              defaultValue={title}
-              onKeyDown={(e) => {
-                if (e.key !== "Enter") return;
-                const next = e.currentTarget.value.trim();
-                if (next && next !== s.name) rename.mutate({ id: s.id, name: next });
-              }}
-            />
-          </div>
+          {/* An action, not a field: the menu offered a second text input
+              directly under the tag one, so the two read as a pair of things
+              to fill in and it was never clear which name you were typing.
+              This one names what it does and hands the editing to the row. */}
+          <MenuItem
+            testId={`rename-session-${s.id}`}
+            onSelect={() => {
+              abandoned.current = false;
+              setRenaming(true);
+            }}
+          >
+            Rename
+          </MenuItem>
           <MenuItem
             danger
             testId={`delete-session-${s.id}`}
             onSelect={() => void remove()}
           >
-            Delete session
+            Delete
           </MenuItem>
         </Menu>
       </span>
