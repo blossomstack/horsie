@@ -257,10 +257,11 @@ mod tests {
     fn executor_ipc_unix_socket_grant_survives_proxy_only_mode() {
         // Unix sockets are a separate nono capability layer from the TCP network
         // mode: the IPC socket grant must hold even when egress is proxy-only.
-        // nono canonicalizes the grant path, so it must exist on disk.
+        // A `Connect` grant is rejected unless the path is a bound socket node,
+        // so bind a real one — the listener must outlive the grant.
         let dir = tempfile::tempdir().expect("tempdir");
         let sock = dir.path().join("horsie-executor.sock");
-        std::fs::write(&sock, b"").expect("create socket placeholder");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).expect("bind socket");
         let caps = build_capability_set(
             &spec(NetworkPolicy::ProxyOnly(ProxyOnlyNetwork { port: 18080 })),
             &[],
