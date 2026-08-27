@@ -13,11 +13,18 @@
 //! git command — and makes revocation immediate, because this check runs on
 //! every operation rather than once, an hour ago.
 //!
-//! **The scope is the session's own repositories, unchanged.** The requested
-//! repository has to appear in a `git_checkout` provision step of the session
-//! this runtime belongs to; anything else is refused. The runtime id *is* the
-//! session id, which is what makes that lookup possible without the runtime
-//! telling us who it is.
+//! **The scope is the asking runtime's own repositories.** The requested
+//! repository has to appear in a `git_checkout` provision step of the runtime
+//! git is running inside; anything else is refused. Both the session to ask and
+//! the runtime to ask about come out of the dial token, so the runtime never
+//! has to tell us who it is and could not lie about it if it tried.
+//!
+//! That pairing is load-bearing, and was briefly missing. A runtime used to
+//! share its session's id, so this route looked the session up by the runtime
+//! id and found it. Sessions can own several runtimes now and each gets an id
+//! of its own, which left the lookup asking for a session under an id no
+//! session has ever had — refusing every mint, including the ones that were the
+//! point. The token carries the session because nothing else can put it back.
 //!
 //! Like `/api/runtime/connect`, this sits outside `require_auth`: a runtime
 //! holds no session credential, and the dial token is the whole authentication.
@@ -82,37 +89,33 @@ pub async fn github_credential(
 
     let services = state.projects.get(&account).await.map_err(Api::internal)?;
 
-    // The runtime id is the session id, so the runtime never has to tell us
-    // which session it is — and could not lie about it if it tried, because the
-    // id came out of a token it cannot forge.
-    let (record, _) = crate::http::handlers::ask(&services, |reply| {
-        crate::sessions::supervisor::SessionSupervisorCommand::Get {
-            id: claims.runtime_id.clone(),
+    // Which session to ask, and which of its runtimes is asking. Both come out
+    // of a token the runtime cannot forge, so it can neither claim another
+    // session's sandbox nor lie about which of its own it is.
+    let runtime = claims
+        .runtime_id
+        .parse::<uuid::Uuid>()
+        .map(crate::sessions::spec::RuntimeId)
+        .map_err(|_| refused())?;
+    let checkouts = crate::http::handlers::ask(&services, |reply| {
+        crate::sessions::supervisor::SessionSupervisorCommand::RuntimeCheckouts {
+            id: claims.session_id.clone(),
+            runtime,
             reply,
         }
     })
     .await?
+    .flatten()
     .ok_or_else(refused)?;
 
-    // Only a repository this session was configured to check out. The match is
-    // against the session's own spec rather than the account's GitHub
-    // installation: the installation is far wider, and a session that clones
+    // Only a repository this runtime was provisioned to check out. The match is
+    // against its own provision steps rather than the account's GitHub
+    // installation: the installation is far wider, and a sandbox that clones
     // one repository has no business minting credentials for every other.
-    let matched = record
-        .spec
-        .runtime
-        .iter()
-        .flat_map(|r| r.provision.iter())
-        .filter(|step| step.uses == "git_checkout")
-        .filter_map(|step| {
-            step.with
-                .iter()
-                .find(|(key, _)| key == "url")
-                .map(|(_, url)| url)
-        })
+    let matched = checkouts
+        .into_iter()
         .find(|url| github_repo_of(url).as_deref() == Some(wanted))
-        .ok_or_else(refused)?
-        .clone();
+        .ok_or_else(refused)?;
 
     let minted = services
         .github

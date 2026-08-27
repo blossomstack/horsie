@@ -7,7 +7,9 @@ mod service;
 mod store;
 
 pub(crate) use api::urlencode;
-pub use api::{ExchangedToken, GithubApi, decode_private_key, make_app_jwt};
+pub use api::{
+    ExchangedToken, GITHUB_API_BASE, GITHUB_WEB_BASE, GithubApi, decode_private_key, make_app_jwt,
+};
 pub use service::GithubService;
 pub use store::{AppConfigRow, CredentialsRow, GithubStore};
 

@@ -251,21 +251,24 @@ pub struct SessionActor {
 pub(in crate::sessions::session_actor) fn runtime_binding(
     deps: &ServerDeps,
     state: &SessionState,
+    session: Uuid,
     agent: Uuid,
 ) -> crate::sessions::session_actor::context::AgentRuntimeBinding {
-    runtime_binding_for(deps, state, state.forest.runtime_of_agent(agent))
+    runtime_binding_for(deps, state, session, state.forest.runtime_of_agent(agent))
 }
 
 /// The same, from a choice already resolved by some other walk.
 pub(in crate::sessions::session_actor) fn runtime_binding_for(
     deps: &ServerDeps,
     state: &SessionState,
+    session: Uuid,
     choice: crate::sessions::run_forest::RuntimeChoice,
 ) -> crate::sessions::session_actor::context::AgentRuntimeBinding {
     use crate::sessions::session_actor::context::AgentRuntimeBinding;
     match state.runtime_of_choice(choice) {
         AgentRuntime::On(runtime, rec) => AgentRuntimeBinding::On(Box::new(
             deps.runtimes.provider(
+                session.to_string(),
                 runtime.to_string(),
                 // The provision this run speaks to. One that has never provisioned
                 // has none, and the empty string is what the acquisition will fail
@@ -661,7 +664,7 @@ impl SessionActor {
     /// incarnation moves under an agent that is already resident.
     fn repoint_agent_runtimes(&self, state: &SessionState) {
         for (id, resident) in self.agents.iter() {
-            let binding = runtime_binding(self.deps(), state, id);
+            let binding = runtime_binding(self.deps(), state, self.id, id);
             *resident
                 .provider
                 .runtimes
@@ -721,7 +724,7 @@ impl SessionActor {
         // for exactly that reason: `runtime_bindings` re-points it when the
         // create lands.
         let choice = self.runtime_choice_for(state, &plan);
-        let runtimes = runtime_binding_for(self.deps(), state, choice);
+        let runtimes = runtime_binding_for(self.deps(), state, self.id, choice);
         let provider = Arc::new(SessionContextProvider {
             runtimes: Mutex::new(runtimes),
             registry: self.deps().provider_registry.clone(),

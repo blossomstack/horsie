@@ -128,6 +128,23 @@ impl Reads {
                 let _ = reply.send(detail);
                 CommandEffect::none()
             }
+            ReadCommand::RuntimeCheckouts { runtime, reply } => {
+                let urls = state.runtimes.get(&runtime).map(|rec| {
+                    rec.env
+                        .provision
+                        .iter()
+                        .filter(|step| step.uses == "git_checkout")
+                        .filter_map(|step| {
+                            step.with
+                                .iter()
+                                .find(|(key, _)| key == "url")
+                                .map(|(_, url)| url.clone())
+                        })
+                        .collect()
+                });
+                let _ = reply.send(urls);
+                CommandEffect::none()
+            }
             ReadCommand::Snapshot { reply } => {
                 let _ = reply.send(SessionSnapshot {
                     status: state.status(),
@@ -842,8 +859,11 @@ mod tests {
         f.deps
             .runtimes
             .create(
-                &id.to_string(),
-                "i1",
+                crate::runtime_manager::RuntimeAddress {
+                    session: &id.to_string(),
+                    runtime: &id.to_string(),
+                    incarnation: "i1",
+                },
                 "mock",
                 &spec.runtime_env().expect("the fixture has a runtime"),
             )
@@ -1014,8 +1034,11 @@ mod tests {
         f.deps
             .runtimes
             .create(
-                &id.to_string(),
-                "i1",
+                crate::runtime_manager::RuntimeAddress {
+                    session: &id.to_string(),
+                    runtime: &id.to_string(),
+                    incarnation: "i1",
+                },
                 "mock",
                 &actor_spec_fixture()
                     .runtime_env()

@@ -377,8 +377,11 @@ pub(super) async fn spawn_session_with_provider(
     f.deps
         .runtimes
         .create(
-            &id.to_string(),
-            "i1",
+            crate::runtime_manager::RuntimeAddress {
+                session: &id.to_string(),
+                runtime: &id.to_string(),
+                incarnation: "i1",
+            },
             "mock",
             &actor_spec_fixture()
                 .runtime_env()
@@ -546,8 +549,11 @@ pub(super) async fn spawn_run_with_provider(
     f.deps
         .runtimes
         .create(
-            &id.to_string(),
-            "i1",
+            crate::runtime_manager::RuntimeAddress {
+                session: &id.to_string(),
+                runtime: &id.to_string(),
+                incarnation: "i1",
+            },
             "mock",
             &spec.runtime_env().expect("the fixture has a runtime"),
         )
@@ -1184,8 +1190,11 @@ pub(super) async fn stop_harness_full(
     f.deps
         .runtimes
         .create(
-            &id.to_string(),
-            "0",
+            crate::runtime_manager::RuntimeAddress {
+                session: &id.to_string(),
+                runtime: &id.to_string(),
+                incarnation: "0",
+            },
             "mock",
             &actor_spec_fixture()
                 .runtime_env()
@@ -1401,8 +1410,11 @@ pub(super) async fn catalog_harness_with(
     f.deps
         .runtimes
         .create(
-            &id.to_string(),
-            "i1",
+            crate::runtime_manager::RuntimeAddress {
+                session: &id.to_string(),
+                runtime: &id.to_string(),
+                incarnation: "i1",
+            },
             "mock",
             &actor_spec_fixture()
                 .runtime_env()
@@ -1428,6 +1440,7 @@ pub(super) fn catalog_provider(
     SessionContextProvider {
         runtimes: Mutex::new(AgentRuntimeBinding::On(Box::new(
             f.deps.runtimes.provider(
+                id.to_string(),
                 id.to_string(),
                 "i1".to_string(),
                 false,
@@ -1491,8 +1504,11 @@ pub(super) async fn agent_harness() -> (ActorFixture, SessionRef, Uuid) {
     f.deps
         .runtimes
         .create(
-            &id.to_string(),
-            "i1",
+            crate::runtime_manager::RuntimeAddress {
+                session: &id.to_string(),
+                runtime: &id.to_string(),
+                incarnation: "i1",
+            },
             "mock",
             &actor_spec_fixture()
                 .runtime_env()
@@ -1579,6 +1595,7 @@ pub(super) fn typed_provider(
     SessionContextProvider {
         runtimes: Mutex::new(AgentRuntimeBinding::On(Box::new(
             f.deps.runtimes.provider(
+                id.to_string(),
                 id.to_string(),
                 "i1".to_string(),
                 false,

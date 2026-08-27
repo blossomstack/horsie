@@ -123,6 +123,7 @@ impl RuntimeLifecycle {
                 let vendor = env.vendor.clone();
                 let spec_env = env.clone();
                 let id = runtime.to_string();
+                let session = actor.id.to_string();
                 let me = actor.me(ctx);
                 // Minted here and journaled below in the same breath, so the
                 // sandbox this create starts and the entry that records it
@@ -135,8 +136,13 @@ impl RuntimeLifecycle {
                 // throughout. The status it just journaled is what holds the
                 // turn back meanwhile.
                 tokio::spawn(async move {
+                    let at = crate::runtime_manager::RuntimeAddress {
+                        session: &session,
+                        runtime: &id,
+                        incarnation: &incarnation,
+                    };
                     let (error, terminal, detail) =
-                        match runtimes.create(&id, &incarnation, &vendor, &spec_env).await {
+                        match runtimes.create(at, &vendor, &spec_env).await {
                             Ok(detail) => (None, false, detail),
                             // Exactly the split `get` makes: only a live vendor
                             // refusing to produce the runtime is terminal. An
@@ -1097,8 +1103,11 @@ mod tests {
         f.deps
             .runtimes
             .create(
-                &id.to_string(),
-                "i1",
+                crate::runtime_manager::RuntimeAddress {
+                    session: &id.to_string(),
+                    runtime: &id.to_string(),
+                    incarnation: "i1",
+                },
                 "mock",
                 &actor_spec_fixture()
                     .runtime_env()

@@ -1390,6 +1390,7 @@ mod tests {
             runtimes: Mutex::new(AgentRuntimeBinding::On(Box::new(
                 f.deps.runtimes.provider(
                     id.to_string(),
+                    id.to_string(),
                     "i1".to_string(),
                     false,
                     "mock".into(),
@@ -1459,6 +1460,7 @@ mod tests {
             runtimes: Mutex::new(AgentRuntimeBinding::On(Box::new(
                 f.deps.runtimes.provider(
                     id.to_string(),
+                    id.to_string(),
                     "i1".to_string(),
                     false,
                     "mock".into(),
@@ -1508,6 +1510,7 @@ mod tests {
         let build = |unattended: bool| SessionContextProvider {
             runtimes: Mutex::new(AgentRuntimeBinding::On(Box::new(
                 f.deps.runtimes.provider(
+                    id.to_string(),
                     id.to_string(),
                     "i1".to_string(),
                     false,
@@ -1938,6 +1941,7 @@ mod tests {
             runtimes: Mutex::new(AgentRuntimeBinding::On(Box::new(
                 f.deps.runtimes.provider(
                     id.to_string(),
+                    id.to_string(),
                     "i1".to_string(),
                     false,
                     "mock".to_string(),
@@ -2145,6 +2149,7 @@ mod tests {
             agent_type: None,
             runtimes: Mutex::new(AgentRuntimeBinding::On(Box::new(
                 crate::runtime_manager::test_runtime_manager(&vendors).provider(
+                    id.to_string(),
                     id.to_string(),
                     "i1".to_string(),
                     false,

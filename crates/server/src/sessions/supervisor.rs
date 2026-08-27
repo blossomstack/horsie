@@ -209,6 +209,17 @@ pub enum SessionSupervisorCommand {
         id: SessionId,
         reply: ReplyTo<Option<SessionUsageStats>>,
     },
+    /// The `git_checkout` urls one of a session's runtimes was built from.
+    ///
+    /// The outer `None` is an unknown session and the inner one a runtime that
+    /// session does not own. Kept apart here and collapsed by the caller: the
+    /// credential route answers both the same way on purpose, and that is its
+    /// choice to make rather than this one's.
+    RuntimeCheckouts {
+        id: SessionId,
+        runtime: crate::sessions::spec::RuntimeId,
+        reply: ReplyTo<Option<Option<Vec<String>>>>,
+    },
     /// Read a session's workflow run (`None` when the session is unknown or
     /// is not a run).
     RunState {
@@ -1118,6 +1129,26 @@ impl EventSourcedActor for SessionSupervisor {
                         let (tx, rx) = oneshot::channel();
                         let _ = session
                             .tell(SessionCommand::Read(ReadCommand::UsageStats {
+                                reply: ReplyTo::from_sender(tx),
+                            }))
+                            .await;
+                        tokio::spawn(async move {
+                            let _ = reply.send(rx.await.ok());
+                        });
+                    }
+                    None => {
+                        let _ = reply.send(None);
+                    }
+                }
+                CommandEffect::none()
+            }
+            SessionSupervisorCommand::RuntimeCheckouts { id, runtime, reply } => {
+                match self.session(ctx, state, &id) {
+                    Some(session) => {
+                        let (tx, rx) = oneshot::channel();
+                        let _ = session
+                            .tell(SessionCommand::Read(ReadCommand::RuntimeCheckouts {
+                                runtime,
                                 reply: ReplyTo::from_sender(tx),
                             }))
                             .await;

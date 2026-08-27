@@ -540,7 +540,11 @@ mod tests {
     /// same way a live runtime's does — the point being that the artifact route
     /// now accepts exactly one thing, and it is the credential the runtime
     /// already has.
-    async fn dial_token_for(t: &crate::testing::TestState, runtime_id: &str) -> String {
+    async fn dial_token_for(
+        t: &crate::testing::TestState,
+        session_id: &str,
+        runtime_id: &str,
+    ) -> String {
         let account = t.account.clone();
         // Building the project is what creates its secret on first use.
         let _ = t.state.projects.get(&account).await.unwrap();
@@ -552,6 +556,7 @@ mod tests {
             &secret,
             &horsie_support::dial_token::DialClaims {
                 user_id: account.as_str().to_string(),
+                session_id: session_id.to_string(),
                 runtime_id: runtime_id.to_string(),
                 incarnation: "i1".to_string(),
             },
@@ -1564,6 +1569,7 @@ mod tests {
             b"not-this-accounts-secret",
             &horsie_support::dial_token::DialClaims {
                 user_id: crate::auth::UserId::bootstrap().as_str().to_string(),
+                session_id: "sess-1".to_string(),
                 runtime_id: "rt-1".to_string(),
                 incarnation: "i1".to_string(),
             },
@@ -1577,7 +1583,7 @@ mod tests {
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
 
         // This account's real token, but naming a session that does not exist.
-        let token = dial_token_for(&t, "no-such-session").await;
+        let token = dial_token_for(&t, "no-such-session", &uuid::Uuid::new_v4().to_string()).await;
         let req = Request::builder()
             .uri(uri)
             .header("authorization", format!("Bearer {token}"))
@@ -1601,51 +1607,177 @@ mod tests {
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
     }
 
+    /// A GitHub that mints one installation token, so a test can drive the
+    /// credential route to its end rather than only to its refusals. Returns
+    /// the API root to point a deployment at.
+    async fn mock_github_minting(token: &'static str) -> String {
+        use axum::{Json, Router, routing::post};
+        let app = Router::new().route(
+            "/app/installations/{id}/access_tokens",
+            post(move || async move { Json(serde_json::json!({ "token": token })) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    /// Register and connect a GitHub App, as an operator would before any of
+    /// this can mint anything.
+    async fn connect_github(state: &AppState) {
+        let services = services(state).await;
+        services
+            .github
+            .save_app_config(horsie_models::github::GitHubAppConfigInput {
+                client_id: "cid".into(),
+                client_secret: Some("sec".into()),
+                app_id: Some(7),
+                private_key: Some(include_str!("../github/testdata/test_rsa.pem").to_string()),
+                app_slug: None,
+                callback_base: None,
+            })
+            .await
+            .unwrap();
+        crate::github::GithubStore::new(state.shared.db.clone(), services.project.clone())
+            .save_credentials(&crate::github::CredentialsRow {
+                login: "octocat".into(),
+                access_token: "ghu_token".to_string().into(),
+                refresh_token: None,
+                expires_at: None,
+                installation_id: Some(42),
+            })
+            .await
+            .unwrap();
+    }
+
+    /// Create a session whose runtime checks out `url`, and answer with the
+    /// dial token the server actually put in that runtime's environment.
+    ///
+    /// The token is read back off the vendor rather than minted by the test.
+    /// A hand-built one would encode this test's belief about what the server
+    /// puts in a spec, which is the very thing in question — and it is how the
+    /// route below came to refuse every real runtime while its tests passed.
+    async fn session_checking_out(
+        state: &AppState,
+        vendor: &FakeRuntimeVendor,
+        vendor_name: &str,
+        url: &str,
+    ) -> String {
+        let services = services(state).await;
+        let mut spec = crate::sessions::spec::SessionSpec::for_vendor(vendor_name);
+        spec.runtime
+            .as_mut()
+            .expect("a vendor spec has a runtime")
+            .provision
+            .push(crate::sessions::spec::ProvisionStepSpec {
+                name: "checkout".into(),
+                uses: "git_checkout".into(),
+                with: vec![("url".into(), url.into())],
+            });
+        services
+            .supervisor
+            .ask(
+                |reply| crate::sessions::supervisor::SessionSupervisorCommand::Create {
+                    spec,
+                    name: None,
+                    created_at: 0,
+                    message: None,
+                    reply,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        for _ in 0..200 {
+            if let Some(sent) = vendor.last_create_request()
+                && let Some(var) = sent
+                    .env
+                    .iter()
+                    .find(|v| v.name == horsie_models::ENV_CONNECT_TOKEN)
+            {
+                return var.value.clone();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("the vendor was never asked to create a runtime");
+    }
+
+    /// A deployment with a fake vendor of its own — kept, unlike `mock`, so the
+    /// spec the server sent it can be read back.
+    async fn state_with_kept_vendor(
+        tmp: &tempfile::TempDir,
+        name: &str,
+        github_api: String,
+    ) -> (crate::testing::TestState, FakeRuntimeVendor) {
+        let built = crate::testing::state(tmp.path())
+            .github_api_base(github_api)
+            .build()
+            .await;
+        let vendor = FakeRuntimeVendor::builder(name)
+            .serve_in_process()
+            .await
+            .expect("fake agent");
+        services(&built.state)
+            .await
+            .connected_vendors
+            .publish(vendor.link())
+            .expect("the name is unclaimed in a fresh account");
+        (built, vendor)
+    }
+
+    /// The route's whole purpose, and the case its own tests could not see.
+    ///
+    /// Every other test here asserts a refusal, and the route refused
+    /// everything: it looked a session up under the *runtime's* id, which stopped
+    /// being the session's the moment a session could own more than one runtime.
+    /// A suite of refusals passes either way — so this one drives a real dial
+    /// token, from a real create, to a real minted token.
+    #[tokio::test]
+    async fn a_runtime_mints_a_token_for_the_repository_it_checks_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let github = mock_github_minting("ghs_minted").await;
+        let (t, vendor) = state_with_kept_vendor(&tmp, "kept", github).await;
+        let state = t.state.clone();
+        connect_github(&state).await;
+        let token =
+            session_checking_out(&state, &vendor, "kept", "https://github.com/o/wanted.git").await;
+
+        let req = Request::builder()
+            .uri("/api/runtime/github-credential?host=github.com&path=o/wanted")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let res = app(state).oneshot(req).await.unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "a runtime must be able to mint for the repository it was provisioned to clone"
+        );
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&body), "ghs_minted");
+    }
+
     /// A session that never asked to clone a repository cannot mint a
-    /// credential for it. The scope is the session's own `git_checkout` steps,
-    /// not the account's whole GitHub installation.
+    /// credential for it. The scope is the asking runtime's own `git_checkout`
+    /// steps, not the account's whole GitHub installation.
     #[tokio::test]
     async fn a_repository_the_session_never_checks_out_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
-        let t = test_state(&tmp).await;
+        let github = mock_github_minting("ghs_minted").await;
+        let (t, vendor) = state_with_kept_vendor(&tmp, "kept", github).await;
         let state = t.state.clone();
-        let session = {
-            let services = services(&state).await;
-            let mut spec = crate::sessions::spec::SessionSpec::for_vendor("mock");
-            spec.runtime
-                .as_mut()
-                .expect("a vendor spec has a runtime")
-                .provision
-                .push(crate::sessions::spec::ProvisionStepSpec {
-                    name: "checkout".into(),
-                    uses: "git_checkout".into(),
-                    with: vec![("url".into(), "https://github.com/o/wanted.git".into())],
-                });
-            services
-                .supervisor
-                .ask(
-                    |reply| crate::sessions::supervisor::SessionSupervisorCommand::Create {
-                        spec,
-                        name: None,
-                        created_at: 0,
-                        message: None,
-                        reply,
-                    },
-                )
-                .await
-                .unwrap()
-                .unwrap()
-                .id
-        };
-        let token = dial_token_for(&t, &session).await;
-        let app = app(state.clone());
+        connect_github(&state).await;
+        let token =
+            session_checking_out(&state, &vendor, "kept", "https://github.com/o/wanted.git").await;
 
         let req = Request::builder()
             .uri("/api/runtime/github-credential?host=github.com&path=o/other")
             .header("authorization", format!("Bearer {token}"))
             .body(Body::empty())
             .unwrap();
-        let res = app.oneshot(req).await.unwrap();
+        let res = app(state).oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
     }
 
@@ -1729,7 +1861,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
-        let token = dial_token_for(&t, "rt-1").await;
+        let token = dial_token_for(&t, "sess-1", "rt-1").await;
         let req = Request::builder()
             .uri(format!("/api/plugin-bundles/demo/{slug}"))
             .header("authorization", format!("Bearer {token}"))
@@ -1754,6 +1886,7 @@ mod tests {
             b"not-this-accounts-secret",
             &horsie_support::dial_token::DialClaims {
                 user_id: crate::auth::UserId::bootstrap().as_str().to_string(),
+                session_id: "sess-1".to_string(),
                 runtime_id: "rt-1".to_string(),
                 incarnation: "i1".to_string(),
             },
@@ -2272,6 +2405,7 @@ mod tests {
             &services.dial_secret,
             &horsie_support::dial_token::DialClaims {
                 user_id: account.clone(),
+                session_id: "sess-1".to_string(),
                 runtime_id: "s1".to_string(),
                 incarnation: "i1".to_string(),
             },
@@ -2319,6 +2453,7 @@ mod tests {
             &services.dial_secret,
             &horsie_support::dial_token::DialClaims {
                 user_id: account.clone(),
+                session_id: "sess-1".to_string(),
                 runtime_id: "mine".to_string(),
                 incarnation: "i1".to_string(),
             },
@@ -2379,6 +2514,7 @@ mod tests {
                 &services.dial_secret,
                 &horsie_support::dial_token::DialClaims {
                     user_id: services.project.as_str().to_string(),
+                    session_id: "sess-1".to_string(),
                     runtime_id: "s1".to_string(),
                     incarnation: "i1".to_string(),
                 },
