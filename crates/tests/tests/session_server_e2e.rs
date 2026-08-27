@@ -166,6 +166,11 @@ async fn start_server_on(
                 clock,
                 idle_timeout: Duration::from_secs(180),
                 tick_interval: None,
+                // Short, because a reader's wait is part of the idle policy
+                // too: whether an expiring poll re-reads the log is only
+                // observable across one of these windows, and no test is going
+                // to sit out the real half-minute to find out.
+                poll_window: Duration::from_millis(50),
             },
             None => SupervisorConfig::default(),
         })
@@ -2537,6 +2542,76 @@ async fn an_idle_session_hibernates_and_the_next_message_resumes_it() {
         agent.signals()
     );
 
+    server.shutdown().await;
+}
+
+/// A browser sitting on a quiet session must not keep it awake.
+///
+/// The reader's long poll is answered when the window expires as well as when
+/// the agent moves, and both answers look the same — a revision. Treating the
+/// expiring one as news made the stream read the log again, and a read is
+/// exactly how the supervisor learns a session is in use: an open tab renewed
+/// the idle clock twice a minute, so the session never went cold and its
+/// runtime was never hibernated. Reproduced live on the homelab, where a tab
+/// left open on a finished session kept its container up indefinitely.
+///
+/// The clock moves *while the reader is parked*, which is what makes this
+/// fail before the fix and pass after it: every read the session took before
+/// the advance is old news, so only a read the parked reader had no business
+/// making can put the idle clock back.
+#[tokio::test]
+async fn a_reader_parked_on_a_quiet_session_does_not_keep_it_loaded() {
+    let mock = MockLlmServer::builder().build().await;
+    mock.queue_response("first");
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let clock = Arc::new(TestClock::new());
+    let server = start_server_with(
+        tmp.path(),
+        Some(agent.link()),
+        &mock.url(),
+        Some(clock.clone()),
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let id = create_session(&client, &server.api, &agent, "one").await;
+    wait_turns(&client, &server.api, &id, 1).await;
+
+    // A reader that never stops, which is what a browser is.
+    let url = format!("{}/sessions/{id}/messages", server.api);
+    let (subscribed, ready) = tokio::sync::oneshot::channel();
+    let reader = tokio::spawn(async move {
+        let client = reqwest::Client::new();
+        collect_sse_from(&client, &url, None, Some(subscribed), |_| false).await
+    });
+    ready.await.expect("the reader subscribed");
+    // Long enough to drain the transcript and park on the poll — several of
+    // the 50ms windows this server is configured with.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // From here the session is untouched. Anything that renews its idle clock
+    // now can only be the parked reader.
+    clock.advance(Duration::from_secs(600));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let _ = server.supervisor.tell(SessionSupervisorCommand::Tick).await;
+    wait_until(
+        "a session with only a reader watching it to be unloaded and hibernated",
+        async || {
+            agent
+                .signals()
+                .iter()
+                .any(|s| s.starts_with("hibernate:"))
+                .then_some(())
+        },
+    )
+    .await;
+
+    reader.abort();
     server.shutdown().await;
 }
 

@@ -60,7 +60,7 @@ pub(crate) const SUPERVISOR_KIND: &str = "session-supervisor";
 /// idle chatter against how long a caller's slot in the reply table is held.
 /// Half a minute is short enough that a departed reader is noticed promptly and
 /// long enough that a quiet session costs two asks a minute.
-const POLL_WINDOW: Duration = Duration::from_secs(30);
+const DEFAULT_POLL_WINDOW: Duration = Duration::from_secs(30);
 
 /// Knobs the idle policy reads. Separated so tests drive time explicitly.
 ///
@@ -72,6 +72,12 @@ pub struct SupervisorConfig {
     pub idle_timeout: Duration,
     /// `None` disables the background ticker — tests send `Tick` themselves.
     pub tick_interval: Option<Duration>,
+    /// How long a reader's poll parks before being answered with no news.
+    ///
+    /// A knob for the same reason `idle_timeout` is one: whether a reader's
+    /// wait is honoured is only observable across one of these windows, and a
+    /// test that had to sit out the real half-minute would not be written.
+    pub poll_window: Duration,
 }
 
 impl Default for SupervisorConfig {
@@ -80,6 +86,7 @@ impl Default for SupervisorConfig {
             clock: Arc::new(SystemClock),
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             tick_interval: Some(DEFAULT_TICK_INTERVAL),
+            poll_window: DEFAULT_POLL_WINDOW,
         }
     }
 }
@@ -1204,8 +1211,9 @@ impl EventSourcedActor for SessionSupervisor {
                 }
                 // Off this mailbox, which has to stay free to serve every other
                 // request while one reader waits.
+                let window = self.config.poll_window;
                 tokio::spawn(async move {
-                    let moved = tokio::time::timeout(POLL_WINDOW, rx.changed()).await;
+                    let moved = tokio::time::timeout(window, rx.changed()).await;
                     let _ = reply.send(match moved {
                         Ok(Ok(())) => *rx.borrow(),
                         Ok(Err(_)) | Err(_) => current,
@@ -1231,6 +1239,7 @@ impl EventSourcedActor for SessionSupervisor {
                 let wire_id = agent_id.unwrap_or_else(|| "main".to_string());
                 let revisions = self.revisions().of(&id);
                 revisions.touch();
+                let window = self.config.poll_window;
                 // Everything below is off this mailbox, which has to stay free
                 // to serve every other session while one reader waits — and
                 // now also while the first reader of a session waits for its
@@ -1247,7 +1256,7 @@ impl EventSourcedActor for SessionSupervisor {
                         let _ = reply.send(Some(current));
                         return;
                     }
-                    let moved = tokio::time::timeout(POLL_WINDOW, rx.changed()).await;
+                    let moved = tokio::time::timeout(window, rx.changed()).await;
                     // A closed channel is not the end of the stream: the
                     // registry outlives the session precisely so a reader can
                     // sit through an offload. Answer with what we last saw and
@@ -1533,6 +1542,7 @@ mod tests {
             // No background ticker: the test decides when time passes and when
             // the sweep runs, so nothing here is a race.
             tick_interval: None,
+            ..SupervisorConfig::default()
         }
     }
 
