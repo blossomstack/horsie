@@ -17,6 +17,8 @@ sandbox = ["dep:nono"]
 [dependencies]
 horsie-models = { version = "0.5.0", path = "../models" }
 horsie-support = { version = "0.5.0", path = "../support" }
+# `ToolOutput.artifacts` is `Vec<fluorite::Bytes>`; the runtime is what fills it.
+fluorite      = { workspace = true }
 tokio         = { workspace = true, features = ["process", "net"] }
 tokio-tungstenite = { workspace = true }
 futures-util  = { workspace = true }

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::agent_loop::{McpToolbox, McpToolboxes, McpUnavailable};
+use crate::agent_loop::{ArtifactSink, McpToolbox, McpToolboxes, McpUnavailable};
 use async_trait::async_trait;
 use horsie_agentcore::Toolbox;
 use horsie_models::mcp::{
@@ -33,6 +33,10 @@ pub struct McpService {
     /// Transient in-flight authorizations, keyed by the opaque `state`. Holds the
     /// PKCE verifier until the browser returns to the callback. Pruned on insert.
     pending: tokio::sync::Mutex<HashMap<String, PendingAuth>>,
+    /// Where a tool result's images are stored. Held here rather than passed at
+    /// call time because every toolbox this service builds is for the same
+    /// project the store is scoped to.
+    artifacts: Arc<crate::artifacts::ArtifactService>,
 }
 
 /// One in-flight OAuth authorization awaiting its callback.
@@ -43,12 +47,17 @@ struct PendingAuth {
 }
 
 impl McpService {
-    pub fn new(store: McpStore, github: Arc<GithubService>) -> Self {
+    pub fn new(
+        store: McpStore,
+        github: Arc<GithubService>,
+        artifacts: Arc<crate::artifacts::ArtifactService>,
+    ) -> Self {
         Self {
             store,
             github,
             oauth: McpOAuthClient::new(),
             pending: tokio::sync::Mutex::new(HashMap::new()),
+            artifacts,
         }
     }
 
@@ -304,7 +313,8 @@ impl McpService {
         });
         let transport = Arc::new(HttpTransport::new(row.url.clone(), provider));
         let client = Arc::new(McpClient::new(transport));
-        McpToolbox::connect(row.name.clone(), client)
+        let sink = ArtifactSink::new(self.artifacts.clone(), self.store.project().clone());
+        McpToolbox::connect(row.name.clone(), client, sink)
             .await
             .map_err(|e| e.to_string())
     }
@@ -460,8 +470,9 @@ mod tests {
         ));
         (
             McpService::new(
-                McpStore::new(pool, crate::projects::ProjectId::new("1")),
+                McpStore::new(pool.clone(), crate::projects::ProjectId::new("1")),
                 github,
+                Arc::new(crate::artifacts::ArtifactService::in_database(pool)),
             ),
             tmp,
         )

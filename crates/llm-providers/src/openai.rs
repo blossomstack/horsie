@@ -225,7 +225,7 @@ impl OpenAiProvider {
                 Role::User | Role::Tool => "user",
             };
             let content = if media.is_empty() {
-                (!text.is_empty()).then(|| ChatContent::Text(text))
+                (!text.is_empty()).then_some(ChatContent::Text(text))
             } else {
                 // Text first, then the media, matching the order they were
                 // written in.

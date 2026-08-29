@@ -229,6 +229,7 @@ async fn recovered_agent_repairs_a_stopped_mid_history_tool_call() {
         parent: Arc::new(OutcomeChannel(tx)),
         journal_id: session_id,
         ready: true,
+        artifacts: None,
     };
     let mut params = AgentParams::from_def(&horsie_server::agent_loop::AgentRunDef {
         system_prompt: None,
@@ -249,6 +250,7 @@ async fn recovered_agent_repairs_a_stopped_mid_history_tool_call() {
             item: horsie_server::agent_loop::Incoming::User {
                 id: "m1".into(),
                 text: "carry on".into(),
+                artifacts: Vec::new(),
             },
             ack: None,
         }))
@@ -348,6 +350,7 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
         parent: Arc::new(OutcomeChannel(tx)),
         journal_id: session_id,
         ready: true,
+        artifacts: None,
     };
     let mut params = AgentParams::from_def(&horsie_server::agent_loop::AgentRunDef {
         system_prompt: None,
@@ -388,6 +391,7 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
             item: horsie_server::agent_loop::Incoming::User {
                 id: "m2".into(),
                 text: "carry on".into(),
+                artifacts: Vec::new(),
             },
             ack: None,
         }))
@@ -448,6 +452,7 @@ async fn cancelling_a_run_stuck_in_provide_returns_promptly() {
             parent: Arc::new(OutcomeChannel(tx)),
             journal_id: session_id,
             ready: true,
+            artifacts: None,
         };
         let mut params = AgentParams::from_def(&horsie_server::agent_loop::AgentRunDef {
             system_prompt: None,
@@ -466,6 +471,7 @@ async fn cancelling_a_run_stuck_in_provide_returns_promptly() {
                 item: horsie_server::agent_loop::Incoming::User {
                     id: "m3".into(),
                     text: "start something that wedges".into(),
+                    artifacts: Vec::new(),
                 },
                 ack: None,
             }))
@@ -527,6 +533,7 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
         parent: Arc::new(OutcomeChannel(tx)),
         journal_id: session_id,
         ready: true,
+        artifacts: None,
     };
     let mut params = AgentParams::from_def(&horsie_server::agent_loop::AgentRunDef {
         system_prompt: None,
@@ -585,6 +592,7 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
         parent: Arc::new(OutcomeChannel(tx2)),
         journal_id: session_id,
         ready: true,
+        artifacts: None,
     };
     let mut params2 = AgentParams::from_def(&horsie_server::agent_loop::AgentRunDef {
         system_prompt: None,

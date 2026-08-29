@@ -35,6 +35,7 @@ pub async fn exec(working_dir: &Path, input: ListFilesInput) -> ToolResult {
             stdout,
             stderr: String::new(),
             exit_code: 0,
+            artifacts: Vec::new(),
         }),
         Ok(Err(reason)) => ToolResult::Err(ToolError { reason }),
         Err(e) => ToolResult::Err(ToolError {

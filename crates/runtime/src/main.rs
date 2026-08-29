@@ -14,8 +14,7 @@ use horsie_models::runtime::{
     CancelledResponse, McpDiscoverResponse, McpInvokeResponse, PongResponse,
     ProvisionAgentResponse, ProvisionError, ProvisionOk, ProvisionResult,
     ProvisionWorkspaceResponse, RequestRefused, RunHooksResponse, RuntimeInboundMessage,
-    RuntimeOutboundMessage, RuntimeReady, ScanResponse, ToolCallResponse, ToolError, ToolOutput,
-    ToolResult,
+    RuntimeOutboundMessage, RuntimeReady, ScanResponse, ToolCallResponse, ToolError, ToolResult,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -1000,13 +999,7 @@ async fn run_loop<S>(
                                 Some(dir) => mcp
                                     .invoke(&mcp_agent, &dir, registry.default_cwd(), &tool, args)
                                     .await
-                                    .map(|stdout| {
-                                        ToolResult::Ok(ToolOutput {
-                                            stdout,
-                                            stderr: String::new(),
-                                            exit_code: 0,
-                                        })
-                                    })
+                                    .map(ToolResult::Ok)
                                     .unwrap_or_else(|reason| ToolResult::Err(ToolError { reason })),
                                 None => ToolResult::Err(ToolError {
                                     reason: "this runtime has no plugin library".to_string(),

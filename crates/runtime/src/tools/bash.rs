@@ -99,6 +99,7 @@ pub async fn exec(working_dir: &Path, env: &EnvOverlay, input: BashInput) -> Too
                     Some(code) => code,
                     None => -1,
                 },
+                artifacts: Vec::new(),
             })
         }
         Ok(Err(e)) => {

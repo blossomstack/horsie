@@ -93,7 +93,7 @@ mod tests {
         let (service, project, id) = service_with(&png()).await;
         let source = ProjectArtifacts::new(service, project, true);
 
-        let out = source.resolve(&[id.clone()]).await;
+        let out = source.resolve(std::slice::from_ref(&id)).await;
 
         let expected = base64::engine::general_purpose::STANDARD.encode(png());
         assert_eq!(out.get(&id), Some(&expected));

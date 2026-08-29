@@ -355,12 +355,16 @@ impl RuntimeClient {
     ///
     /// Tracked like an ordinary tool call, so a cancel reaches it: an MCP server
     /// that goes silent must not be un-stoppable.
+    ///
+    /// The whole [`ToolOutput`] comes back rather than its text, because a
+    /// screenshot tool's entire answer is `artifacts` — handing the caller a
+    /// `String` is what made such a call reach the model as an empty one.
     pub async fn mcp_invoke(
         &self,
         call_id: &str,
         tool: &str,
         arguments: String,
-    ) -> Result<String, RuntimeCallError> {
+    ) -> Result<ToolOutput, RuntimeCallError> {
         self.track(call_id);
         let outcome = self
             .inner
@@ -368,7 +372,7 @@ impl RuntimeClient {
             .await;
         self.untrack(call_id);
         match outcome.map_err(RuntimeCallError::Transport)? {
-            ToolResult::Ok(output) => Ok(output.stdout),
+            ToolResult::Ok(output) => Ok(output),
             ToolResult::Err(ToolError { reason }) => Err(RuntimeCallError::ToolFailed(reason)),
         }
     }

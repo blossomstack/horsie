@@ -89,6 +89,7 @@ mod tests {
                 stdout: "out".into(),
                 stderr: "a warning".into(),
                 exit_code: 0,
+                artifacts: Vec::new(),
             }),
             "test-agent",
         ));
@@ -105,6 +106,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: "boom".into(),
                 exit_code: 1,
+                artifacts: Vec::new(),
             }),
             "test-agent",
         ));

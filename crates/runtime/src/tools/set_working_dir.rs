@@ -58,6 +58,7 @@ fn ok(stdout: String) -> ToolResult {
         stdout,
         stderr: String::new(),
         exit_code: 0,
+        artifacts: Vec::new(),
     })
 }
 

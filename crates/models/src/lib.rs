@@ -860,6 +860,7 @@ mod tests {
             "m1",
             "keep going",
             vec![result_part("audit")],
+            Vec::new(),
         );
         let msg = input.to_message(0);
         assert_eq!(msg.parts.len(), 2);
@@ -873,8 +874,12 @@ mod tests {
     /// noise — Anthropic rejects it — so the part is omitted, not blanked.
     #[test]
     fn an_empty_user_text_produces_no_text_part() {
-        let input =
-            agent::AgentInput::user_message_with_results("m1", "", vec![result_part("audit")]);
+        let input = agent::AgentInput::user_message_with_results(
+            "m1",
+            "",
+            vec![result_part("audit")],
+            Vec::new(),
+        );
         let msg = input.to_message(0);
         assert_eq!(msg.parts.len(), 1);
         assert!(matches!(
