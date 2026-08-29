@@ -160,10 +160,11 @@ mod tests {
             system: crate::projects::node_system(&db, None),
             serving: None,
             project_service: Arc::new(crate::projects::ProjectService::new(db.clone())),
-            db,
             artifacts: Arc::new(crate::plugins::ArtifactStore::new(
                 tmp.path().join("artifacts"),
             )),
+            message_artifacts: Arc::new(crate::artifacts::ArtifactService::in_database(db.clone())),
+            db,
             info: info(),
             model_card_seed: Arc::new(Vec::new()),
             model_card_seed_marker: crate::config::model_cards::seed_marker(&[]),

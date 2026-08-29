@@ -243,6 +243,8 @@ pub(crate) mod tests {
         let vendors = Arc::new(std::sync::RwLock::new(map));
         let registry = Arc::new(RuntimeVendorRegistry::new(vendors.clone()));
         let deps = ServerDeps {
+            artifacts: None,
+            project: crate::projects::ProjectId::new("p-test"),
             runtimes: crate::runtime_manager::test_runtime_manager(&vendors),
             provider_registry: f.provider_registry.clone(),
             vendors,

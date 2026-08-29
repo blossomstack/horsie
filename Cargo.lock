@@ -1769,6 +1769,7 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "clap",
+ "fluorite",
  "futures-util",
  "glob",
  "globset",
@@ -1823,6 +1824,7 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "clap",
+ "fluorite",
  "futures-util",
  "hex",
  "horsie-actor",
@@ -1864,6 +1866,7 @@ version = "0.5.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.23.1",
  "hex",
  "hmac",
  "horsie-models",

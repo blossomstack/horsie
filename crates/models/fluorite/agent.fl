@@ -459,6 +459,10 @@ struct UserMessageInput {
     text: String,
     /// Finished subagents' results delivered with this turn.
     subagent_results: Vec<SubAgentResultPart>,
+    /// What the person attached. Defaulted for the same durability reason as
+    /// `ToolResultPart.artifacts` — this type is journaled.
+    #[default = "[]"]
+    artifacts: Vec<ArtifactRef>,
 }
 
 /// Tool result input — resumes the agent after a handoff

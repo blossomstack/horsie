@@ -174,6 +174,8 @@ pub(crate) fn fake_deps(
     );
     let vendors = Arc::new(std::sync::RwLock::new(vendors));
     ServerDeps {
+        artifacts: None,
+        project: crate::projects::ProjectId::new("p-test"),
         runtimes: crate::runtime_manager::test_runtime_manager(&vendors),
         provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
         vendors,
@@ -1320,6 +1322,7 @@ pub(super) async fn send(session: &SessionRef, text: &str) {
                 agent_id: None,
                 text: text.into(),
                 reply,
+                artifacts: Vec::new(),
             })
         })
         .await

@@ -138,3 +138,16 @@ describe("ArtifactRow", () => {
     expect(screen.getAllByTestId("artifact-image")).toHaveLength(2);
   });
 });
+
+describe("Lightbox placement", () => {
+  // Every transcript turn carries `.animate-settle`, a *filling* transform
+  // animation, which makes the turn the containing block for `position:
+  // fixed`. Rendered in place, the backdrop covered one message and stopped.
+  it("renders outside the tree it was opened from", () => {
+    const { container } = render(<ArtifactView artifact={image()} />);
+    fireEvent.click(screen.getByTestId("artifact-image"));
+    const backdrop = screen.getByTestId("lightbox-backdrop");
+    expect(container.contains(backdrop)).toBe(false);
+    expect(backdrop.parentElement).toBe(document.body);
+  });
+});

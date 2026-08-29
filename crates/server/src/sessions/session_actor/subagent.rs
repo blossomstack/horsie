@@ -123,6 +123,8 @@ impl SubAgents {
                         item: Incoming::User {
                             id: format!("task:{id}"),
                             text: task,
+                            // A subagent's task is text its spawner wrote.
+                            artifacts: Vec::new(),
                         },
                         ack: None,
                     }))
@@ -862,6 +864,7 @@ mod tests {
                     agent_id: None,
                     text: "hi".into(),
                     reply,
+                    artifacts: Vec::new(),
                 })
             })
             .await

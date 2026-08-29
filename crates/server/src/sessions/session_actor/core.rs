@@ -143,6 +143,11 @@ impl SessionCore {
                         .tell(SessionCommand::Turn(TurnCommand::UserMessage {
                             agent_id: None,
                             text,
+                            // A session is created with its first message and
+                            // `CreateSessionRequest` carries no attachments, so
+                            // there are none to pass on. See the note on
+                            // `SendMessageRequest.artifacts`.
+                            artifacts: Vec::new(),
                             reply,
                         }))
                         .await;
@@ -510,6 +515,7 @@ mod tests {
                 agent_id: None,
                 text: "hi".into(),
                 reply: horsie_actor::ReplyTo::from_sender(tx),
+                artifacts: Vec::new(),
             }))
             .await;
 
@@ -584,6 +590,7 @@ mod tests {
                     agent_id: None,
                     text: "migrate the journal to postgres".into(),
                     reply: horsie_actor::ReplyTo::from_sender(tx),
+                    artifacts: Vec::new(),
                 },
             ))
             .await;

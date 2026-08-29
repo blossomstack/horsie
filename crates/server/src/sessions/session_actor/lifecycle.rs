@@ -285,6 +285,7 @@ impl RuntimeLifecycle {
                 // than no entry, because every search that hits it costs the
                 // reader a call to discover the session is gone.
                 actor.forget_agent_runs().await;
+                actor.release_artifacts().await;
                 let _ = reply.send(());
                 CommandEffect::stop()
             }
@@ -776,6 +777,7 @@ mod tests {
                 agent_id: None,
                 text: "hello".into(),
                 reply: ReplyTo::from_sender(tx),
+                artifacts: Vec::new(),
             }))
             .await
             .unwrap();
@@ -902,6 +904,7 @@ mod tests {
                 agent_id: None,
                 text: "try again".into(),
                 reply: ReplyTo::from_sender(tx),
+                artifacts: Vec::new(),
             }))
             .await
             .unwrap();
@@ -1131,6 +1134,7 @@ mod tests {
                     agent_id: None,
                     text: "go".into(),
                     reply,
+                    artifacts: Vec::new(),
                 })
             })
             .await

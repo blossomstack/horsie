@@ -30,8 +30,15 @@ pub const ABANDONED_ASK_RESULT: &str = "not answered — the user sent a new mes
 /// message it is watching.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Incoming {
-    /// A person typed something.
-    User { id: String, text: String },
+    /// A person typed something, and possibly attached something to it.
+    User {
+        id: String,
+        text: String,
+        /// Ids only. The bytes live in the artifact service, and a queue entry
+        /// is journaled — inlining them would put base64 in the log.
+        #[serde(default)]
+        artifacts: Vec<horsie_models::agent::ArtifactRef>,
+    },
     /// A subagent this agent spawned finished, and owes it the report.
     SubAgent {
         id: String,
@@ -147,6 +154,11 @@ pub struct Turn {
     /// abandoned them instead — the two are deliberately not the same thing.
     pub answered: Vec<String>,
     pub message: Option<String>,
+    /// What the people who sent this turn's messages attached, in order.
+    ///
+    /// Beside `message` rather than inside it because several queued messages
+    /// merge into one user turn: the text joins, and so do the attachments.
+    pub artifacts: Vec<horsie_models::agent::ArtifactRef>,
     pub subagent_results: Vec<SubAgentResultPart>,
     pub results: Vec<ToolResultInput>,
 }
@@ -317,6 +329,20 @@ fn drain(inbox: &[Incoming]) -> Turn {
         // rejects an empty content block, so a report-only turn must have no
         // user message at all rather than a blank one.
         message: (!texts.is_empty()).then(|| texts.join(MERGE_SEPARATOR)),
+        artifacts: inbox
+            .iter()
+            .filter_map(|i| match i {
+                Incoming::User { artifacts, .. } => Some(artifacts.clone()),
+                // Nothing else can carry one: a timer and a `Stop` hook are
+                // server text, and a subagent reports through its own part.
+                Incoming::SubAgent { .. }
+                | Incoming::Timer { .. }
+                | Incoming::Continue { .. }
+                | Incoming::Compact { .. }
+                | Incoming::SubSession { .. } => None,
+            })
+            .flatten()
+            .collect(),
         subagent_results: inbox
             .iter()
             .filter_map(|i| match i {
@@ -345,6 +371,7 @@ mod tests {
         Incoming::User {
             id: id.to_string(),
             text: text.to_string(),
+            artifacts: Vec::new(),
         }
     }
 

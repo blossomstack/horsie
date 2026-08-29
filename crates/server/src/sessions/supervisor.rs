@@ -150,6 +150,9 @@ pub enum SessionSupervisorCommand {
         id: SessionId,
         agent_id: Option<String>,
         text: String,
+        /// What the person attached. Already stored and verified to belong to
+        /// this project by the HTTP layer — these are ids, never bytes.
+        artifacts: Vec<horsie_models::agent::ArtifactRef>,
         reply: ReplyTo<Result<MessageAccepted, UserMessageError>>,
     },
     /// Cancel one of a session's agents' turn in flight.
@@ -921,6 +924,7 @@ impl EventSourcedActor for SessionSupervisor {
                 id,
                 agent_id,
                 text,
+                artifacts,
                 reply,
             } => {
                 match self.session(ctx, state, &id) {
@@ -932,6 +936,7 @@ impl EventSourcedActor for SessionSupervisor {
                             .tell(SessionCommand::Turn(TurnCommand::UserMessage {
                                 agent_id,
                                 text,
+                                artifacts,
                                 reply,
                             }))
                             .await;
@@ -2389,6 +2394,7 @@ mod tests {
             .ask(|reply| SessionSupervisorCommand::UserMessage {
                 id: id.clone(),
                 agent_id: None,
+                artifacts: Vec::new(),
                 text: "first".into(),
                 reply,
             })
@@ -2422,6 +2428,7 @@ mod tests {
             .ask(|reply| SessionSupervisorCommand::UserMessage {
                 id: id.clone(),
                 agent_id: None,
+                artifacts: Vec::new(),
                 text: "second".into(),
                 reply,
             })
@@ -2604,6 +2611,7 @@ mod tests {
             .ask(|reply| SessionSupervisorCommand::UserMessage {
                 id: "missing".into(),
                 agent_id: None,
+                artifacts: Vec::new(),
                 text: "hi".into(),
                 reply,
             })

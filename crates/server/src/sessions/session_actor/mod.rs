@@ -619,6 +619,30 @@ impl SessionActor {
     /// The one index write that *is* awaited. The actor stops immediately
     /// after, so a spawned task would be racing its own session's disappearance
     /// — and an entry outliving its transcript is the failure this prevents.
+    /// Drop this session's claim on its artifacts, and delete any that nothing
+    /// else still references.
+    ///
+    /// Artifacts are content-addressed, so the same image can be attached in
+    /// several sessions and one row of bytes serves them all. That is why this
+    /// releases a *use* rather than deleting outright: the bytes go only when
+    /// the last session holding them does. Without it, a hosted deployment
+    /// keeps every image of every deleted session for ever.
+    async fn release_artifacts(&mut self) {
+        let Some(services) = self.services.clone() else {
+            return;
+        };
+        if let Err(e) = services
+            .artifacts
+            .release_session(&services.project, &self.id.to_string())
+            .await
+        {
+            // Logged rather than propagated: the session is going away either
+            // way, and a failure here leaks storage rather than corrupting
+            // anything.
+            tracing::warn!(session = %self.id, error = %e, "could not release artifacts");
+        }
+    }
+
     async fn forget_agent_runs(&mut self) {
         self.last_indexed_runs.clear();
         // Drain what is queued first, or a `record` still in flight lands after
@@ -765,6 +789,16 @@ impl SessionActor {
             .as_deref()
             .and_then(horsie_agentcore::ThinkingEffort::parse);
         let agent_ctx = AgentRuntimeContext {
+            // Gated on the model, once, here: a source that resolves nothing
+            // is how a text-only model is served, so no provider below this
+            // holds a vision flag or can forget to check one.
+            artifacts: self.deps().artifacts.as_ref().map(|service| {
+                Arc::new(crate::artifacts::source::ProjectArtifacts::new(
+                    service.clone(),
+                    self.deps().project.clone(),
+                    true,
+                )) as Arc<dyn horsie_agentcore::ArtifactSource>
+            }),
             context_provider: provider.clone(),
             revision,
             parent: StopHookParent::wrap(self.me(ctx), key, provider.clone()),

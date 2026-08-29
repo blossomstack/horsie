@@ -58,10 +58,11 @@ impl Turns {
             TurnCommand::UserMessage {
                 agent_id,
                 text,
+                artifacts,
                 reply,
             } => {
                 actor
-                    .on_user_message(state, agent_id, text, reply, ctx)
+                    .on_user_message(state, agent_id, text, artifacts, reply, ctx)
                     .await
             }
             TurnCommand::Stop { agent_id, reply } => {
@@ -405,6 +406,7 @@ impl SessionActor {
         state: &SessionState,
         agent_id: Option<String>,
         text: String,
+        artifacts: Vec<horsie_models::agent::ArtifactRef>,
         reply: ReplyTo<Result<MessageAccepted, UserMessageError>>,
         ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
@@ -461,11 +463,13 @@ impl SessionActor {
                 Incoming::User {
                     id: id.clone(),
                     text: text.clone(),
+                    artifacts: artifacts.clone(),
                 }
             }
             None => Incoming::User {
                 id: id.clone(),
                 text: text.clone(),
+                artifacts,
             },
         };
         let (tx, rx) = oneshot::channel();
@@ -744,6 +748,7 @@ mod tests {
                         agent_id: None,
                         text: "please".into(),
                         reply,
+                        artifacts: Vec::new(),
                     })
                 })
                 .await
@@ -763,6 +768,7 @@ mod tests {
                     agent_id: None,
                     text: "please".into(),
                     reply,
+                    artifacts: Vec::new(),
                 })
             })
             .await
@@ -897,6 +903,7 @@ mod tests {
                     agent_id: None,
                     text: "hello".into(),
                     reply,
+                    artifacts: Vec::new(),
                 })
             })
             .await
@@ -917,6 +924,7 @@ mod tests {
                     agent_id: None,
                     text: "go".into(),
                     reply,
+                    artifacts: Vec::new(),
                 })
             })
             .await
@@ -1070,6 +1078,7 @@ mod tests {
                     agent_id: Some(sub.to_string()),
                     text: "also check the lockfile".into(),
                     reply,
+                    artifacts: Vec::new(),
                 })
             })
             .await
@@ -1108,6 +1117,7 @@ mod tests {
                     agent_id: Some(Uuid::new_v4().to_string()),
                     text: "hello?".into(),
                     reply,
+                    artifacts: Vec::new(),
                 })
             })
             .await

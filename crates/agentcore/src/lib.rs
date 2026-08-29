@@ -21,7 +21,7 @@ pub use provider::{
 };
 pub use secret::Secret;
 pub use thinking::{ThinkingDialect, ThinkingEffort};
-pub use tool::{EmptyToolbox, Tool, ToolOutcome, ToolSpec, Toolbox, ToolboxImpl};
+pub use tool::{EmptyToolbox, Tool, ToolOutcome, ToolSpec, ToolValue, Toolbox, ToolboxImpl};
 
 pub use horsie_models::agent::{
     AgentInput, AgentLogBody, AgentLogEntry, AgentOutput, AgentResult, AskLifecycle,

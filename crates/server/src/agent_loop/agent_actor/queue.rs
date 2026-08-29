@@ -154,6 +154,7 @@ impl AgentActor {
         } = prepared;
         let crate::agent_loop::Turn {
             message,
+            artifacts,
             subagent_results,
             results,
             summarise,
@@ -224,6 +225,7 @@ impl AgentActor {
                 new_message_id(),
                 message.unwrap_or_default(),
                 subagent_results,
+                artifacts,
             )
         } else {
             AgentInput::tool_results(results)
@@ -325,7 +327,7 @@ impl Component for Queue {
                 // session records a subagent's news on this very log, and a
                 // wake becomes the turn's own input message — so surfacing
                 // them here would render the same fact twice.
-                if let crate::agent_loop::Incoming::User { id, text } = &item {
+                if let crate::agent_loop::Incoming::User { id, text, .. } = &item {
                     state.push(
                         at_ms,
                         AgentLogBody::Lifecycle(LifecycleEvent::MessageQueued(QueuedLifecycle {
@@ -513,6 +515,7 @@ mod tests {
         fn spawn(provider: Arc<HookingContext>) -> (ActorRef<AgentCommand>, Outcomes) {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             let ctx = AgentRuntimeContext {
+                artifacts: None,
                 context_provider: provider,
                 revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
                 parent: Arc::new(ReportingParent(tx)),
@@ -533,6 +536,7 @@ mod tests {
                     item: crate::agent_loop::Incoming::User {
                         id: "m2".into(),
                         text: text.into(),
+                        artifacts: Vec::new(),
                     },
                     ack: None,
                 }))
@@ -672,6 +676,7 @@ mod tests {
                     item: crate::agent_loop::Incoming::User {
                         id: "m3".into(),
                         text: "my password is hunter2".into(),
+                        artifacts: Vec::new(),
                     },
                     ack: None,
                 }))
@@ -746,6 +751,7 @@ mod tests {
 
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
             let ctx = AgentRuntimeContext {
+                artifacts: None,
                 context_provider: Arc::new(GoneContext),
                 revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
                 parent: Arc::new(ReportingParent(tx)),
@@ -762,6 +768,7 @@ mod tests {
                     item: crate::agent_loop::Incoming::User {
                         id: "m4".into(),
                         text: "hi".into(),
+                        artifacts: Vec::new(),
                     },
                     ack: None,
                 }))
@@ -848,6 +855,7 @@ mod queue_tests {
     ) -> (ActorRef<AgentCommand>, Outcomes) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = AgentRuntimeContext {
+            artifacts: None,
             context_provider: provider,
             revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
             parent: Arc::new(OutcomeChannel(tx)),
@@ -894,6 +902,7 @@ mod queue_tests {
                 item: crate::agent_loop::Incoming::User {
                     id: id.into(),
                     text: text.into(),
+                    artifacts: Vec::new(),
                 },
                 ack: Some(ReplyTo::from_sender(tx)),
             }))

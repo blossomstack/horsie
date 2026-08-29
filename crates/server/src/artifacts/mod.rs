@@ -16,6 +16,7 @@ pub mod blobs;
 pub mod cache;
 pub mod media;
 pub mod service;
+pub mod source;
 pub mod store;
 
 pub use blobs::{ArtifactBlobs, BlobError, BlobKey, DbBlobs};

@@ -106,6 +106,9 @@ impl AgentActor {
 
         let self_ref = ctx.self_ref();
         let context_provider = self.ctx.context_provider.clone();
+        // Cloned here, used inside the spawned task: resolving bytes is
+        // database I/O, and this actor's mailbox must never block on it.
+        let artifact_source = self.ctx.artifacts.clone();
         let configured_prompt = self.params.system_prompt.clone();
         // Normally `None`, meaning `Auto`: a turn may end with text, and which
         // tools end a run is the toolbox's business. Set only when this turn is
@@ -250,6 +253,7 @@ impl AgentActor {
                 context_tokens,
                 summarise,
                 summarise_only,
+                artifact_source,
             )
             .await;
             // All coarse events were already persisted (each `emit` awaited
@@ -455,6 +459,8 @@ pub(super) async fn run_with_retries(
     context_tokens: u32,
     summarise: Option<Summarise>,
     summarise_only: bool,
+    // Where the agent resolves artifact bytes. `None` shows the model none.
+    artifact_source: Option<Arc<dyn horsie_agentcore::ArtifactSource>>,
 ) -> (RunOutcome, Option<SeedSummary>) {
     // Whatever a sub session is waiting on is taken first, before this turn
     // can say anything to the model: the summary has to describe the history
@@ -513,6 +519,7 @@ pub(super) async fn run_with_retries(
             context_tokens,
             compact,
             summarise_only,
+            artifact_source,
         )
         .await,
         seed_summary,
@@ -563,6 +570,8 @@ pub(super) async fn run_turn_attempts(
     context_tokens: u32,
     compact: Option<Option<String>>,
     compact_only: bool,
+    // Where the agent resolves artifact bytes. `None` shows the model none.
+    artifact_source: Option<Arc<dyn horsie_agentcore::ArtifactSource>>,
 ) -> RunOutcome {
     let mut attempt: u32 = 0;
     loop {
@@ -582,6 +591,9 @@ pub(super) async fn run_turn_attempts(
             .with_history(history.clone())
             .with_compaction(compaction_policy.clone())
             .with_context_tokens(context_tokens);
+        if let Some(source) = artifact_source.clone() {
+            builder = builder.artifact_source(source);
+        }
         if let Some(choice) = tool_choice.clone() {
             builder = builder.with_tool_choice(choice);
         }
@@ -743,6 +755,7 @@ mod tests {
         // scope, so a test that passes cannot be reading the wrong one.
         let session_id = uuid::Uuid::new_v4();
         let ctx = AgentRuntimeContext {
+            artifacts: None,
             context_provider: Arc::new(MockContext(provider.clone())),
             revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
             parent: Arc::new(ReportingParent(tx)),
@@ -760,6 +773,7 @@ mod tests {
                 item: crate::agent_loop::Incoming::User {
                     id: "m1".into(),
                     text: "hi".into(),
+                    artifacts: Vec::new(),
                 },
                 ack: None,
             }))
@@ -866,6 +880,7 @@ mod retry_tests {
             0,
             None,
             false,
+            None,
         )
         .await;
         let calls = provider.calls();
@@ -950,6 +965,7 @@ mod retry_tests {
             0,
             None,
             false,
+            None,
         )
         .await;
         let calls = provider.calls();

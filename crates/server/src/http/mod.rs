@@ -4,6 +4,7 @@
 mod admin;
 
 mod annotations;
+mod artifacts;
 pub mod auth;
 mod chatgpt;
 pub mod error;
@@ -21,6 +22,7 @@ mod sse;
 mod vendor_connect;
 mod workflows;
 
+use crate::artifacts::MAX_ARTIFACT_BYTES;
 use crate::auth::{AuthService, Principal, UserId};
 use crate::projects::{ProjectId, ProjectRegistry, ProjectServices, Shared};
 use axum::Router;
@@ -321,6 +323,16 @@ fn credentials(mode: crate::auth::AuthMode) -> Router<AppState> {
 fn scoped() -> Router<AppState> {
     Router::new()
         .route("/sessions", post(handlers::create_session))
+        // The body is a file, so this route alone opts out of the global JSON
+        // body limit. The service enforces the real cap; this only has to be
+        // above it, or a large upload is cut off before it can be judged.
+        .route(
+            "/artifacts",
+            post(artifacts::upload).layer(axum::extract::DefaultBodyLimit::max(
+                MAX_ARTIFACT_BYTES + 1024,
+            )),
+        )
+        .route("/artifacts/{id}", get(artifacts::fetch))
         .route(
             "/sessions/{id}/annotations",
             put(annotations::set_annotations),

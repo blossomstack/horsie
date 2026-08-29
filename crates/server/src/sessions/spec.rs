@@ -511,6 +511,12 @@ pub struct ServerDeps {
     /// Resolves selected plugin bundles to fetchable refs and mints capability
     /// tokens at provisioning; `None` when no plugin library is wired.
     pub plugins: Option<Arc<dyn crate::plugins::PluginProvisioner>>,
+    /// The images and documents this session's messages carry. `None` in a
+    /// test deployment with no artifact service, which shows the model
+    /// nothing rather than failing a turn.
+    pub artifacts: Option<Arc<crate::artifacts::ArtifactService>>,
+    /// Which project this session belongs to, for scoping artifact reads.
+    pub project: crate::projects::ProjectId,
     /// Reads and writes the agent's long-term memories, and renders the index
     /// injected into the system prompt; `None` when no memory service is wired
     /// (tests). A session that names spaces with no service configured gets no

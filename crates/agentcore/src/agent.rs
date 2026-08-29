@@ -166,6 +166,15 @@ impl AgentBuilder {
         self
     }
 
+    /// Where this agent fetches artifact bytes from. Left unset, the agent
+    /// shows the model no artifacts at all — which is exactly right for a
+    /// text-only model, and the safe default everywhere else.
+    #[must_use]
+    pub fn artifact_source(mut self, source: Arc<dyn crate::provider::ArtifactSource>) -> Self {
+        self.artifact_source = Some(source);
+        self
+    }
+
     pub fn build(self) -> Result<Agent, AgentBuildError> {
         if self.config.nudge_threshold >= self.config.stuck_threshold {
             return Err(AgentBuildError::InvalidConfig {

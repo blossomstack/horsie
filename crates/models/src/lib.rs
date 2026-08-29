@@ -443,6 +443,7 @@ impl agent::AgentInput {
             id: id.into(),
             text: text.into(),
             subagent_results: Vec::new(),
+            artifacts: Vec::new(),
         })
     }
 
@@ -452,11 +453,13 @@ impl agent::AgentInput {
         id: impl Into<String>,
         text: impl Into<String>,
         subagent_results: Vec<agent::SubAgentResultPart>,
+        artifacts: Vec<agent::ArtifactRef>,
     ) -> Self {
         Self::UserMessage(agent::UserMessageInput {
             id: id.into(),
             text: text.into(),
             subagent_results,
+            artifacts,
         })
     }
 
@@ -507,6 +510,9 @@ impl agent::AgentInput {
                         text: u.text.clone(),
                     }));
                 }
+                parts.extend(u.artifacts.iter().cloned().map(|artifact| {
+                    agent::ContentPart::Artifact(agent::ArtifactPart { artifact })
+                }));
                 parts.extend(
                     u.subagent_results
                         .iter()

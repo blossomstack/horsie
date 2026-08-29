@@ -436,10 +436,16 @@ pub async fn send_message(
     Query(agent): Query<AgentParam>,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<impl IntoResponse, Api> {
+    // Every id must already be an artifact of *this* project. A client names
+    // artifacts by content hash, and a hash from another project is a
+    // guessable name for someone else's bytes — so membership is checked here,
+    // before the message is accepted, rather than at render time.
+    super::artifacts::verify_owned(&state, &req.artifacts).await?;
     let result = ask(&state, |reply| SessionSupervisorCommand::UserMessage {
         id,
         agent_id: agent.aid,
         text: req.text,
+        artifacts: req.artifacts,
         reply,
     })
     .await?;

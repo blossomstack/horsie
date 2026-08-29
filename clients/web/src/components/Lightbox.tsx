@@ -1,5 +1,6 @@
 import { Download, X } from "lucide-react";
 import { useEffect, useRef, type KeyboardEvent } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 
 /** Everything a Tab can land on inside the dialog, in document order. */
@@ -9,11 +10,19 @@ const FOCUSABLE = "a[href], button:not(:disabled), [tabindex]:not([tabindex='-1'
  * One image, full size, above everything else.
  *
  * Modelled on `ConfirmDialog`: same backdrop, same Escape, same "the first
- * control takes focus on open". It goes further in one way — the dialog traps
- * Tab. A confirm has two buttons and a page behind it that is about to be
- * acted on either way; this covers the transcript entirely, so a Tab that
- * escaped it would walk an invisible session rail with no way back but the
- * mouse.
+ * control takes focus on open". It goes further in two ways.
+ *
+ * It traps Tab. A confirm has two buttons and a page behind it that is about
+ * to be acted on either way; this covers the transcript entirely, so a Tab
+ * that escaped it would walk an invisible session rail with no way back but
+ * the mouse.
+ *
+ * And it is portalled to `<body>`, where `ConfirmDialog` simply is already.
+ * This one opens from inside a transcript turn, and `.animate-settle` leaves
+ * a *filling* transform animation on every one of those — which makes the
+ * turn the containing block for `position: fixed`. Rendered in place, the
+ * backdrop covered one message and stopped, and the rest of the page stayed
+ * live behind a dialog that had declared itself modal.
  */
 export function Lightbox({
   src,
@@ -53,7 +62,7 @@ export function Lightbox({
     }
   };
 
-  return (
+  return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
       onClick={onClose}
@@ -100,6 +109,7 @@ export function Lightbox({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

@@ -109,6 +109,9 @@ pub enum TurnCommand {
     UserMessage {
         agent_id: Option<String>,
         text: String,
+        /// Ids of what the person attached, already stored and already checked
+        /// to belong to this project. Never bytes.
+        artifacts: Vec<horsie_models::agent::ArtifactRef>,
         reply: ReplyTo<Result<MessageAccepted, UserMessageError>>,
     },
     /// Cancel one agent's turn in flight. Queued messages are *not* discarded —

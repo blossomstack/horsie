@@ -981,6 +981,7 @@ mod tests {
                     agent_id: None,
                     text: "go".into(),
                     reply,
+                    artifacts: Vec::new(),
                 })
             })
             .await
@@ -1061,6 +1062,7 @@ mod tests {
                     agent_id: None,
                     text: "go".into(),
                     reply,
+                    artifacts: Vec::new(),
                 })
             })
             .await

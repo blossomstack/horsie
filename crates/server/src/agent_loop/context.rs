@@ -347,6 +347,12 @@ impl ContextProvider for FixedContextProvider {
 pub struct AgentRuntimeContext {
     /// Per-run context supplier; see [`ContextProvider`].
     pub context_provider: Arc<dyn ContextProvider>,
+    /// Where this agent fetches artifact bytes from, just before each provider
+    /// call. `None` shows the model no artifacts at all — the right answer for
+    /// a text-only model, and the safe default for any caller that has not
+    /// wired one up.
+    #[allow(clippy::type_complexity)]
+    pub artifacts: Option<Arc<dyn horsie_agentcore::ArtifactSource>>,
     /// Where this agent announces that it has moved, for readers to wait on.
     ///
     /// Injected rather than created by the actor so its lifetime can be longer
