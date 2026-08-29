@@ -294,24 +294,37 @@ async fn stream(
             // Nothing new, so wait to be told there is. The ask returns
             // immediately if the agent moved while we were writing, which is
             // what keeps a fast producer from outrunning a slow reader without
-            // either of them losing data. It also returns, unchanged, when the
-            // window expires — that is not news, so we simply ask again.
+            // either of them losing data.
+            //
+            // It also returns when the window expires, answering with the very
+            // revision we asked after — that is not news, and reading the log
+            // again on it is not free. A read is how the supervisor learns a
+            // session is being used, so re-reading every window told it this
+            // one had been spoken to twice a minute: an open tab kept the
+            // session resident for ever and its runtime never hibernated.
+            // Waiting again is the whole of the fix, and it is what
+            // `/api/events` already does with the list counter.
             if !advanced {
-                let next = state
-                    .supervisor
-                    .ask(|reply| SessionSupervisorCommand::AwaitAgentRevision {
-                        id: id.clone(),
-                        agent_id: Some(agent_id.clone()),
-                        after: Some(revision),
-                        reply,
-                    })
-                    .await;
-                match next {
-                    Ok(Some(seen)) => revision = seen,
-                    // The agent is gone, or the supervisor is. Either way this
-                    // stream is over; the browser reconnects.
-                    Ok(None) | Err(_) => return,
-                }
+                revision = loop {
+                    let next = state
+                        .supervisor
+                        .ask(|reply| SessionSupervisorCommand::AwaitAgentRevision {
+                            id: id.clone(),
+                            agent_id: Some(agent_id.clone()),
+                            after: Some(revision),
+                            reply,
+                        })
+                        .await;
+                    match next {
+                        Ok(Some(seen)) if seen != revision => break seen,
+                        // The window expired with the counter where it was.
+                        // Say nothing, read nothing, and park again.
+                        Ok(Some(_)) => {}
+                        // The agent is gone, or the supervisor is. Either way
+                        // this stream is over; the browser reconnects.
+                        Ok(None) | Err(_) => return,
+                    }
+                };
             }
         }
     });
