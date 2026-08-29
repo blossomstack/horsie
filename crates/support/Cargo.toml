@@ -3,7 +3,7 @@ name = "horsie-support"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/blossomstack/horsie"
 description = "Shared host-side helpers for horsie: plugin manifests, skills, marketplaces, MCP client"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 
 [features]
@@ -13,7 +13,7 @@ default = []
 git = []
 
 [dependencies]
-horsie-models = { version = "0.4.0", path = "../models" }
+horsie-models = { version = "0.5.0", path = "../models" }
 async-trait = { workspace = true }
 thiserror   = { workspace = true }
 serde       = { workspace = true }

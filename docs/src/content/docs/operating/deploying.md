@@ -63,7 +63,7 @@ fly secrets set HORSIE_DATABASE_URL=postgres://user:password@host/horsie
 
 ## Which image tag
 
-All three paths above pin a release tag — `ghcr.io/blossomstack/horsie:0.4.0`
+All three paths above pin a release tag — `ghcr.io/blossomstack/horsie:0.5.0`
 at the time of writing. Upgrading is a deliberate step: edit the tag, then
 `docker compose pull` or redeploy.
 
