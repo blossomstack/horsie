@@ -247,9 +247,7 @@ fn step_entry(
             .forest
             .entry(run_id)
             .and_then(|e| e.parent)
-            .filter(|pid| {
-                state.forest.sub(*pid).is_some() || state.forest.sub_session(*pid).is_some()
-            }),
+            .filter(|pid| state.forest.is_hosted_agent(*pid)),
         title: Some(execution.step.clone()),
         depth: 0,
         agent_type: None,
@@ -355,20 +353,21 @@ fn sub_entry(
     let forest = &state.forest;
     AgentEntry {
         id: id.to_string(),
-        // Reported when the parent is another subagent or the sub session
-        // that spawned it — both are rows the client holds, so both are things
-        // it can hang this one off. A step's is not: a run's shape is its
-        // workflow graph's, drawn from the run rather than from this roster.
+        // Reported whenever the spawner is a row the client holds — another
+        // subagent, a workflow step, or the sub session that spawned it —
+        // because the session graph draws both rosters as one lineage and
+        // anything it cannot hang this one off is drawn on the main agent
+        // instead.
         //
-        // A sub session's used to be dropped here too, as "top-level to a
-        // reader". It is not: the session graph draws both rosters as one
-        // lineage, and without this the agent a sub session delegated to came
-        // out beside it, hanging off the main agent, as though the main agent
-        // had spawned it.
+        // A step's used to be dropped here, on the reasoning that a run's
+        // shape is its workflow graph's. That is true of the *step*, and says
+        // nothing about what a step delegated to: the subagent a coding step
+        // spawned came out beside the step, as though the session itself had
+        // spawned it.
         parent: forest
             .owner_of_agent(id)
             .and_then(|(_, e)| e.parent)
-            .filter(|pid| forest.sub(*pid).is_some() || forest.sub_session(*pid).is_some()),
+            .filter(|pid| forest.is_hosted_agent(*pid)),
         title: Some(rec.title.clone()),
         depth: forest.depth_of_agent(id).unwrap_or(0),
         agent_type: rec.agent_type.clone(),
@@ -754,6 +753,188 @@ mod tests {
             .find(|a| a.id == sub.to_string())
             .expect("the subagent is in the roster");
         assert_eq!(entry.parent, Some(sub_session));
+    }
+
+    /// Every kind of spawner, against every kind of work it can spawn, and the
+    /// parent the roster reports for each.
+    ///
+    /// One assertion over the whole matrix rather than a test per pair,
+    /// because the bug was never in one pair — it was in a *list of kinds*
+    /// written out twice, and a list is blind to the kind nobody thought of.
+    /// Both `step` rows below came back `None` before `is_hosted_agent`
+    /// replaced those lists: a subagent a coding step spawned, and a workflow
+    /// a step invoked, each drew on the main agent as though the session had
+    /// started it directly.
+    ///
+    /// `None` is not a hole here — the schema reads an absent parent as
+    /// "rooted on this session's primary agent", and the main agent is on the
+    /// roster under a well-known id rather than its uuid. So the three `None`
+    /// rows are the three things the main agent itself started.
+    #[test]
+    fn the_roster_reports_a_parent_for_every_spawner_that_is_a_row_a_client_holds() {
+        use crate::sessions::run_forest::{RunForest, RuntimeChoice, SeedMode};
+        use crate::sessions::workflow::WorkflowRunSpec;
+        use std::sync::Arc;
+
+        let uid = |n: u8| Uuid::from_bytes([n; 16]);
+        let (session, sub, sub_session, step) = (uid(1), uid(2), uid(3), uid(4));
+        let graph = |name: &str| {
+            Arc::new(WorkflowRunSpec {
+                workflow: name.into(),
+                start: "s".into(),
+                steps: vec![],
+                input: "go".into(),
+                max_steps: 10,
+            })
+        };
+        let mut f = RunForest::default();
+        f.apply_root_agent(session, 0, RuntimeChoice::Pending);
+        f.apply_sub_spawned(sub, session, "sub".into(), "t".into(), None, 10);
+        f.apply_sub_session_created(
+            sub_session,
+            session,
+            0,
+            SeedMode::Fresh,
+            "m".into(),
+            "sub session".into(),
+            10,
+            RuntimeChoice::Inherit,
+        );
+        // The step exists only as a run's execution, so its run comes first.
+        // Every spawner then invokes a run and spawns a subagent, and the two
+        // that may branch a sub session do.
+        for (run, parent, agent, label) in [
+            (uid(10), session, step, "run by main"),
+            (uid(11), sub, uid(61), "run by sub"),
+            (uid(12), sub_session, uid(62), "run by sub session"),
+            (uid(13), step, uid(63), "run by step"),
+        ] {
+            f.apply_run_created(RunId(run), parent, label.into(), graph(label), 20);
+            f.apply_step_started(
+                RunId(run),
+                "s".into(),
+                agent,
+                1,
+                None,
+                None,
+                "in".into(),
+                21,
+            );
+        }
+        for (n, parent, label) in [
+            (30u8, session, "subagent of main"),
+            (31, sub, "subagent of sub"),
+            (32, sub_session, "subagent of sub session"),
+            (33, step, "subagent of step"),
+        ] {
+            f.apply_sub_spawned(uid(n), parent, label.into(), "t".into(), None, 30);
+        }
+        // Only a session branches: `branchable` refuses a subagent's or a
+        // step's parent outright, so those two pairs cannot exist to be drawn.
+        f.apply_sub_session_created(
+            uid(40),
+            sub_session,
+            0,
+            SeedMode::Fresh,
+            "m".into(),
+            "sub session of sub session".into(),
+            30,
+            RuntimeChoice::Inherit,
+        );
+        let state = SessionState {
+            forest: f,
+            ..Default::default()
+        };
+
+        let named = |id: Option<Uuid>| match id {
+            None => "rooted on main",
+            Some(x) if x == sub => "sub",
+            Some(x) if x == sub_session => "sub session",
+            Some(x) if x == step => "step",
+            Some(_) => "unexpected",
+        };
+        let mut got: Vec<(String, &str)> = Vec::new();
+        for id in state.forest.sub_ids() {
+            let rec = state.forest.sub(id).cloned().expect("a subagent");
+            got.push((
+                rec.title.clone(),
+                named(sub_entry(id, &state, &rec, None).parent),
+            ));
+        }
+        for (run_id, w) in state
+            .forest
+            .workflows()
+            .map(|(i, w)| (i, w.clone()))
+            .collect::<Vec<_>>()
+        {
+            for execution in &w.run.steps {
+                let entry = step_entry(run_id, &w, execution, &state, None);
+                got.push((format!("step of {}", w.workflow), named(entry.parent)));
+            }
+        }
+        for id in state.forest.sub_session_ids() {
+            let rec = state
+                .forest
+                .sub_session(id)
+                .cloned()
+                .expect("a sub session");
+            let entry = sub_session_entry(id, &state, &rec, None);
+            got.push((rec.title.clone(), named(entry.parent)));
+        }
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("step of run by main".to_string(), "rooted on main"),
+                ("step of run by step".to_string(), "step"),
+                ("step of run by sub".to_string(), "sub"),
+                ("step of run by sub session".to_string(), "sub session"),
+                ("sub".to_string(), "rooted on main"),
+                ("sub session".to_string(), "rooted on main"),
+                ("sub session of sub session".to_string(), "sub session"),
+                ("subagent of main".to_string(), "rooted on main"),
+                ("subagent of step".to_string(), "step"),
+                ("subagent of sub".to_string(), "sub"),
+                ("subagent of sub session".to_string(), "sub session"),
+            ]
+        );
+    }
+
+    /// A subagent a workflow step spawned names that step as its parent.
+    ///
+    /// It used to name nobody. The roster reported a parent only when it was
+    /// another subagent or a sub session, on the reasoning that a run's shape
+    /// is its workflow graph's — true of the *step*, and silent about what the
+    /// step delegated to. The agent a coding step spawned therefore reached
+    /// the client rootless and drew on the main agent, beside the step that
+    /// spawned it rather than under it.
+    #[tokio::test]
+    async fn a_subagent_of_a_workflow_step_names_the_step_as_its_parent() {
+        let (_f, session, id, journal) = spawn_run_with_provider(BlockingProvider::new()).await;
+        let run = wait_for_run(&journal, id, |r| r.current().is_some()).await;
+        let step_agent = run.steps[0].agent;
+
+        let sub = session
+            .ask(|reply| {
+                SessionCommand::SubAgent(SubAgentCommand::Spawn {
+                    caller: step_agent,
+                    title: "toolchain".into(),
+                    task: "install the toolchain".into(),
+                    agent_type: None,
+                    reply,
+                })
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        wait_for_tree(&journal, id, |f| f.sub(sub).is_some()).await;
+
+        let agents = roster(&session).await;
+        let entry = agents
+            .iter()
+            .find(|a| a.id == sub.to_string())
+            .expect("the subagent is in the roster");
+        assert_eq!(entry.parent, Some(step_agent));
     }
 
     /// A run has no main agent — it *is* its steps. Reporting one anyway meant
