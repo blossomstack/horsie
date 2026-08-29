@@ -132,6 +132,7 @@ const zhHant: typeof en = {
   },
 
   nav: {
+    inbox: "收件匣",
     agents: "智慧代理",
     environments: "環境",
     routines: "例行工作",
@@ -257,6 +258,11 @@ const zhHant: typeof en = {
 
   askUser: {
     notAnswered: "未作回答 —— {{answer}}",
+    orOwnWords: "也可以用自己的話回答……",
+    yourAnswer: "你的回答……",
+    sendAnswer: "送出回答",
+    sendAllAnswers: "送出全部回答",
+    oneOfMany: "{{total}} 個問題之一 —— 它們會一起送出。",
   },
 
   tagFilter: {
@@ -642,6 +648,41 @@ const zhHant: typeof en = {
     rosterTitle: "工作流程清單",
     rosterBlurb:
       "工作流程讓多個智慧代理依序執行，每一個都決定下一個往哪裡去。所有步驟共用一個工作區，因此前一個寫下的內容後一個就讀得到。執行紀錄會與你的工作階段一同出現在側邊欄。按<key>新增工作流程</key>定義一個。",
+  },
+
+  inbox: {
+    title: "收件匣",
+    badgeLabel: "{{unread}} 則未讀，{{openAsks}} 個在等回答",
+    filterAll: "全部",
+    filterUnread: "未讀",
+    filterOpen: "待回答",
+    empty:
+      "這裡還什麼都沒有。智慧代理有話要說、或者卡在一個問題上時，會寫到這個收件匣。",
+    noneInView: "目前檢視下沒有內容。",
+    kindNotice: "通知",
+    kindAsk: "問題",
+    unread: "未讀",
+    waiting: "等你回答",
+    openSession: "打開工作階段",
+    pickOne: "選一則訊息來閱讀。",
+    select: "選擇「{{title}}」",
+    selectAll: "選取全部訊息",
+    deleteSelected_one: "刪除 {{count}} 則訊息",
+    deleteSelected_other: "刪除 {{count}} 則訊息",
+    confirmDelete_one: "刪除這則訊息？",
+    confirmDeleteOnlyAsk:
+      "刪除這個問題？智慧代理仍在等待它。刪掉它就等於拒絕回答：該智慧代理會被告知沒人會回答，然後在沒有答案的情況下繼續。",
+    confirmDelete_other: "刪除這 {{count}} 則訊息？",
+    declineWarning_one:
+      "其中 {{count}} 則是某個智慧代理仍在等待的問題。刪掉它就等於拒絕回答：該智慧代理會被告知沒人會回答，然後在沒有答案的情況下繼續。",
+    declineWarning_other:
+      "其中 {{count}} 則是智慧代理仍在等待的問題。刪掉它們就等於拒絕回答：每個智慧代理都會被告知沒人會回答，然後在沒有答案的情況下繼續。",
+    answered: "你已經回答過了。",
+    declined:
+      "你拒絕了這個問題。智慧代理被告知沒人會回答，已經在沒有答案的情況下繼續了。",
+    closed: "從未作答 —— 工作階段裡後來的事情已經越過了它。",
+    replyPlaceholder: "回覆這個智慧代理……",
+    send: "送出",
   },
 
   settingsNav: {

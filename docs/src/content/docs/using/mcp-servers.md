@@ -3,7 +3,7 @@ title: MCP servers
 description: Connect remote MCP servers and enable them per session to give agents extra tools.
 kind: how-to
 sidebar:
-  order: 4
+  order: 5
 ---
 
 [MCP](https://modelcontextprotocol.io) servers give agents tools horsie does

@@ -2,6 +2,7 @@ import {
   Bot,
   CalendarClock,
   Container,
+  Inbox,
   ListFilter,
   Plus,
   Settings,
@@ -22,6 +23,7 @@ import {
   type TagFilter,
 } from "../lib/sessionTags";
 import { usePersistentState } from "../hooks/usePersistentState";
+import { useInbox } from "../hooks/useInbox";
 import { useSessionList } from "../hooks/useSessions";
 import { sessionTitle } from "../lib/format";
 import { SessionRow } from "./SessionRow";
@@ -35,11 +37,14 @@ function PrimaryLink({
   icon,
   label,
   testId,
+  badge,
 }: {
   to: string;
   icon: ReactNode;
   label: string;
   testId: string;
+  /** Right-aligned count, for a destination that accumulates. */
+  badge?: ReactNode;
 }) {
   return (
     <NavLink
@@ -57,7 +62,41 @@ function PrimaryLink({
     >
       {icon}
       <span className="font-medium">{label}</span>
+      {badge}
     </NavLink>
+  );
+}
+
+/**
+ * What the inbox is holding: unread messages, or — louder — the questions an
+ * agent has stopped on.
+ *
+ * One number rather than two. They mean different things, and only `openAsks`
+ * means somebody is standing still, so it takes the badge whenever there is
+ * one and gets a fill to say so; an unread notice costs nothing and reads as
+ * a plain count. Both numbers are in the accessible name, because the quiet
+ * one is otherwise invisible while the loud one is shown.
+ */
+function InboxBadge() {
+  const { t } = useTranslation();
+  const { data } = useInbox();
+  const unread = data?.unread ?? 0;
+  const openAsks = data?.openAsks ?? 0;
+  if (unread === 0 && openAsks === 0) return null;
+  return (
+    <span
+      data-testid="inbox-badge"
+      data-open-asks={openAsks}
+      aria-label={t("inbox.badgeLabel", { unread, openAsks })}
+      className={cn(
+        "ml-auto shrink-0 text-[0.6875rem] tabular-nums",
+        openAsks > 0
+          ? "rounded-full bg-live-quiet px-1.5 py-px font-medium text-live-ink"
+          : "text-faint",
+      )}
+    >
+      {openAsks > 0 ? openAsks : unread}
+    </span>
   );
 }
 
@@ -180,6 +219,15 @@ export function Sidebar() {
 
       {/* The things you keep, before the things you accumulate. */}
       <div className="space-y-px px-2 pt-1">
+        {/* First: it is the only rail destination that can be holding a
+            stopped agent. */}
+        <PrimaryLink
+          to="/inbox"
+          testId="inbox-link"
+          icon={<Inbox size={15} aria-hidden />}
+          label={t("nav.inbox")}
+          badge={<InboxBadge />}
+        />
         <PrimaryLink
           to="/agents"
           testId="agents-link"

@@ -159,6 +159,10 @@ pub struct ProjectServices {
     /// writes rows it derived from its own state, and the control plane reads
     /// them straight back.
     pub agent_runs: Arc<crate::agent_runs::AgentRunStore>,
+    /// The person's inbox for this project: what its agents have said to them,
+    /// and what they are parked on waiting to hear back. A store rather than a
+    /// service, like `agent_runs` beside it and for the same reason.
+    pub user_inbox: Arc<crate::user_inbox::UserInboxStore>,
     /// Version history and compare-and-set for presets and memories.
     ///
     /// `entity_revisions`, not `revisions`: the field of that name beside it is
@@ -262,6 +266,10 @@ async fn build_project(
         project.clone(),
     ));
     let agent_runs = Arc::new(crate::agent_runs::AgentRunStore::new(
+        shared.db.clone(),
+        project.clone(),
+    ));
+    let user_inbox = Arc::new(crate::user_inbox::UserInboxStore::new(
         shared.db.clone(),
         project.clone(),
     ));
@@ -385,6 +393,7 @@ async fn build_project(
         memory,
         agents,
         agent_runs,
+        user_inbox,
         entity_revisions,
         routines,
         routine_runner,

@@ -3,7 +3,7 @@ title: Environments
 description: Save a runtime, its repositories, variables and setup steps under a name you can pick from anywhere.
 kind: how-to
 sidebar:
-  order: 2
+  order: 3
 ---
 
 An **environment** answers one question about a piece of work: *where does this

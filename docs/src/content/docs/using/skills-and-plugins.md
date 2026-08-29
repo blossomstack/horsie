@@ -3,7 +3,7 @@ title: Skills & plugins
 description: Install skill and plugin bundles from git, select them per session, and know what horsie runs from them.
 kind: how-to
 sidebar:
-  order: 5
+  order: 6
 ---
 
 A **bundle** packages skills, agents, slash commands, hooks and MCP servers

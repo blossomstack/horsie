@@ -1114,4 +1114,181 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, UserMessageError::NotFound), "{err:?}");
     }
+
+    /// Say something to the session's main agent.
+    async fn send(session: &SessionRef, text: &str) {
+        session
+            .ask(|reply| {
+                SessionCommand::Turn(TurnCommand::UserMessage {
+                    agent_id: None,
+                    text: text.into(),
+                    reply,
+                })
+            })
+            .await
+            .unwrap()
+            .expect("the session takes messages");
+    }
+
+    /// Poll the project's inbox until `pred` holds, then answer with the page.
+    ///
+    /// Polled because every inbox write is spawned off the session's mailbox:
+    /// the row lands shortly after the state it describes, never with it.
+    /// Reading once passes on an idle machine and fails under load, which is
+    /// the worst of both.
+    async fn wait_for_inbox(
+        f: &ActorFixture,
+        why: &str,
+        pred: impl Fn(&crate::user_inbox::InboxPage) -> bool,
+    ) -> crate::user_inbox::InboxPage {
+        let inbox = f.node.services().await.user_inbox.clone();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let page = inbox
+                .list(&crate::user_inbox::InboxFilter::default())
+                .await
+                .unwrap();
+            if pred(&page) {
+                return page;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {why}; inbox held {:?}",
+                page.messages
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// The whole point of the feature: a question that stops an agent has to be
+    /// visible somewhere other than inside the session it stopped.
+    ///
+    /// It also pins the *address*. An inbox row names its agent the way a route
+    /// does — `main`, not the session's uuid — and a row carrying the uuid
+    /// would still list, still render, and open a page that does not exist.
+    #[tokio::test]
+    async fn a_parked_question_reaches_the_inbox_addressed_as_a_route_would_be() {
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        let provider = MockProvider::scripted(
+            Script::of([Ok(asks("which database?"))])
+                .then_repeating_with(|| Ok(concludes(serde_json::json!("done")))),
+        );
+        let (f, session, id, _journal) = spawn_session_with_provider(provider).await;
+        send(&session, "get on with it").await;
+
+        let page = wait_for_inbox(&f, "the question to reach the inbox", |p| {
+            !p.messages.is_empty()
+        })
+        .await;
+        let [message] = page.messages.as_slice() else {
+            panic!("one question, one message: {:?}", page.messages);
+        };
+        assert!(message.is_ask());
+        assert!(message.is_open(), "the agent is stopped on it");
+        assert_eq!(message.body, "which database?");
+        assert_eq!(message.session_id, id.to_string());
+        assert_eq!(
+            message.agent_id, MAIN_AGENT_ID,
+            "an inbox row is an address, and `?aid=` spells the main agent `main`"
+        );
+        assert_eq!(message.tool_call_id.as_deref(), Some(ASK_CALL_ID));
+        assert_eq!(page.open_asks, 1, "one agent has stopped");
+    }
+
+    /// A person who types a new message instead of answering. The agent is
+    /// resumed with a "not answered" result and gets on with it — so the inbox
+    /// must stop offering to answer a question that no longer holds anything.
+    ///
+    /// This is the one resolution path nothing else names: no answer command is
+    /// ever sent, so only the projection watching the agent leave
+    /// `AwaitingInput` can see it happen.
+    #[tokio::test]
+    async fn abandoning_a_question_settles_its_inbox_row() {
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        let provider = MockProvider::scripted(
+            Script::of([Ok(asks("which database?"))])
+                .then_repeating_with(|| Ok(concludes(serde_json::json!("done")))),
+        );
+        let (f, session, _id, _journal) = spawn_session_with_provider(provider).await;
+        send(&session, "get on with it").await;
+        wait_for_inbox(&f, "the question to reach the inbox", |p| p.open_asks == 1).await;
+
+        // Not an answer. A plain message abandons the park.
+        send(&session, "never mind, do something else").await;
+
+        // Waited on the row rather than on `open_asks`: a page's rows and its
+        // counts are three separate reads, so a snapshot taken across a write
+        // can hold a row this has not seen settle yet. The row is the fact; the
+        // counts are a badge that catches up.
+        let page = wait_for_inbox(&f, "the abandoned question to settle", |p| {
+            p.messages
+                .first()
+                .is_some_and(|m| m.state == horsie_models::inbox::InboxState::Closed)
+        })
+        .await;
+        assert_eq!(
+            page.messages.len(),
+            1,
+            "abandoning settles the question, it does not add another"
+        );
+    }
+
+    /// Answering — from the session page or anywhere else — must read as
+    /// *answered*, not merely as a row that stopped being open.
+    ///
+    /// The two writers race: the projection sees the agent resume and closes,
+    /// while the answer handler records what the answer was. This drives them
+    /// in the order that used to lose, with the close landing first.
+    #[tokio::test]
+    async fn answering_marks_the_row_answered_even_after_the_close_lands() {
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        let provider = MockProvider::scripted(
+            Script::of([Ok(asks("which database?"))])
+                .then_repeating_with(|| Ok(concludes(serde_json::json!("done")))),
+        );
+        let (f, session, id, _journal) = spawn_session_with_provider(provider).await;
+        send(&session, "get on with it").await;
+        wait_for_inbox(&f, "the question to reach the inbox", |p| p.open_asks == 1).await;
+
+        session
+            .ask(|reply| {
+                SessionCommand::Turn(TurnCommand::Answer {
+                    agent_id: None,
+                    answers: vec![answer(ASK_CALL_ID, "postgres")],
+                    reply,
+                })
+            })
+            .await
+            .unwrap()
+            .expect("the parked question is answerable");
+
+        // The projection's close is what the answer has to survive, so wait it
+        // out before recording the answer — the ordering the HTTP layer cannot
+        // control, and the one that used to leave the row reading "closed".
+        wait_for_inbox(&f, "the projection to close the row", |p| {
+            p.messages.first().is_some_and(|m| !m.is_open())
+        })
+        .await;
+        let inbox = f.node.services().await.user_inbox.clone();
+        inbox
+            .settle_agent_asks(
+                &id.to_string(),
+                MAIN_AGENT_ID,
+                &[ASK_CALL_ID.to_string()],
+                horsie_models::inbox::InboxState::Answered,
+                crate::user_inbox::now_ms_i64(),
+            )
+            .await
+            .unwrap();
+
+        let page = inbox
+            .list(&crate::user_inbox::InboxFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            page.messages[0].state,
+            horsie_models::inbox::InboxState::Answered,
+            "a question answered in the session page must not read as merely closed"
+        );
+    }
 }

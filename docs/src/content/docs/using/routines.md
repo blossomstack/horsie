@@ -3,7 +3,7 @@ title: Routines
 description: Run an agent against a fixed prompt on a schedule, from the API, or on demand.
 kind: how-to
 sidebar:
-  order: 6
+  order: 7
 ---
 
 A **routine** runs an agent against a fixed prompt — on a timer, from the API,
@@ -80,7 +80,11 @@ A routine run **cannot ask you a question.** The `ask_user` tool is not offered
 to it at all, and the agent is told why — a question with nobody to answer it
 would park the run forever.
 
-So brief it the way you would brief someone who cannot reach you:
+It can still tell you something. `notify_user` is offered to a routine run like
+any other agent: a run that finds something worth saying leaves it in your
+[inbox](/using/inbox/) and carries on working.
+
+So brief it the way you would brief someone who cannot stop and wait for you:
 
 - Say what "done" looks like, and what to produce.
 - Name the choice you want made when the obvious one is ambiguous: *if more
