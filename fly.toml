@@ -7,7 +7,7 @@ primary_region = 'iad'
 
 [build]
   # Pinned to a release, not `latest` — see the note in render.yaml.
-  image = 'ghcr.io/blossomstack/horsie:0.4.0'
+  image = 'ghcr.io/blossomstack/horsie:0.5.0'
 
 [http_service]
   internal_port = 3789
