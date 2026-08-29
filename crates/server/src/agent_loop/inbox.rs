@@ -214,6 +214,7 @@ pub fn queued_turn(inbox: &[Incoming], asks: &[crate::agent_loop::AskedQuestion]
             tool_call_id,
             output: ABANDONED_ASK_RESULT.to_string(),
             is_error: true,
+            artifacts: Vec::new(),
         })
         .collect();
     Some(turn)
@@ -260,6 +261,9 @@ pub fn answered_turn(
             tool_call_id: a.tool_call_id,
             output: a.text,
             is_error: false,
+            // An answer the person typed; a form that accepts a file is a
+            // separate feature.
+            artifacts: Vec::new(),
         })
         .collect();
     Ok(turn)

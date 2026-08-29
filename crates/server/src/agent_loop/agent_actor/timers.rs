@@ -105,7 +105,7 @@ impl Toolbox for TimerToolbox {
                     })
                     .await
                     .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?;
-                Ok(ToolOutcome::Result(serde_json::json!({ "timer_id": id.0 })))
+                Ok(ToolOutcome::result(serde_json::json!({ "timer_id": id.0 })))
             }
             "list_timers" => {
                 let views = self
@@ -114,7 +114,7 @@ impl Toolbox for TimerToolbox {
                     .await
                     .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?;
                 serde_json::to_value(views)
-                    .map(ToolOutcome::Result)
+                    .map(ToolOutcome::from)
                     .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))
             }
             "cancel_timer" => {
@@ -133,7 +133,7 @@ impl Toolbox for TimerToolbox {
                     .await
                     .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?;
                 let ids: Vec<String> = ids.into_iter().map(|i| i.0).collect();
-                Ok(ToolOutcome::Result(serde_json::json!({ "cancelled": ids })))
+                Ok(ToolOutcome::result(serde_json::json!({ "cancelled": ids })))
             }
             _ => self.inner.execute(name, input, tool_call_id).await,
         }

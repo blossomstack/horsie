@@ -27,6 +27,10 @@ struct ToolResultPart {
     tool_call_id: String,
     output: String,
     is_error: bool,
+    /// What the call produced that is not text — a screenshot, a generated
+    /// PDF. A field beside `output` rather than a separate part, because a
+    /// tool result is one thing that has both a transcript and artifacts.
+    artifacts: Vec<ArtifactRef>,
 }
 
 /// Extended thinking content
@@ -55,6 +59,63 @@ struct SubAgentResultPart {
     ended_at_ms: u64,
 }
 
+/// What shape an artifact is, and the facts that only that shape has.
+///
+/// A field on the reference rather than a split of it: kind and "has this been
+/// stored yet" are independent axes, and nesting them multiplies arms for
+/// nothing. Adding audio or video later is one new variant here, and because
+/// every provider matches this exhaustively, each of them fails to compile
+/// until someone says what it does with the new kind.
+#[type_tag = "kind"]
+union ArtifactKind {
+    Image(ImageArtifact),
+    Document(DocumentArtifact),
+}
+
+/// Pixel dimensions, read from the file header rather than by decoding.
+///
+/// Absent when the header would not parse. They are a layout hint — a client
+/// reserves space so the transcript does not jump when a thumbnail loads — so a
+/// missing value costs a small shift, where a guessed one would render the
+/// image wrong.
+struct ImageArtifact {
+    width: Option<u32>,
+    height: Option<u32>,
+}
+
+/// A PDF. Carries no page count: that would need a real PDF parser, and a
+/// document renders as a file chip rather than a thumbnail.
+struct DocumentArtifact {}
+
+/// An image or document a message carries, named rather than embedded.
+///
+/// This is the *only* artifact shape a message ever holds — in the journal, in
+/// agent state, over SSE and over the HTTP API alike. The bytes live in the
+/// artifact service and are fetched by `id`.
+///
+/// Why never the bytes: `AgentState.log` is the whole transcript and is
+/// snapshotted as one blob, so an inlined image would be rewritten into every
+/// later snapshot of that agent and re-sent on every backfill. Because this
+/// type cannot carry bytes, that is not a rule anyone has to remember.
+struct ArtifactRef {
+    /// Lowercase-hex sha256 of the bytes. Content-addressed, so the same image
+    /// sent twice is stored once and a fetch URL is safe to cache for ever.
+    id: String,
+    /// The type the server sniffed from the bytes. Never the caller's claim:
+    /// a browser's `Content-Type` and an MCP block's `mimeType` are both only
+    /// assertions about content the server has in hand.
+    media_type: String,
+    kind: ArtifactKind,
+    byte_size: u64,
+    /// What the client called it. Absent for a paste, which has no filename.
+    filename: Option<String>,
+}
+
+/// An artifact in a message.
+struct ArtifactPart {
+    artifact: ArtifactRef,
+}
+
 /// Content variant within a message
 #[type_tag = "type"]
 union ContentPart {
@@ -63,6 +124,7 @@ union ContentPart {
     ToolResult(ToolResultPart),
     Thinking(ThinkingPart),
     SubAgentResult(SubAgentResultPart),
+    Artifact(ArtifactPart),
 }
 
 /// A single message in the conversation
@@ -398,6 +460,7 @@ struct ToolResultInput {
     tool_call_id: String,
     output: String,
     is_error: bool,
+    artifacts: Vec<ArtifactRef>,
 }
 
 /// One or more tool results delivered together — every parked call of a turn is

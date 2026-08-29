@@ -150,7 +150,7 @@ impl Toolbox for ControlToolbox {
         operation
             .run(self.services.clone(), input)
             .await
-            .map(ToolOutcome::Result)
+            .map(ToolOutcome::from)
             .map_err(Into::into)
     }
 }

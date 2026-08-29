@@ -787,7 +787,8 @@ mod fence_tests {
                         ContentPart::Thinking(_)
                         | ContentPart::ToolCall(_)
                         | ContentPart::ToolResult(_)
-                        | ContentPart::SubAgentResult(_) => None,
+                        | ContentPart::SubAgentResult(_)
+                        | ContentPart::Artifact(_) => None,
                     })
                     .collect();
                 (!text.is_empty()).then_some(text)

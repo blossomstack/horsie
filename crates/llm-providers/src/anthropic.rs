@@ -444,6 +444,13 @@ impl AnthropicProvider {
                 }),
                 // Flattened to the text block it has always been: this part is
                 // provenance for clients, not a new thing to show the model.
+                // Until the artifact's bytes are hydrated into the request,
+                // and for any model without the capability, an artifact is
+                // announced rather than shown.
+                ContentPart::Artifact(a) => MessageContent::Text(Text {
+                    text: a.artifact.omitted_text(),
+                    ..Default::default()
+                }),
                 ContentPart::SubAgentResult(r) => MessageContent::Text(Text {
                     text: r.to_wire_text(),
                     ..Default::default()
@@ -982,6 +989,7 @@ mod tests {
                 tool_call_id: "tc1".into(),
                 output: "result".into(),
                 is_error: false,
+                artifacts: Vec::new(),
             },
         )];
         let list = AnthropicProvider::parts_to_api_content(&parts);

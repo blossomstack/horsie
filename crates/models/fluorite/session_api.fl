@@ -7,6 +7,7 @@ use session.AnnotationEntry;
 use session.SessionSummary;
 use session.SessionDetail;
 use agent.TaskItem;
+use agent.ArtifactRef;
 use session.UsageView;
 use session.SubAgentView;
 use agent.Usage;
@@ -147,7 +148,17 @@ struct GetAgentResponse { agent: AgentDocument }
 struct CreateSessionResponse { session: SessionSummary }
 struct ListSessionsResponse { sessions: Vec<SessionSummary> }
 struct GetSessionResponse { session: SessionDetail }
-struct SendMessageRequest { text: String }
+/// A message the user is sending, and what they attached to it.
+///
+/// `artifacts` are ids the client already uploaded — the bytes went up
+/// separately, so sending stays a small JSON request and the composer can
+/// show a thumbnail while the turn is still being typed. The server
+/// re-resolves every id against this project before accepting, so a client
+/// cannot name another project's bytes.
+struct SendMessageRequest {
+    text: String,
+    artifacts: Vec<ArtifactRef>,
+}
 /// Acknowledges an accepted user message. The id is how a client matches its
 /// optimistic bubble to the queued message the server now owes an answer for.
 ///

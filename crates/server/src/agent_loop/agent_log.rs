@@ -323,6 +323,13 @@ fn entry_text(entry: &AgentLogEntry) -> String {
                 ContentPart::ToolResult(p) => p.output.clone(),
                 ContentPart::SubAgentResult(p) => p.text.clone(),
                 ContentPart::ToolCall(p) => format!("{} {}", p.name, p.input),
+                // "which turn had that screenshot" is answered by the name the
+                // file was attached under, so search sees the filename. The
+                // media type follows it for a search like "pdf".
+                ContentPart::Artifact(p) => match &p.artifact.filename {
+                    Some(name) => format!("{name} {}", p.artifact.media_type),
+                    None => p.artifact.media_type.clone(),
+                },
             })
             .collect::<Vec<_>>()
             .join("\n"),
@@ -605,6 +612,7 @@ mod tests {
                         tool_call_id: format!("tc{seq}"),
                         output: "output".to_string(),
                         is_error: false,
+                        artifacts: Vec::new(),
                     })],
                 ));
                 seq += 1;

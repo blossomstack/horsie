@@ -1031,7 +1031,8 @@ mod tests {
                     horsie_agentcore::ContentPart::Text(t) => texts.push(t.text.clone()),
                     horsie_agentcore::ContentPart::ToolCall(_)
                     | horsie_agentcore::ContentPart::Thinking(_)
-                    | horsie_agentcore::ContentPart::SubAgentResult(_) => {}
+                    | horsie_agentcore::ContentPart::SubAgentResult(_)
+                    | horsie_agentcore::ContentPart::Artifact(_) => {}
                 }
             }
             (results, texts)

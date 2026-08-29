@@ -541,7 +541,7 @@ impl Toolbox for AgentToolbox {
                 let (_, shared) =
                     crate::agent_loop::workspace::scan(&self.runtime_client, None).await;
                 return match shared.skills.get(requested) {
-                    Some(skill) => Ok(ToolOutcome::Result(Value::String(skill_body(skill)))),
+                    Some(skill) => Ok(ToolOutcome::result(Value::String(skill_body(skill)))),
                     None => Err(ToolCallError::InvalidInput(format!(
                         "unknown shared skill '{requested}'; available: {}",
                         shared.skills.names().join(", ")
@@ -558,7 +558,7 @@ impl Toolbox for AgentToolbox {
                 )));
             };
             return match info.skills.get(requested) {
-                Some(skill) => Ok(ToolOutcome::Result(Value::String(skill_body(skill)))),
+                Some(skill) => Ok(ToolOutcome::result(Value::String(skill_body(skill)))),
                 None => Err(ToolCallError::InvalidInput(format!(
                     "unknown skill '{requested}' in workspace '{ws_name}'; available: {}",
                     info.skills.names().join(", ")
@@ -580,7 +580,7 @@ impl Toolbox for AgentToolbox {
                 }
                 let (_, shared) =
                     crate::agent_loop::workspace::scan(&self.runtime_client, None).await;
-                return Ok(ToolOutcome::Result(Value::String(
+                return Ok(ToolOutcome::result(Value::String(
                     crate::agent_loop::workspace::shared_inspect(
                         &shared.skills,
                         shared.root.as_deref(),
@@ -599,7 +599,7 @@ impl Toolbox for AgentToolbox {
                     shared.root.as_deref(),
                 ));
             }
-            return Ok(ToolOutcome::Result(Value::String(out)));
+            return Ok(ToolOutcome::result(Value::String(out)));
         }
         self.base.execute(name, input, tool_call_id).await
     }
@@ -711,7 +711,7 @@ mod tests {
     /// the run, which no test here calls.
     fn value(outcome: ToolOutcome) -> Value {
         match outcome {
-            ToolOutcome::Result(v) => v,
+            ToolOutcome::Result(v) => v.value,
             ToolOutcome::StopRun => panic!("expected a value, got a run-stopping call"),
         }
     }

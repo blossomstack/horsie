@@ -51,7 +51,9 @@ impl RequestSummary {
                     ContentPart::ToolCall(c) => tool_call_ids.push(c.id.clone()),
                     ContentPart::ToolResult(r) => tool_result_ids.push(r.tool_call_id.clone()),
                     ContentPart::Text(t) => texts.push(t.text.clone()),
-                    ContentPart::Thinking(_) | ContentPart::SubAgentResult(_) => {}
+                    ContentPart::Thinking(_)
+                    | ContentPart::SubAgentResult(_)
+                    | ContentPart::Artifact(_) => {}
                 }
             }
         }
@@ -223,7 +225,7 @@ impl MockToolbox {
         };
         Arc::new(Self {
             specs: vec![spec],
-            handler: Arc::new(|_, input| Ok(ToolOutcome::Result(input))),
+            handler: Arc::new(|_, input| Ok(ToolOutcome::result(input))),
         })
     }
 
@@ -243,7 +245,7 @@ impl MockToolbox {
                 if name == stops {
                     Ok(ToolOutcome::StopRun)
                 } else {
-                    Ok(ToolOutcome::Result(input))
+                    Ok(ToolOutcome::result(input))
                 }
             }),
         })
@@ -464,6 +466,7 @@ mod tests {
                     tool_call_id: "call-1".into(),
                     output: "done".into(),
                     is_error: false,
+                    artifacts: Vec::new(),
                 })],
             },
         ];

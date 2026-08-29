@@ -203,7 +203,7 @@ mod tests {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(tool_call_id.to_string());
-                Ok(ToolOutcome::Result(Value::Null))
+                Ok(ToolOutcome::result(Value::Null))
             }
         }
 

@@ -278,6 +278,7 @@ fn responses_input_items(messages: &[horsie_models::agent::Message]) -> Vec<serd
             match part {
                 ContentPart::Text(part) => text.push_str(&part.text),
                 ContentPart::SubAgentResult(part) => text.push_str(&part.to_wire_text()),
+                ContentPart::Artifact(a) => text.push_str(&a.artifact.omitted_text()),
                 ContentPart::Thinking(part) => {
                     if let Some(reasoning) = part.signature.as_deref().and_then(|signature| {
                         serde_json::from_str::<ResponsesReasoningRef>(signature).ok()

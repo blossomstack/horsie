@@ -197,7 +197,7 @@ impl Toolbox for PluginMcpToolbox {
         self.client
             .mcp_invoke(tool_call_id, name, input.to_string())
             .await
-            .map(|text| ToolOutcome::Result(Value::String(text)))
+            .map(|text| ToolOutcome::result(Value::String(text)))
             .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))
     }
 }
@@ -262,7 +262,7 @@ impl Toolbox for McpToolbox {
         })?;
         match self.client.call_tool(tool, input).await {
             Ok(outcome) if outcome.is_error => Err(ToolCallError::ExecutionFailed(outcome.text)),
-            Ok(outcome) => Ok(ToolOutcome::Result(Value::String(outcome.text))),
+            Ok(outcome) => Ok(ToolOutcome::result(Value::String(outcome.text))),
             Err(e) => Err(ToolCallError::ExecutionFailed(e.to_string())),
         }
     }
@@ -350,7 +350,7 @@ mod tests {
             _input: Value,
             _tool_call_id: &str,
         ) -> Result<ToolOutcome, ToolCallError> {
-            Ok(ToolOutcome::Result(Value::String(format!("ran {name}"))))
+            Ok(ToolOutcome::result(Value::String(format!("ran {name}"))))
         }
     }
 
@@ -394,7 +394,7 @@ mod tests {
         assert_eq!(names, vec!["alpha", "beta"]);
         assert_eq!(
             tb.execute("beta", json!({}), "tc1").await.unwrap(),
-            ToolOutcome::Result(json!("ran beta"))
+            ToolOutcome::result(json!("ran beta"))
         );
         assert!(matches!(
             tb.execute("gamma", json!({}), "tc1").await,
@@ -476,7 +476,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(out, ToolOutcome::Result(json!("PR #7 opened")));
+        assert_eq!(out, ToolOutcome::result(json!("PR #7 opened")));
 
         // A name outside this server's namespace is rejected without a call.
         assert!(matches!(
@@ -537,7 +537,7 @@ mod tests {
             tb.execute("mcp__github__open_pr", json!({}), "tc1")
                 .await
                 .unwrap(),
-            ToolOutcome::Result(json!("from the admin server"))
+            ToolOutcome::result(json!("from the admin server"))
         );
     }
 

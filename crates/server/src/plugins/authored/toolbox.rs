@@ -296,12 +296,12 @@ impl Toolbox for AuthoringToolbox {
         tool_call_id: &str,
     ) -> Result<ToolOutcome, ToolCallError> {
         match name {
-            PLUGIN_WRITE => self.write_plugin(input).await.map(ToolOutcome::Result),
-            SKILL_WRITE => self.write_skill(input).await.map(ToolOutcome::Result),
-            SKILL_DELETE => self.delete_skill(input).await.map(ToolOutcome::Result),
-            SKILL_LIST => self.list_skills(input).await.map(ToolOutcome::Result),
-            SKILL_HISTORY => self.history(input).await.map(ToolOutcome::Result),
-            SKILL_RESTORE => self.restore(input).await.map(ToolOutcome::Result),
+            PLUGIN_WRITE => self.write_plugin(input).await.map(ToolOutcome::from),
+            SKILL_WRITE => self.write_skill(input).await.map(ToolOutcome::from),
+            SKILL_DELETE => self.delete_skill(input).await.map(ToolOutcome::from),
+            SKILL_LIST => self.list_skills(input).await.map(ToolOutcome::from),
+            SKILL_HISTORY => self.history(input).await.map(ToolOutcome::from),
+            SKILL_RESTORE => self.restore(input).await.map(ToolOutcome::from),
             _ => self.inner.execute(name, input, tool_call_id).await,
         }
     }

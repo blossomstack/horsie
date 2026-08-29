@@ -836,7 +836,7 @@ mod retry_tests {
                 description: "echo".into(),
                 input_schema: serde_json::json!({ "type": "object" }),
             }],
-            Arc::new(|_, input| Ok(ToolOutcome::Result(input))),
+            Arc::new(|_, input| Ok(ToolOutcome::result(input))),
         )
     }
 

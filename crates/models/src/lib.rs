@@ -387,6 +387,7 @@ impl agent::Message {
                 tool_call_id,
                 output: output.into(),
                 is_error,
+                artifacts: Vec::new(),
             })],
             created_at_ms,
             started_at_ms: None,
@@ -407,6 +408,31 @@ impl agent::SubAgentResultPart {
             header
         } else {
             format!("{header}\n\n{}", self.text)
+        }
+    }
+}
+
+impl agent::ArtifactRef {
+    /// What a provider is told when it cannot be shown this artifact.
+    ///
+    /// Reached when the session's model has no vision capability. Saying so in
+    /// the transcript is what keeps the conversation coherent: a model that
+    /// simply never sees the image answers a question about nothing, where one
+    /// told an image was withheld can say it cannot see it.
+    ///
+    /// One definition rather than three, so the three provider serializers
+    /// cannot drift apart on the wording.
+    #[must_use]
+    pub fn omitted_text(&self) -> String {
+        let what = match self.kind {
+            agent::ArtifactKind::Image(_) => "image",
+            agent::ArtifactKind::Document(_) => "document",
+        };
+        match &self.filename {
+            Some(name) => {
+                format!("[{what} \"{name}\" omitted — this model cannot read it]")
+            }
+            None => format!("[{what} omitted — this model cannot read it]"),
         }
     }
 }
@@ -443,6 +469,7 @@ impl agent::AgentInput {
             tool_call_id: tool_call_id.into(),
             output: output.into(),
             is_error,
+            artifacts: Vec::new(),
         })
     }
 
@@ -501,6 +528,7 @@ impl agent::AgentInput {
                     tool_call_id: t.tool_call_id.clone(),
                     output: t.output.clone(),
                     is_error: t.is_error,
+                    artifacts: t.artifacts.clone(),
                 })],
                 created_at_ms,
                 started_at_ms: None,
@@ -519,6 +547,7 @@ impl agent::AgentInput {
                             tool_call_id: r.tool_call_id.clone(),
                             output: r.output.clone(),
                             is_error: r.is_error,
+                            artifacts: r.artifacts.clone(),
                         })
                     })
                     .collect(),

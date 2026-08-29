@@ -1,6 +1,7 @@
 pub mod agent_loop;
 pub mod agent_runs;
 pub mod agents;
+pub mod artifacts;
 pub mod auth;
 pub mod boot;
 pub mod bus;

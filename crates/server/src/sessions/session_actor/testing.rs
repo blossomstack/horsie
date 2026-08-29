@@ -980,7 +980,8 @@ pub(super) fn user_texts(page: &crate::agent_loop::LogPage) -> Vec<String> {
             horsie_agentcore::ContentPart::ToolCall(_)
             | horsie_agentcore::ContentPart::ToolResult(_)
             | horsie_agentcore::ContentPart::Thinking(_)
-            | horsie_agentcore::ContentPart::SubAgentResult(_) => None,
+            | horsie_agentcore::ContentPart::SubAgentResult(_)
+            | horsie_agentcore::ContentPart::Artifact(_) => None,
         })
         .collect()
 }
@@ -1020,7 +1021,8 @@ pub(super) fn subagent_texts(page: &crate::agent_loop::LogPage) -> Vec<String> {
             horsie_agentcore::ContentPart::Text(_)
             | horsie_agentcore::ContentPart::ToolCall(_)
             | horsie_agentcore::ContentPart::ToolResult(_)
-            | horsie_agentcore::ContentPart::Thinking(_) => None,
+            | horsie_agentcore::ContentPart::Thinking(_)
+            | horsie_agentcore::ContentPart::Artifact(_) => None,
         })
         .collect()
 }

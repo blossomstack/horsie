@@ -186,7 +186,8 @@ fn extract_tool_calls(parts: &[ContentPart]) -> Vec<(String, String, Value)> {
             ContentPart::Text(_)
             | ContentPart::ToolResult(_)
             | ContentPart::Thinking(_)
-            | ContentPart::SubAgentResult(_) => None,
+            | ContentPart::SubAgentResult(_)
+            | ContentPart::Artifact(_) => None,
         })
         .collect()
 }
@@ -199,7 +200,8 @@ fn extract_text(parts: &[ContentPart]) -> String {
             ContentPart::ToolCall(_)
             | ContentPart::ToolResult(_)
             | ContentPart::Thinking(_)
-            | ContentPart::SubAgentResult(_) => None,
+            | ContentPart::SubAgentResult(_)
+            | ContentPart::Artifact(_) => None,
         })
         .collect::<Vec<_>>()
         .join("")
@@ -492,6 +494,8 @@ impl Agent {
                             tool_call_id: tool_call_id.clone(),
                             output: "You have called this tool with identical arguments multiple times. Please try a different approach.".to_string(),
                             is_error: false,
+                            // A nudge is the server talking, not the tool.
+                            artifacts: Vec::new(),
                         })],
                         created_at_ms: now_ms(),
                         started_at_ms: None,
@@ -566,27 +570,30 @@ impl Agent {
                 }))
                 .await?;
 
-            let (output, is_error) = match toolbox.execute(name, input.clone(), tool_call_id).await
-            {
-                // A string result is forwarded verbatim; re-encoding it as JSON
-                // would wrap it in quotes and escape every newline, wasting
-                // tokens and hurting readability. Non-string values are rendered
-                // as compact JSON.
-                Ok(ToolOutcome::Result(v)) => (
-                    v.as_str()
-                        .map(str::to_string)
-                        .unwrap_or_else(|| v.to_string()),
-                    false,
-                ),
-                Ok(ToolOutcome::StopRun) => {
-                    return Ok(Dispatched::Stopped(StoppedCall {
-                        tool: name.clone(),
-                        tool_call_id: tool_call_id.clone(),
-                        input: input.clone(),
-                    }));
-                }
-                Err(e) => (e.to_string(), true),
-            };
+            let (output, is_error, artifacts) =
+                match toolbox.execute(name, input.clone(), tool_call_id).await {
+                    // A string result is forwarded verbatim; re-encoding it as
+                    // JSON would wrap it in quotes and escape every newline,
+                    // wasting tokens and hurting readability. Non-string values
+                    // are rendered as compact JSON.
+                    Ok(ToolOutcome::Result(v)) => (
+                        v.value
+                            .as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| v.value.to_string()),
+                        false,
+                        v.artifacts,
+                    ),
+                    Ok(ToolOutcome::StopRun) => {
+                        return Ok(Dispatched::Stopped(StoppedCall {
+                            tool: name.clone(),
+                            tool_call_id: tool_call_id.clone(),
+                            input: input.clone(),
+                        }));
+                    }
+                    // An error produced no artifacts by definition.
+                    Err(e) => (e.to_string(), true, Vec::new()),
+                };
 
             // One reading of the clock for both the event and the message it
             // becomes, so the journal and the in-memory history agree.
@@ -608,6 +615,7 @@ impl Agent {
                     tool_call_id: tool_call_id.clone(),
                     output,
                     is_error,
+                    artifacts,
                 })],
                 created_at_ms: finished_ms,
                 started_at_ms: None,
@@ -1195,7 +1203,7 @@ mod tests {
                 if name == stopper {
                     Ok(ToolOutcome::StopRun)
                 } else {
-                    Ok(ToolOutcome::Result(json!("done")))
+                    Ok(ToolOutcome::result(json!("done")))
                 }
             }),
         )
@@ -1871,7 +1879,7 @@ mod tests {
                 input_schema: json!({ "type": "object" }),
             }],
             Arc::new(|_, _| {
-                Ok(ToolOutcome::Result(Value::String(
+                Ok(ToolOutcome::result(Value::String(
                     "line1\nline2".to_string(),
                 )))
             }),
@@ -1933,7 +1941,7 @@ mod tests {
                 self.timed_out
                     .store(true, std::sync::atomic::Ordering::SeqCst);
             }
-            Ok(ToolOutcome::Result(input))
+            Ok(ToolOutcome::result(input))
         }
     }
 

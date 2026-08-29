@@ -138,7 +138,7 @@ impl Toolbox for FixedToolbox {
         if self.stopper.as_deref() == Some(name) {
             return Ok(ToolOutcome::StopRun);
         }
-        Ok(ToolOutcome::Result(self.output.clone()))
+        Ok(ToolOutcome::result(self.output.clone()))
     }
 }
 

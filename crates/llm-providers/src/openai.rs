@@ -147,6 +147,7 @@ impl OpenAiProvider {
                     }
                     ContentPart::Thinking(_) => {}
                     ContentPart::SubAgentResult(result) => text.push_str(&result.to_wire_text()),
+                    ContentPart::Artifact(a) => text.push_str(&a.artifact.omitted_text()),
                 }
             }
             if text.is_empty() && tool_calls.is_empty() {
@@ -467,6 +468,7 @@ mod tests {
                     tool_call_id: "call-1".into(),
                     output: "42".into(),
                     is_error: false,
+                    artifacts: Vec::new(),
                 })],
             },
         ];

@@ -59,7 +59,8 @@ pub(super) fn missing_tool_results(messages: &[Message], parked_on: &[String]) -
             ContentPart::Text(_)
             | ContentPart::ToolCall(_)
             | ContentPart::Thinking(_)
-            | ContentPart::SubAgentResult(_) => None,
+            | ContentPart::SubAgentResult(_)
+            | ContentPart::Artifact(_) => None,
         })
         .collect();
     let dangling: Vec<String> = messages
@@ -76,7 +77,8 @@ pub(super) fn missing_tool_results(messages: &[Message], parked_on: &[String]) -
             | ContentPart::Text(_)
             | ContentPart::ToolResult(_)
             | ContentPart::Thinking(_)
-            | ContentPart::SubAgentResult(_) => None,
+            | ContentPart::SubAgentResult(_)
+            | ContentPart::Artifact(_) => None,
         })
         .collect();
     if dangling.is_empty() {
@@ -134,7 +136,8 @@ pub(super) fn repair_dangling(
             ContentPart::Text(_)
             | ContentPart::ToolCall(_)
             | ContentPart::Thinking(_)
-            | ContentPart::SubAgentResult(_) => None,
+            | ContentPart::SubAgentResult(_)
+            | ContentPart::Artifact(_) => None,
         })
         .collect();
     answered.extend(answering.iter().cloned());
@@ -155,7 +158,8 @@ pub(super) fn repair_dangling(
                 | ContentPart::Text(_)
                 | ContentPart::ToolResult(_)
                 | ContentPart::Thinking(_)
-                | ContentPart::SubAgentResult(_) => None,
+                | ContentPart::SubAgentResult(_)
+            | ContentPart::Artifact(_) => None,
             })
             .collect();
         if dangling.is_empty() {

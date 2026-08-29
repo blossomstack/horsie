@@ -99,7 +99,7 @@ async fn scan_composes_prompt_and_exposes_skill_tool() {
         .unwrap();
     assert_eq!(
         body,
-        horsie_agentcore::ToolOutcome::Result(serde_json::json!(
+        horsie_agentcore::ToolOutcome::result(serde_json::json!(
             "Run git bisect.\n\n[resources] This skill's files are in \
              /ws/october/.claude/skills/git-bisect/. Read one with \
              read_file(path=\"/ws/october/.claude/skills/git-bisect/<file>\")."
