@@ -58,6 +58,11 @@ export function NewSessionView() {
     navigate(`/sessions/${res.session.id}`, { state: { fresh: true } });
   };
 
+  // `artifacts` is taken and dropped on purpose. Attachments are turned off
+  // on this page — see the `canAttach*` props below — because a session is
+  // created *with* its first message and `CreateSessionRequest` has no field
+  // to carry them in. Accepting the parameter and ignoring it keeps this one
+  // signature with the session page's.
   const handleSend = async (text: string) => {
     setError(null);
     try {
@@ -143,6 +148,8 @@ export function NewSessionView() {
           busy={create.isPending || invoke.isPending || run.isPending}
           blockedReason={draft.blockedReason}
           entries={entries}
+          canAttachImages={false}
+          canAttachDocuments={false}
           idlePlaceholder={
             draft.workflow
               ? "What this run is about — the first step is handed it."

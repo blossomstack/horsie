@@ -200,6 +200,13 @@ const en = {
       "This session is about {{used}} tokens and a compaction keeps the most recent {{retain}} verbatim \u2014 so there is nothing before that to fold. Compacting anyway would trade real messages for a summary to buy room that is not scarce.",
   },
 
+  artifact: {
+    untitled: "Untitled file",
+    openFull: "Open at full size",
+    download: "Download",
+    close: "Close",
+  },
+
   composer: {
     ariaLabel: "Message the agent",
     idlePlaceholder: "Message the agent\u2026",
@@ -209,6 +216,15 @@ const en = {
     stopTitle: "Stop this turn \u2014 queued messages are kept",
     send: "Send message",
     sendTitle: "Send \u2014 Enter sends, Shift+Enter starts a new line",
+    attach: "Attach a file",
+    attachTitle: "Attach an image or a PDF",
+    attachUnavailable: "Attachments are not available here.",
+    attachRefused: "Only PNG, JPEG, GIF, WebP and PDF files can be attached.",
+    attachPending: "Wait for the attachments to finish uploading",
+    uploading: "Uploading",
+    uploadFailed: "Upload failed",
+    removeAttachment: "Remove this attachment",
+    pastedName: "Pasted file",
   },
 
   turnActions: {
@@ -316,6 +332,7 @@ const en = {
     returnedNothing: "Returned nothing",
     pluginHooks: "Plugin hooks",
     blockedBy: "Blocked by {{plugin}}",
+    artifacts: "Files",
   },
 
   transcript: {

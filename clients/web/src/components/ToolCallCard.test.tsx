@@ -1,12 +1,16 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
-import type { HookRecord } from "../api/types";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { setCurrentProject } from "../api/client";
+import type { ArtifactRef, HookRecord } from "../api/types";
 import type { RenderedToolCall } from "../hooks/useSessionStream";
 import { ToolCallCard } from "./ToolCallCard";
 
 // vitest runs without `globals`, so testing-library's auto-cleanup never
 // fires; without this the second render's queries see the first test's DOM.
 afterEach(cleanup);
+
+// `api.artifactUrl` is project-scoped and throws without one.
+beforeAll(() => setCurrentProject("proj"));
 
 const CALL = { tool: "bash", toolCallId: "tc1" };
 
@@ -36,6 +40,7 @@ function call(overrides: Partial<RenderedToolCall> = {}): RenderedToolCall {
     input: { command: "rm -rf /" },
     running: false,
     hooks: [],
+    artifacts: [],
     ...overrides,
   };
 }
@@ -183,5 +188,35 @@ describe("ToolCallCard hook records", () => {
     expect(screen.getByTestId("tool-call-hook").textContent).toContain(
       "this repo pins node 22",
     );
+  });
+});
+
+const screenshot: ArtifactRef = {
+  id: "sha-9",
+  mediaType: "image/png",
+  byteSize: 4_096,
+  kind: { kind: "Image", value: { width: 120, height: 80 } },
+  filename: "page.png",
+};
+
+describe("ToolCallCard result artifacts", () => {
+  it("shows what the result carried besides text", () => {
+    render(
+      <ToolCallCard call={call({ output: "ok", artifacts: [screenshot] })} />,
+    );
+    // Inside the expanded body, where the raw result is: the artifacts are
+    // part of the result, not a second thing beside the row.
+    expect(screen.queryByTestId("tool-call-artifacts")).toBeNull();
+    fireEvent.click(screen.getByTestId("tool-call-toggle"));
+    expect(screen.getByTestId("tool-call-artifacts")).toBeTruthy();
+    expect(screen.getByAltText("page.png")).toBeTruthy();
+  });
+
+  // A screenshot tool answers with a picture and an empty string. Saying
+  // "returned nothing" under a visible image is simply wrong.
+  it("does not call a result empty when it carried a picture", () => {
+    render(<ToolCallCard call={call({ output: "", artifacts: [screenshot] })} />);
+    fireEvent.click(screen.getByTestId("tool-call-toggle"));
+    expect(screen.queryByText(/Returned nothing/)).toBeNull();
   });
 });

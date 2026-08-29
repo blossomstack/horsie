@@ -221,10 +221,10 @@ mod tests {
         for bytes in [
             &b"not a file at all"[..],
             &b""[..],
-            &b"\xFF\xD8"[..],                 // truncated JPEG signature
-            &b"RIFF\0\0\0\0WAVE"[..],         // a RIFF that is not a WebP
-            &b"<!DOCTYPE html><html>"[..],    // HTML, a plausible upload mistake
-            &b"MZ\x90\x00"[..],               // a Windows executable
+            &b"\xFF\xD8"[..],              // truncated JPEG signature
+            &b"RIFF\0\0\0\0WAVE"[..],      // a RIFF that is not a WebP
+            &b"<!DOCTYPE html><html>"[..], // HTML, a plausible upload mistake
+            &b"MZ\x90\x00"[..],            // a Windows executable
         ] {
             assert_eq!(sniff(bytes), None, "should refuse: {bytes:?}");
         }
@@ -288,7 +288,10 @@ mod tests {
         assert_eq!(dimensions(Sniffed::Gif, b"GIF89a"), None);
         assert_eq!(dimensions(Sniffed::Webp, b"RIFF\0\0\0\0WEBP"), None);
         // A JPEG whose segment chain runs off the end rather than reaching SOF.
-        assert_eq!(dimensions(Sniffed::Jpeg, &[0xFF, 0xD8, 0xFF, 0xE0, 0xFF, 0xFF]), None);
+        assert_eq!(
+            dimensions(Sniffed::Jpeg, &[0xFF, 0xD8, 0xFF, 0xE0, 0xFF, 0xFF]),
+            None
+        );
     }
 
     #[test]

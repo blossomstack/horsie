@@ -4,18 +4,18 @@ use crate::{BACKOFF_BASE_SECS, DEFAULT_READ_TIMEOUT_SECS, MAX_STREAM_RETRIES};
 use async_llm::{
     Client,
     types::{
-        CacheControl, ContentBlockDelta, CreateMessagesRequestBuilder, MessageBuilder,
-        MessageContent, MessageRole, MessagesStreamEvent, OutputConfig, Text, Thinking,
-        ThinkingConfig, ToolResult, ToolUse,
+        CacheControl, ContentBlockDelta, CreateMessagesRequestBuilder, Document, Image,
+        MessageBuilder, MessageContent, MessageRole, MessagesStreamEvent, OutputConfig, Text,
+        Thinking, ThinkingConfig, ToolResult, ToolResultBlock, ToolResultContent, ToolUse,
     },
 };
 use async_trait::async_trait;
 use horsie_agentcore::{
-    AgentEvent, CompletionRequest, CompletionResponse, ContentBlockStopEvent, ContentPart,
-    EventSink, LlmError, LlmProvider, Secret, StopReason, TextBlockStartEvent, TextChunkEvent,
-    TextPart, ThinkingBlockStartEvent, ThinkingChunkEvent, ThinkingDialect, ThinkingEffort,
-    ThinkingPart, ThinkingSignatureChunkEvent, ToolCallInputDeltaEvent, ToolCallPart,
-    ToolCallStartEvent, ToolChoice, Usage,
+    AgentEvent, ArtifactBytes, CompletionRequest, CompletionResponse, ContentBlockStopEvent,
+    ContentPart, EventSink, LlmError, LlmProvider, Secret, StopReason, TextBlockStartEvent,
+    TextChunkEvent, TextPart, ThinkingBlockStartEvent, ThinkingChunkEvent, ThinkingDialect,
+    ThinkingEffort, ThinkingPart, ThinkingSignatureChunkEvent, ToolCallInputDeltaEvent,
+    ToolCallPart, ToolCallStartEvent, ToolChoice, Usage,
 };
 use std::{collections::HashMap, env, time::Duration};
 use tokio_stream::StreamExt;
@@ -416,7 +416,68 @@ impl AnthropicProvider {
         }))
     }
 
-    fn parts_to_api_content(parts: &[ContentPart]) -> async_llm::types::MessageContentList {
+    /// A tool result's content: its text, plus any artifact it produced.
+    ///
+    /// Stays a bare string when there is nothing but text, which is what every
+    /// result before this feature was and what the API expects by default.
+    fn tool_result_content(
+        tr: &horsie_models::agent::ToolResultPart,
+        artifacts: &ArtifactBytes,
+    ) -> ToolResultContent {
+        let images: Vec<ToolResultBlock> = tr
+            .artifacts
+            .iter()
+            .filter_map(|a| {
+                artifacts
+                    .get(&a.id)
+                    .map(|data| ToolResultBlock::Image(Image::base64(&a.media_type, data)))
+            })
+            .collect();
+        if images.is_empty() {
+            return ToolResultContent::Text(tr.output.clone());
+        }
+        let mut blocks = vec![ToolResultBlock::Text(Text {
+            text: tr.output.clone(),
+            ..Default::default()
+        })];
+        blocks.extend(images);
+        ToolResultContent::Blocks(blocks)
+    }
+
+    /// One artifact as the block Anthropic expects, or an announcement that it
+    /// was withheld.
+    ///
+    /// The `None` arm is not an error path: it is how a model with no vision
+    /// capability is served, since the hydrator returns nothing for one. The
+    /// model is told an artifact exists and that it cannot see it, which keeps
+    /// the exchange coherent — a model shown nothing at all would answer a
+    /// question about an image it was never told about.
+    fn artifact_block(
+        artifact: &horsie_models::agent::ArtifactRef,
+        artifacts: &ArtifactBytes,
+    ) -> MessageContent {
+        let Some(data) = artifacts.get(&artifact.id) else {
+            return MessageContent::Text(Text {
+                text: artifact.omitted_text(),
+                ..Default::default()
+            });
+        };
+        match artifact.kind {
+            horsie_models::agent::ArtifactKind::Image(_) => {
+                MessageContent::Image(Image::base64(&artifact.media_type, data))
+            }
+            horsie_models::agent::ArtifactKind::Document(_) => {
+                let mut doc = Document::base64(&artifact.media_type, data);
+                doc.title.clone_from(&artifact.filename);
+                MessageContent::Document(doc)
+            }
+        }
+    }
+
+    fn parts_to_api_content(
+        parts: &[ContentPart],
+        artifacts: &ArtifactBytes,
+    ) -> async_llm::types::MessageContentList {
         use async_llm::types::MessageContentList;
         let items: Vec<MessageContent> = parts
             .iter()
@@ -431,9 +492,12 @@ impl AnthropicProvider {
                     input: tc.input.clone(),
                     ..Default::default()
                 }),
+                // A tool's artifacts go *inside* its own result block, which
+                // Anthropic accepts and which is why a screenshot needs no
+                // synthetic follow-up message here.
                 ContentPart::ToolResult(tr) => MessageContent::ToolResult(ToolResult {
                     tool_use_id: tr.tool_call_id.clone(),
-                    content: Some(tr.output.clone()),
+                    content: Some(Self::tool_result_content(tr, artifacts)),
                     is_error: tr.is_error,
                     ..Default::default()
                 }),
@@ -444,13 +508,7 @@ impl AnthropicProvider {
                 }),
                 // Flattened to the text block it has always been: this part is
                 // provenance for clients, not a new thing to show the model.
-                // Until the artifact's bytes are hydrated into the request,
-                // and for any model without the capability, an artifact is
-                // announced rather than shown.
-                ContentPart::Artifact(a) => MessageContent::Text(Text {
-                    text: a.artifact.omitted_text(),
-                    ..Default::default()
-                }),
+                ContentPart::Artifact(a) => Self::artifact_block(&a.artifact, artifacts),
                 ContentPart::SubAgentResult(r) => MessageContent::Text(Text {
                     text: r.to_wire_text(),
                     ..Default::default()
@@ -473,6 +531,12 @@ impl AnthropicProvider {
             MessageContent::ToolUse(tu) => tu.cache_control = cc,
             MessageContent::ToolResult(tr) => tr.cache_control = cc,
             MessageContent::Thinking(th) => th.cache_control = cc,
+            // Caching an image or document block is exactly what you want when
+            // one is the last thing in the prompt: it is the most expensive
+            // block in the request and the least likely to change between
+            // turns.
+            MessageContent::Image(i) => i.cache_control = cc,
+            MessageContent::Document(d) => d.cache_control = cc,
         }
     }
 
@@ -505,7 +569,7 @@ impl LlmProvider for AnthropicProvider {
             .map(|m| {
                 MessageBuilder::default()
                     .role(Self::to_api_role(&m.role))
-                    .content(Self::parts_to_api_content(&m.parts))
+                    .content(Self::parts_to_api_content(&m.parts, request.artifacts))
                     .build()
                     .map_err(io_err)
             })
@@ -667,7 +731,12 @@ impl LlmProvider for AnthropicProvider {
                                 index: index as u32,
                             }))
                         }
-                        MessageContent::ToolResult(_) => None,
+                        // Anthropic never starts an image or document block in
+                        // a *response* — these arms exist because the block
+                        // type is shared between request and response.
+                        MessageContent::ToolResult(_)
+                        | MessageContent::Image(_)
+                        | MessageContent::Document(_) => None,
                     },
                     MessagesStreamEvent::ContentBlockDelta { index, delta } => match delta {
                         ContentBlockDelta::TextDelta { text } => {
@@ -956,7 +1025,7 @@ mod tests {
         let parts = vec![ContentPart::Text(TextPart {
             text: "hello".into(),
         })];
-        let list = AnthropicProvider::parts_to_api_content(&parts);
+        let list = AnthropicProvider::parts_to_api_content(&parts, ArtifactBytes::empty());
         assert_eq!(list.len(), 1);
         assert!(matches!(&list[0], MessageContent::Text(t) if t.text == "hello"));
     }
@@ -976,7 +1045,7 @@ mod tests {
                 ended_at_ms: 400,
             },
         )];
-        let list = AnthropicProvider::parts_to_api_content(&parts);
+        let list = AnthropicProvider::parts_to_api_content(&parts, ArtifactBytes::empty());
         assert_eq!(list.len(), 1);
         assert!(matches!(&list[0], MessageContent::Text(t)
                 if t.text == "[subagent \"audit\" completed]\n\nthree stale crates"));
@@ -992,7 +1061,7 @@ mod tests {
                 artifacts: Vec::new(),
             },
         )];
-        let list = AnthropicProvider::parts_to_api_content(&parts);
+        let list = AnthropicProvider::parts_to_api_content(&parts, ArtifactBytes::empty());
         assert_eq!(list.len(), 1);
         assert!(matches!(&list[0], MessageContent::ToolResult(tr) if tr.tool_use_id == "tc1"));
     }
@@ -1003,7 +1072,7 @@ mod tests {
             text: "think".into(),
             signature: Some("sig123".into()),
         })];
-        let list = AnthropicProvider::parts_to_api_content(&parts);
+        let list = AnthropicProvider::parts_to_api_content(&parts, ArtifactBytes::empty());
         assert_eq!(list.len(), 1);
         assert!(
             matches!(&list[0], MessageContent::Thinking(t) if t.thinking == "think" && t.signature.as_deref() == Some("sig123"))
@@ -1081,7 +1150,7 @@ mod tests {
             text: "reasoning".into(),
             signature: None,
         })];
-        let list = AnthropicProvider::parts_to_api_content(&parts);
+        let list = AnthropicProvider::parts_to_api_content(&parts, ArtifactBytes::empty());
         let json = serde_json::to_value(&list[0]).expect("serializes");
         assert!(
             json.get("signature").is_none(),
@@ -1162,5 +1231,131 @@ mod tests {
             AnthropicProvider::encode_thinking(ThinkingDialect::AnthropicEffort, None, None);
         assert!(thinking.is_none());
         assert!(output.is_none());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod artifact_tests {
+    //! An artifact reaches Anthropic as a real image/document block, and
+    //! reaches it as text when it was not hydrated.
+    use super::*;
+    use horsie_agentcore::ArtifactBytes;
+    use horsie_models::agent::{
+        ArtifactKind, ArtifactPart, ArtifactRef, DocumentArtifact, ImageArtifact, ToolResultPart,
+    };
+    use std::collections::HashMap;
+
+    const DATA: &str = "iVBORw0KGgo=";
+
+    fn image_ref() -> ArtifactRef {
+        ArtifactRef {
+            id: "abc123".into(),
+            media_type: "image/png".into(),
+            kind: ArtifactKind::Image(ImageArtifact {
+                width: Some(4),
+                height: Some(2),
+            }),
+            byte_size: 8,
+            filename: Some("shot.png".into()),
+        }
+    }
+
+    fn pdf_ref() -> ArtifactRef {
+        ArtifactRef {
+            id: "pdf1".into(),
+            media_type: "application/pdf".into(),
+            kind: ArtifactKind::Document(DocumentArtifact {}),
+            byte_size: 9,
+            filename: Some("report.pdf".into()),
+        }
+    }
+
+    fn hydrated(id: &str) -> ArtifactBytes {
+        ArtifactBytes::new(HashMap::from([(id.to_string(), DATA.to_string())]))
+    }
+
+    #[test]
+    fn a_hydrated_image_becomes_an_image_block() {
+        let parts = vec![ContentPart::Artifact(ArtifactPart {
+            artifact: image_ref(),
+        })];
+        let list = AnthropicProvider::parts_to_api_content(&parts, &hydrated("abc123"));
+        let block = list.first().unwrap();
+        let image = block.as_image().expect("an image block");
+        assert_eq!(
+            image.source,
+            async_llm::types::MediaSource::Base64(async_llm::types::Base64Source {
+                media_type: "image/png".into(),
+                data: DATA.into(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_hydrated_pdf_becomes_a_document_block_titled_by_filename() {
+        let parts = vec![ContentPart::Artifact(ArtifactPart {
+            artifact: pdf_ref(),
+        })];
+        let list = AnthropicProvider::parts_to_api_content(&parts, &hydrated("pdf1"));
+        let doc = list.first().unwrap().as_document().expect("a document");
+        assert_eq!(doc.title.as_deref(), Some("report.pdf"));
+    }
+
+    /// The vision-gating path: the hydrator returned nothing for this id, so
+    /// the model is *told* about the image rather than shown it. Silence here
+    /// would leave the model answering a question about nothing.
+    #[test]
+    fn an_unhydrated_artifact_becomes_an_explanatory_text_block() {
+        let parts = vec![ContentPart::Artifact(ArtifactPart {
+            artifact: image_ref(),
+        })];
+        let list = AnthropicProvider::parts_to_api_content(&parts, ArtifactBytes::empty());
+        let text = list.first().unwrap().as_text().expect("a text block");
+        assert!(text.text.contains("shot.png"), "{}", text.text);
+        assert!(text.text.contains("omitted"), "{}", text.text);
+    }
+
+    /// Anthropic accepts an image inside a `tool_result`, which is what lets a
+    /// screenshot travel with the call that produced it.
+    #[test]
+    fn a_tool_results_image_rides_inside_the_tool_result() {
+        let parts = vec![ContentPart::ToolResult(ToolResultPart {
+            tool_call_id: "tc1".into(),
+            output: "took a screenshot".into(),
+            is_error: false,
+            artifacts: vec![image_ref()],
+        })];
+        let list = AnthropicProvider::parts_to_api_content(&parts, &hydrated("abc123"));
+        let tr = list.first().unwrap().as_tool_result().expect("tool result");
+        let blocks = match tr.content.as_ref().expect("content") {
+            async_llm::types::ToolResultContent::Blocks(b) => b,
+            async_llm::types::ToolResultContent::Text(t) => {
+                panic!("expected blocks, got text: {t}")
+            }
+        };
+        assert_eq!(blocks.len(), 2, "the text plus the image");
+        assert!(matches!(
+            blocks[1],
+            async_llm::types::ToolResultBlock::Image(_)
+        ));
+    }
+
+    /// A result with nothing but text must stay a bare string — that is what
+    /// every tool result was before this feature, and what the API expects.
+    #[test]
+    fn a_text_only_tool_result_stays_a_bare_string() {
+        let parts = vec![ContentPart::ToolResult(ToolResultPart {
+            tool_call_id: "tc1".into(),
+            output: "42".into(),
+            is_error: false,
+            artifacts: vec![],
+        })];
+        let list = AnthropicProvider::parts_to_api_content(&parts, ArtifactBytes::empty());
+        let tr = list.first().unwrap().as_tool_result().expect("tool result");
+        assert!(matches!(
+            tr.content.as_ref().expect("content"),
+            async_llm::types::ToolResultContent::Text(t) if t == "42"
+        ));
     }
 }

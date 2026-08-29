@@ -2,7 +2,7 @@
 // localStorage-persisted new-session draft. Kept free of React so every rule
 // here is unit-testable; `useSessionDraft` wires these into hooks.
 
-import type { EnvironmentSpec, RepoConfig } from "../api/types";
+import type { ArtifactRef, EnvironmentSpec, RepoConfig } from "../api/types";
 
 export const DRAFT_STORAGE_KEY = "horsie-session-draft";
 
@@ -38,6 +38,16 @@ export interface DraftPayload {
   tools: string[] | null;
   /** Canonical thinking effort; "" = use the model's configured default. */
   thinkingEffort: string;
+  /**
+   * Files attached to the first message, as references.
+   *
+   * References and never bytes. The composer uploads on attach, so by the time
+   * anything is stored here the bytes are already in the artifact service and
+   * an id is all that is needed to name them again — where storing the files
+   * themselves would put megabytes of base64 into localStorage, which has a
+   * few of them in total.
+   */
+  artifacts: ArtifactRef[];
 }
 
 export function emptyDraft(): DraftPayload {
@@ -50,6 +60,7 @@ export function emptyDraft(): DraftPayload {
     memorySpaces: [],
     tools: null,
     thinkingEffort: "",
+    artifacts: [],
   };
 }
 
@@ -69,6 +80,44 @@ function parseEnvironment(x: unknown): EnvironmentDraft | undefined {
     return { kind: "runtime", vendor: e.vendor, repos: e.repos };
   }
   return undefined;
+}
+
+/**
+ * One stored artifact reference, or `undefined` for anything that is not one.
+ *
+ * Checked field by field rather than trusted, for the same reason the rest of
+ * this file is: what comes back from localStorage is whatever was there, and
+ * a malformed ref would be sent to the server as if it named real bytes.
+ * `kind` is validated down to its tag only — its payload is a layout hint, and
+ * a missing one costs a thumbnail the right size, not correctness.
+ */
+function parseArtifact(x: unknown): ArtifactRef | undefined {
+  if (typeof x !== "object" || x === null || Array.isArray(x)) return undefined;
+  const a = x as Record<string, unknown>;
+  if (typeof a.id !== "string" || a.id === "") return undefined;
+  if (typeof a.mediaType !== "string") return undefined;
+  if (typeof a.byteSize !== "number") return undefined;
+  const kind = a.kind as { kind?: unknown } | null | undefined;
+  if (!kind || (kind.kind !== "Image" && kind.kind !== "Document")) {
+    return undefined;
+  }
+  return {
+    id: a.id,
+    mediaType: a.mediaType,
+    byteSize: a.byteSize,
+    kind: a.kind as ArtifactRef["kind"],
+    filename: typeof a.filename === "string" ? a.filename : undefined,
+  };
+}
+
+/** Every well-formed ref in the stored list; a broken one is dropped rather
+ * than failing the whole draft, which would also discard the model, the
+ * environment and every bundle selection. */
+function parseArtifacts(x: unknown): ArtifactRef[] {
+  if (!Array.isArray(x)) return [];
+  return x
+    .map(parseArtifact)
+    .filter((a): a is ArtifactRef => a !== undefined);
 }
 
 function isStringRecord(x: unknown): x is Record<string, string> {
@@ -109,6 +158,9 @@ export function parseDraftPayload(raw: unknown): DraftPayload | undefined {
     tools: isStringArray(p.tools) ? p.tools : null,
     // Added after v1 shipped; older stored drafts simply have no value.
     thinkingEffort: typeof p.thinkingEffort === "string" ? p.thinkingEffort : "",
+    // Added after v2 shipped. An older draft has no attachments, which is
+    // exactly what an empty list says — so, again, no migration.
+    artifacts: parseArtifacts(p.artifacts),
     // `autoCompact` was a field here and is dropped rather than migrated: a
     // stored draft carrying one is simply ignored, and every session compacts.
   };

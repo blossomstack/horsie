@@ -52,10 +52,7 @@ impl ToolValue {
     }
 
     #[must_use]
-    pub fn with_artifacts(
-        value: Value,
-        artifacts: Vec<horsie_models::agent::ArtifactRef>,
-    ) -> Self {
+    pub fn with_artifacts(value: Value, artifacts: Vec<horsie_models::agent::ArtifactRef>) -> Self {
         Self { value, artifacts }
     }
 }

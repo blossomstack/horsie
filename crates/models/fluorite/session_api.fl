@@ -157,6 +157,9 @@ struct GetSessionResponse { session: SessionDetail }
 /// cannot name another project's bytes.
 struct SendMessageRequest {
     text: String,
+    /// Defaulted: every client that predates attachments sends `{"text": ...}`
+    /// alone, and a required field here answers all of them with a 422.
+    #[default = "[]"]
     artifacts: Vec<ArtifactRef>,
 }
 /// Acknowledges an accepted user message. The id is how a client matches its

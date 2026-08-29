@@ -196,6 +196,13 @@ const zhHant: typeof en = {
       "本工作階段約有 {{used}} 個 token，而一次壓縮會原樣保留最近的 {{retain}} 個 —— 因此之前沒有可摺疊的內容。硬要壓縮只會拿真實訊息換一份摘要，去騰出並不緊缺的空間。",
   },
 
+  artifact: {
+    untitled: "未命名檔案",
+    openFull: "檢視原始尺寸",
+    download: "下載",
+    close: "關閉",
+  },
+
   composer: {
     ariaLabel: "傳訊息給智慧代理",
     idlePlaceholder: "傳訊息給智慧代理…",
@@ -205,6 +212,15 @@ const zhHant: typeof en = {
     stopTitle: "停止本輪 —— 已排入佇列的訊息會保留",
     send: "傳送訊息",
     sendTitle: "傳送 —— Enter 傳送，Shift+Enter 換行",
+    attach: "加入附件",
+    attachTitle: "加入圖片或 PDF 檔案",
+    attachUnavailable: "此處不支援加入附件。",
+    attachRefused: "只能加入 PNG、JPEG、GIF、WebP 與 PDF 檔案。",
+    attachPending: "請等待附件上傳完成",
+    uploading: "正在上傳",
+    uploadFailed: "上傳失敗",
+    removeAttachment: "移除此附件",
+    pastedName: "貼上的檔案",
   },
 
   turnActions: {
@@ -307,6 +323,7 @@ const zhHant: typeof en = {
     returnedNothing: "沒有回傳內容",
     pluginHooks: "外掛掛鉤",
     blockedBy: "被 {{plugin}} 阻擋",
+    artifacts: "檔案",
   },
 
   transcript: {

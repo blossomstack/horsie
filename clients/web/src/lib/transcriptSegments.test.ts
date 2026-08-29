@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildSegments } from "./transcriptSegments";
 import { groupTurns } from "../components/Transcript";
+import type { ArtifactRef } from "../api/types";
 import type {
   RenderedMessage,
   RenderedSubAgent,
@@ -16,6 +17,7 @@ function tool(id: string, endedAtMs?: number): RenderedToolCall {
     running: false,
     endedAtMs,
     hooks: [],
+    artifacts: [],
   };
 }
 
@@ -28,6 +30,7 @@ function assistant(
     thinking: [],
     toolCalls: [],
     subagentResults: [],
+    artifacts: [],
     ...m,
   };
 }
@@ -128,6 +131,7 @@ function stepAsk(id: string, question: string): RenderedToolCall {
     input: { question },
     running: false,
     hooks: [],
+    artifacts: [],
   };
 }
 
@@ -183,6 +187,7 @@ describe("questions break out of a work group", () => {
             input: { outcome: "p0", description: "did it" },
             running: false,
             hooks: [],
+            artifacts: [],
           },
         ],
         startedAtMs: 1_000,
@@ -223,6 +228,7 @@ function user(m: Partial<RenderedMessage> & { id: string }): RenderedMessage {
     thinking: [],
     toolCalls: [],
     subagentResults: [],
+    artifacts: [],
     ...m,
   };
 }
@@ -297,5 +303,56 @@ describe("subagent results in a turn", () => {
     const work = segments[0];
     if (work.kind !== "work") throw new Error("expected a work segment");
     expect([work.startedAtMs, work.endedAtMs]).toEqual([undefined, undefined]);
+  });
+});
+
+const shot: ArtifactRef = {
+  id: "sha-1",
+  mediaType: "image/png",
+  byteSize: 100,
+  kind: { kind: "Image", value: { width: 10, height: 10 } },
+};
+
+describe("artifacts in a turn", () => {
+  it("emits an artifact segment ahead of the text it belongs to", () => {
+    const segments = buildSegments([
+      assistant({ id: "a1", text: "here it is", artifacts: [shot] }),
+    ]);
+    expect(segments.map((s) => s.kind)).toEqual(["artifacts", "text"]);
+  });
+
+  // A picture with nothing said about it is still a message; the old rule
+  // ("a turn is its text") left it nowhere on screen at all.
+  it("opens a user turn for a message that is only an attachment", () => {
+    const turns = groupTurns([item(user({ id: "u1", artifacts: [shot] }))]);
+    expect(turns.map((t) => t.kind)).toEqual(["user"]);
+  });
+
+  it("still drops a user turn that is genuinely empty", () => {
+    const turns = groupTurns([item(user({ id: "u1" }))]);
+    expect(turns).toEqual([]);
+  });
+
+  // The synthetic message a subagent result rides must not draw them a second
+  // time — they were attached to the user's own bubble, which is still there.
+  it("leaves attachments off the synthetic subagent-result message", () => {
+    const turns = groupTurns([
+      item(assistant({ id: "a1", text: "delegating" })),
+      item(
+        user({
+          id: "u1",
+          text: "and this",
+          artifacts: [shot],
+          subagentResults: [sub("audit")],
+        }),
+      ),
+    ]);
+    const first = turns[0];
+    if (first.kind !== "assistant")
+      throw new Error("expected an assistant turn");
+    expect(first.msgs.at(-1)?.artifacts).toEqual([]);
+    const second = turns[1];
+    if (second.kind !== "user") throw new Error("expected a user turn");
+    expect(second.msg.artifacts).toEqual([shot]);
   });
 });

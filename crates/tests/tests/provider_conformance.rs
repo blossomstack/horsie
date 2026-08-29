@@ -430,6 +430,7 @@ fn user_history() -> Vec<horsie_agentcore::Message> {
 
 fn request_for(messages: &[horsie_agentcore::Message]) -> horsie_agentcore::CompletionRequest<'_> {
     horsie_agentcore::CompletionRequest {
+        artifacts: horsie_agentcore::ArtifactBytes::empty(),
         messages,
         system: None,
         tools: vec![],

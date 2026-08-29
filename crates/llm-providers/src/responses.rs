@@ -13,10 +13,10 @@ use async_llm::responses::{
 };
 use async_trait::async_trait;
 use horsie_agentcore::{
-    AgentEvent, CompletionRequest, CompletionResponse, ContentBlockStopEvent, ContentPart,
-    EventSink, LlmError, LlmProvider, Secret, StopReason, TextBlockStartEvent, TextChunkEvent,
-    TextPart, ThinkingBlockStartEvent, ThinkingChunkEvent, ThinkingDialect, ThinkingPart,
-    ToolCallInputDeltaEvent, ToolCallPart, ToolCallStartEvent, ToolChoice, Usage,
+    AgentEvent, ArtifactBytes, CompletionRequest, CompletionResponse, ContentBlockStopEvent,
+    ContentPart, EventSink, LlmError, LlmProvider, Secret, StopReason, TextBlockStartEvent,
+    TextChunkEvent, TextPart, ThinkingBlockStartEvent, ThinkingChunkEvent, ThinkingDialect,
+    ThinkingPart, ToolCallInputDeltaEvent, ToolCallPart, ToolCallStartEvent, ToolChoice, Usage,
 };
 use horsie_models::agent::Role;
 use std::{collections::BTreeMap, env, sync::Arc, time::Duration};
@@ -151,8 +151,10 @@ impl ResponsesProvider {
     }
 
     fn build_body(&self, request: &CompletionRequest<'_>) -> ResponsesRequest {
-        let mut body =
-            ResponsesRequest::new(self.model.clone(), responses_input_items(request.messages));
+        let mut body = ResponsesRequest::new(
+            self.model.clone(),
+            responses_input_items(request.messages, request.artifacts),
+        );
         body.instructions = request.system.clone();
         body.tools = request
             .tools
@@ -250,7 +252,10 @@ impl ResponsesReasoningRef {
     }
 }
 
-fn responses_input_items(messages: &[horsie_models::agent::Message]) -> Vec<serde_json::Value> {
+fn responses_input_items(
+    messages: &[horsie_models::agent::Message],
+    artifacts: &ArtifactBytes,
+) -> Vec<serde_json::Value> {
     let mut input = Vec::new();
     for message in messages {
         let role = match message.role {
@@ -258,6 +263,9 @@ fn responses_input_items(messages: &[horsie_models::agent::Message]) -> Vec<serd
             Role::User | Role::Tool => "user",
         };
         let mut text = String::new();
+        // Media parts for this message, flushed together with its text so an
+        // image stays in the same turn as the words around it.
+        let mut media: Vec<serde_json::Value> = Vec::new();
         let flush_text = |text: &mut String, input: &mut Vec<serde_json::Value>| {
             if !text.is_empty() {
                 let content_type = if role == "assistant" {
@@ -278,7 +286,10 @@ fn responses_input_items(messages: &[horsie_models::agent::Message]) -> Vec<serd
             match part {
                 ContentPart::Text(part) => text.push_str(&part.text),
                 ContentPart::SubAgentResult(part) => text.push_str(&part.to_wire_text()),
-                ContentPart::Artifact(a) => text.push_str(&a.artifact.omitted_text()),
+                ContentPart::Artifact(a) => match media_item(&a.artifact, artifacts) {
+                    Ok(item) => media.push(item),
+                    Err(note) => text.push_str(&note),
+                },
                 ContentPart::Thinking(part) => {
                     if let Some(reasoning) = part.signature.as_deref().and_then(|signature| {
                         serde_json::from_str::<ResponsesReasoningRef>(signature).ok()
@@ -308,12 +319,75 @@ fn responses_input_items(messages: &[horsie_models::agent::Message]) -> Vec<serd
                         "call_id": part.tool_call_id,
                         "output": part.output,
                     }));
+                    // `function_call_output` takes a string, so an image a tool
+                    // produced cannot ride with its own result. It follows as a
+                    // user message, the only place this wire accepts one.
+                    let produced: Vec<serde_json::Value> = part
+                        .artifacts
+                        .iter()
+                        .filter_map(|a| media_item(a, artifacts).ok())
+                        .collect();
+                    if !produced.is_empty() {
+                        let mut content = vec![serde_json::json!({
+                            "type": "input_text",
+                            "text": "The tool call above returned the following attachment(s).",
+                        })];
+                        content.extend(produced);
+                        input.push(serde_json::json!({
+                            "type": "message",
+                            "role": "user",
+                            "content": content,
+                        }));
+                    }
                 }
             }
         }
-        flush_text(&mut text, &mut input);
+        // Text and media together: a message carrying both is one turn with a
+        // two-item content list, not a text turn followed by an image turn.
+        if media.is_empty() {
+            flush_text(&mut text, &mut input);
+        } else {
+            let content_type = if role == "assistant" {
+                "output_text"
+            } else {
+                "input_text"
+            };
+            let mut content = Vec::with_capacity(media.len() + 1);
+            if !text.is_empty() {
+                content.push(serde_json::json!({ "type": content_type, "text": text }));
+            }
+            content.extend(media);
+            input.push(serde_json::json!({
+                "type": "message",
+                "role": role,
+                "content": content,
+            }));
+        }
     }
     input
+}
+
+/// An artifact as a Responses content item, or the text to use instead when it
+/// was not hydrated.
+fn media_item(
+    artifact: &horsie_models::agent::ArtifactRef,
+    artifacts: &ArtifactBytes,
+) -> Result<serde_json::Value, String> {
+    let Some(data) = artifacts.get(&artifact.id) else {
+        return Err(artifact.omitted_text());
+    };
+    let media_type = &artifact.media_type;
+    Ok(match artifact.kind {
+        horsie_models::agent::ArtifactKind::Image(_) => serde_json::json!({
+            "type": "input_image",
+            "image_url": format!("data:{media_type};base64,{data}"),
+        }),
+        horsie_models::agent::ArtifactKind::Document(_) => serde_json::json!({
+            "type": "input_file",
+            "filename": artifact.filename.as_deref().unwrap_or("document.pdf"),
+            "file_data": format!("data:{media_type};base64,{data}"),
+        }),
+    })
 }
 
 impl ResponsesProvider {
@@ -568,5 +642,134 @@ impl LlmProvider for ResponsesProvider {
         Err(LlmError::Network(Box::new(std::io::Error::other(
             "Responses stream ended without a terminal frame",
         ))))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod artifact_tests {
+    //! Artifacts on the Responses wire. Same restriction as Chat Completions:
+    //! `function_call_output` takes a string, so a tool's image follows it.
+    use super::*;
+    use horsie_agentcore::ArtifactBytes;
+    use horsie_models::agent::{
+        ArtifactKind, ArtifactPart, ArtifactRef, DocumentArtifact, ImageArtifact, Message, Role,
+        TextPart, ToolResultPart,
+    };
+    use std::collections::HashMap;
+
+    const DATA: &str = "iVBORw0KGgo=";
+
+    fn image_ref() -> ArtifactRef {
+        ArtifactRef {
+            id: "abc123".into(),
+            media_type: "image/png".into(),
+            kind: ArtifactKind::Image(ImageArtifact {
+                width: None,
+                height: None,
+            }),
+            byte_size: 8,
+            filename: None,
+        }
+    }
+
+    fn hydrated() -> ArtifactBytes {
+        ArtifactBytes::new(HashMap::from([("abc123".to_string(), DATA.to_string())]))
+    }
+
+    fn user(parts: Vec<ContentPart>) -> Message {
+        Message {
+            id: "m1".into(),
+            role: Role::User,
+            parts,
+            created_at_ms: 0,
+            started_at_ms: None,
+        }
+    }
+
+    #[test]
+    fn an_image_becomes_an_input_image_item() {
+        let items = responses_input_items(
+            &[user(vec![
+                ContentPart::Text(TextPart {
+                    text: "look".into(),
+                }),
+                ContentPart::Artifact(ArtifactPart {
+                    artifact: image_ref(),
+                }),
+            ])],
+            &hydrated(),
+        );
+        assert_eq!(items.len(), 1, "text and image are one turn, not two");
+        let content = items[0]["content"].as_array().expect("content array");
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(content[1]["type"], "input_image");
+        assert_eq!(
+            content[1]["image_url"],
+            format!("data:image/png;base64,{DATA}")
+        );
+    }
+
+    #[test]
+    fn a_pdf_becomes_an_input_file_item() {
+        let mut pdf = image_ref();
+        pdf.media_type = "application/pdf".into();
+        pdf.kind = ArtifactKind::Document(DocumentArtifact {});
+        pdf.filename = Some("report.pdf".into());
+        let items = responses_input_items(
+            &[user(vec![ContentPart::Artifact(ArtifactPart {
+                artifact: pdf,
+            })])],
+            &hydrated(),
+        );
+        let content = items[0]["content"].as_array().expect("content array");
+        assert_eq!(content[0]["type"], "input_file");
+        assert_eq!(content[0]["filename"], "report.pdf");
+    }
+
+    /// `function_call_output` carries a string, so the image cannot ride with
+    /// the result it came from.
+    #[test]
+    fn a_tool_results_image_follows_as_a_user_message() {
+        let items = responses_input_items(
+            &[Message {
+                id: "m1".into(),
+                role: Role::Tool,
+                parts: vec![ContentPart::ToolResult(ToolResultPart {
+                    tool_call_id: "tc1".into(),
+                    output: "shot taken".into(),
+                    is_error: false,
+                    artifacts: vec![image_ref()],
+                })],
+                created_at_ms: 0,
+                started_at_ms: None,
+            }],
+            &hydrated(),
+        );
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["type"], "function_call_output");
+        assert_eq!(items[1]["role"], "user");
+        let content = items[1]["content"].as_array().expect("content array");
+        assert_eq!(content[1]["type"], "input_image");
+    }
+
+    #[test]
+    fn an_unhydrated_artifact_becomes_text() {
+        let items = responses_input_items(
+            &[user(vec![ContentPart::Artifact(ArtifactPart {
+                artifact: image_ref(),
+            })])],
+            ArtifactBytes::empty(),
+        );
+        let content = items[0]["content"].as_array().expect("content array");
+        assert_eq!(content[0]["type"], "input_text");
+        assert!(
+            content[0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("omitted"),
+            "{:?}",
+            content[0]
+        );
     }
 }

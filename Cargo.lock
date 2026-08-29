@@ -203,15 +203,15 @@ dependencies = [
 
 [[package]]
 name = "async-llm"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "442a9099d1dd2e6b6b71dc5602a9a14edb26c50a6635211b28841db738633bf4"
+checksum = "0be9ac38c9d59d8640dda7531fb99fba6dbc0e282a8b613e2d04d44e0084dae9"
 dependencies = [
  "async-stream",
  "async-trait",
  "axum",
  "backoff",
- "base64 0.22.1",
+ "base64 0.23.1",
  "derive_builder",
  "futures",
  "parking_lot",
@@ -1327,18 +1327,20 @@ dependencies = [
 
 [[package]]
 name = "fluorite"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90920e402381d0f936c36c5a7a31b6067e13e68449e90bc9b3a5b7c2c17a9e89"
+checksum = "53773362a56a370db8f456b9ec48422c74e5ec836beef9223a3c29d2836da4b9"
 dependencies = [
+ "base64 0.23.1",
+ "schemars 1.2.2",
  "serde",
 ]
 
 [[package]]
 name = "fluorite_codegen"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5ae7e0964090a2e74a04426e5c6239a438bf4788a030ac836585f71c66444a0"
+checksum = "4c53bc340c0cd519ac022a8498b7f7daf6b3f504e6a4c0b9f3c25ba15e98199c"
 dependencies = [
  "anyhow",
  "ariadne",

@@ -62,6 +62,8 @@ pub const SCOPED_TABLES: &[&str] = &[
     "runtime_vendors",
     "agent_runs",
     "entity_revisions",
+    "artifacts",
+    "artifact_uses",
 ];
 
 pub struct ProjectService {

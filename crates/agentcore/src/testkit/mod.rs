@@ -391,6 +391,7 @@ mod tests {
             .complete(
                 CompletionRequest {
                     messages,
+                    artifacts: crate::provider::ArtifactBytes::empty(),
                     system: None,
                     tools: vec![],
                     tool_choice: ToolChoice::Auto,

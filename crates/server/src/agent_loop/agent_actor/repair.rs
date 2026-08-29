@@ -159,7 +159,7 @@ pub(super) fn repair_dangling(
                 | ContentPart::ToolResult(_)
                 | ContentPart::Thinking(_)
                 | ContentPart::SubAgentResult(_)
-            | ContentPart::Artifact(_) => None,
+                | ContentPart::Artifact(_) => None,
             })
             .collect();
         if dangling.is_empty() {

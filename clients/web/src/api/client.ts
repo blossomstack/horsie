@@ -4,6 +4,7 @@ import type {
   AgentPresetInput,
   AgentView,
   ApiError,
+  ArtifactRef,
   AgentTokenCreateInput,
   AgentTokenCreated,
   AgentTokenView,
@@ -65,6 +66,7 @@ import type {
   WorkflowView,
   Ack,
   SessionAck,
+  SendMessageRequest,
   SetAnnotationsRequest,
   SettingsView,
   ModelInput,
@@ -165,8 +167,12 @@ async function send<T>(url: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
     res = await fetch(url, {
-      headers: { "Content-Type": "application/json", ...init?.headers },
       ...init,
+      // Merged *after* `init` is spread, not before. Spread first, the
+      // caller's whole `headers` object replaced the default one — which
+      // happened to give an artifact upload the behaviour it wanted and
+      // would have silently dropped any header added beside it.
+      headers: { "Content-Type": "application/json", ...init?.headers },
     });
   } catch (cause) {
     throw new ApiRequestError(
@@ -284,6 +290,24 @@ export const api = {
       unscoped(`/projects/${encodeURIComponent(id)}`, { method: "DELETE" }),
   },
 
+  artifacts: {
+    /**
+     * Upload one file and get back the reference a message carries.
+     *
+     * The body is the raw bytes rather than a multipart form: there is one
+     * file and no other fields, and the filename — the only thing a form
+     * part would have added — rides the query string. `Content-Type` is the
+     * browser's claim about the file and nothing more; the server sniffs the
+     * bytes and the `mediaType` on the answer is what it found.
+     */
+    upload: (file: File): Promise<ArtifactRef> =>
+      request(`/artifacts?filename=${encodeURIComponent(file.name)}`, {
+        method: "POST",
+        headers: { "Content-Type": file.type || "application/octet-stream" },
+        body: file,
+      }),
+  },
+
   sessions: {
     /** Every session a person started, newest first.
      *
@@ -346,13 +370,17 @@ export const api = {
       id: string,
       text: string,
       agentId?: string,
+      artifacts: ArtifactRef[] = [],
     ): Promise<SessionAck> =>
       request(
         `/sessions/${encodeURIComponent(id)}/messages` +
           (agentId ? `?aid=${encodeURIComponent(agentId)}` : ""),
         {
           method: "POST",
-          body: JSON.stringify({ text }),
+          // Always sent, even empty. The field is optional server-side for
+          // the clients that predate it; this one has no reason to be one
+          // of them, and an always-present key is one shape to reason about.
+          body: JSON.stringify({ text, artifacts } satisfies SendMessageRequest),
         },
       ),
 
@@ -915,4 +943,15 @@ export const api = {
 
   /** SSE URL for the global session-status feed. */
   globalEventsUrl: (): string => scoped(`/events`),
+
+  /**
+   * Where an artifact's bytes are, as a URL.
+   *
+   * Usable directly as an `<img src>` or a download href: this app
+   * authenticates by cookie, so a browser-issued request for one of these
+   * carries the session without any header this code could not have set.
+   * Content-addressed, so the URL is safe to cache for ever.
+   */
+  artifactUrl: (id: string): string =>
+    scoped(`/artifacts/${encodeURIComponent(id)}`),
 };

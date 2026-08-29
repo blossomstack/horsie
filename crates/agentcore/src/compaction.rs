@@ -153,12 +153,10 @@ fn artifact_chars(artifact: &horsie_models::agent::ArtifactRef) -> usize {
     const DOCUMENT_TOKENS: usize = 3_000;
 
     let tokens = match &artifact.kind {
-        horsie_models::agent::ArtifactKind::Image(image) => {
-            match (image.width, image.height) {
-                (Some(w), Some(h)) => (w as usize * h as usize) / 750,
-                _ => UNKNOWN_IMAGE_TOKENS,
-            }
-        }
+        horsie_models::agent::ArtifactKind::Image(image) => match (image.width, image.height) {
+            (Some(w), Some(h)) => (w as usize * h as usize) / 750,
+            _ => UNKNOWN_IMAGE_TOKENS,
+        },
         horsie_models::agent::ArtifactKind::Document(_) => DOCUMENT_TOKENS,
     };
     tokens * 4
@@ -473,6 +471,10 @@ impl Agent {
             .complete(
                 CompletionRequest {
                     messages: &messages,
+                    // A summariser reads the transcript's text. Handing it the
+                    // images too would re-upload every one of them for a call
+                    // whose whole purpose is to make the context smaller.
+                    artifacts: crate::provider::ArtifactBytes::empty(),
                     // No system prompt: the workspace and tool guidance are
                     // instructions for doing the work, and this call is not
                     // doing the work. They would only bias the summary.

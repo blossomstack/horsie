@@ -8,6 +8,7 @@ import { useEffect } from "react";
 import { api } from "../api/client";
 import { deriveTitle } from "../lib/format";
 import type {
+  ArtifactRef,
   CreateSessionRequest,
   GetSessionResponse,
   ListSessionsResponse,
@@ -188,11 +189,15 @@ export function useSendMessage() {
       id,
       text,
       agentId,
+      artifacts,
     }: {
       id: string;
       text: string;
       agentId?: string;
-    }) => api.sessions.send(id, text, agentId),
+      /** What the composer already uploaded. Ids only — the bytes went up on
+       * attach, which is why sending stays a small JSON request. */
+      artifacts?: ArtifactRef[];
+    }) => api.sessions.send(id, text, agentId, artifacts),
     // The session view renders a failed send inline, right above the composer
     // that produced it. Without this the global notice reported it a second
     // time, in a corner, in the same words.

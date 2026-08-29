@@ -2,15 +2,16 @@
 
 use crate::{BACKOFF_BASE_SECS, DEFAULT_READ_TIMEOUT_SECS, MAX_STREAM_RETRIES, parse_tool_input};
 use async_llm::openai::{
-    ChatCompletionError, ChatCompletionRequest, ChatMessage, Client, FunctionCall, FunctionDef,
-    StreamOptions, ToolCall as AsyncToolCall, ToolChoice as AsyncToolChoice, ToolDef,
+    ChatCompletionError, ChatCompletionRequest, ChatContent, ChatContentPart, ChatMessage, Client,
+    FunctionCall, FunctionDef, StreamOptions, ToolCall as AsyncToolCall,
+    ToolChoice as AsyncToolChoice, ToolDef,
 };
 use async_trait::async_trait;
 use horsie_agentcore::{
-    AgentEvent, CompletionRequest, CompletionResponse, ContentBlockStopEvent, ContentPart,
-    EventSink, LlmError, LlmProvider, Secret, StopReason, TextBlockStartEvent, TextChunkEvent,
-    TextPart, ThinkingBlockStartEvent, ThinkingChunkEvent, ThinkingDialect, ThinkingPart,
-    ToolCallInputDeltaEvent, ToolCallPart, ToolCallStartEvent, ToolChoice, Usage,
+    AgentEvent, ArtifactBytes, CompletionRequest, CompletionResponse, ContentBlockStopEvent,
+    ContentPart, EventSink, LlmError, LlmProvider, Secret, StopReason, TextBlockStartEvent,
+    TextChunkEvent, TextPart, ThinkingBlockStartEvent, ThinkingChunkEvent, ThinkingDialect,
+    ThinkingPart, ToolCallInputDeltaEvent, ToolCallPart, ToolCallStartEvent, ToolChoice, Usage,
 };
 use horsie_models::agent::Role;
 use std::{collections::BTreeMap, env, time::Duration};
@@ -38,6 +39,46 @@ pub struct OpenAiProvider {
     read_timeout: Duration,
     thinking_dialect: ThinkingDialect,
     forced_tools_disable_thinking: bool,
+}
+
+/// An artifact as an OpenAI content part, or the text to use instead when it
+/// was not hydrated — a model with no vision capability.
+fn media_part(
+    artifact: &horsie_models::agent::ArtifactRef,
+    artifacts: &ArtifactBytes,
+) -> Result<ChatContentPart, String> {
+    let Some(data) = artifacts.get(&artifact.id) else {
+        return Err(artifact.omitted_text());
+    };
+    Ok(match artifact.kind {
+        horsie_models::agent::ArtifactKind::Image(_) => {
+            ChatContentPart::image_base64(&artifact.media_type, data)
+        }
+        horsie_models::agent::ArtifactKind::Document(_) => ChatContentPart::file_base64(
+            // The API parses inline file data by filename, so one is required
+            // even when the caller never supplied it.
+            artifact.filename.as_deref().unwrap_or("document.pdf"),
+            &artifact.media_type,
+            data,
+        ),
+    })
+}
+
+/// Emit a tool result's images as a user message.
+///
+/// Chat Completions rejects an image inside a `tool` message, so an image a
+/// tool produced cannot travel with its own result. It follows as a user turn
+/// instead, which is the only place the API accepts one. Anthropic has no such
+/// restriction, which is why only this provider needs the extra message.
+fn flush_deferred(messages: &mut Vec<ChatMessage>, deferred: Vec<ChatContentPart>) {
+    if deferred.is_empty() {
+        return;
+    }
+    let mut parts = vec![ChatContentPart::text(
+        "The tool call above returned the following attachment(s).",
+    )];
+    parts.extend(deferred);
+    messages.push(ChatMessage::parts("user", parts));
 }
 
 impl OpenAiProvider {
@@ -126,11 +167,19 @@ impl OpenAiProvider {
     fn build_body(&self, request: &CompletionRequest<'_>) -> ChatCompletionRequest {
         let mut messages = Vec::new();
         if let Some(system) = &request.system {
-            messages.push(ChatMessage::system(system));
+            messages.push(ChatMessage::system(system.as_str()));
         }
         for message in request.messages {
             let mut text = String::new();
             let mut tool_calls = Vec::new();
+            // Media parts for this message, in order. Kept separate from `text`
+            // because a multi-part message is a different wire shape, and a
+            // message with no media must stay a bare string.
+            let mut media: Vec<ChatContentPart> = Vec::new();
+            // Artifacts a tool result carried. A `tool`-role message may not
+            // hold an image in Chat Completions, so these are re-announced in a
+            // user message that follows the tool result — see `flush_deferred`.
+            let mut deferred: Vec<ChatContentPart> = Vec::new();
             for part in &message.parts {
                 match part {
                     ContentPart::Text(part) => text.push_str(&part.text),
@@ -143,25 +192,56 @@ impl OpenAiProvider {
                         },
                     }),
                     ContentPart::ToolResult(result) => {
-                        messages.push(ChatMessage::tool(&result.tool_call_id, &result.output));
+                        messages.push(ChatMessage::tool(
+                            &result.tool_call_id,
+                            result.output.as_str(),
+                        ));
+                        for artifact in &result.artifacts {
+                            match media_part(artifact, request.artifacts) {
+                                Ok(part) => deferred.push(part),
+                                Err(note) => {
+                                    messages.push(ChatMessage::tool(
+                                        &result.tool_call_id,
+                                        note.as_str(),
+                                    ));
+                                }
+                            }
+                        }
                     }
                     ContentPart::Thinking(_) => {}
                     ContentPart::SubAgentResult(result) => text.push_str(&result.to_wire_text()),
-                    ContentPart::Artifact(a) => text.push_str(&a.artifact.omitted_text()),
+                    ContentPart::Artifact(a) => match media_part(&a.artifact, request.artifacts) {
+                        Ok(part) => media.push(part),
+                        Err(note) => text.push_str(&note),
+                    },
                 }
             }
-            if text.is_empty() && tool_calls.is_empty() {
+            if text.is_empty() && tool_calls.is_empty() && media.is_empty() {
+                flush_deferred(&mut messages, deferred);
                 continue;
             }
             let role = match message.role {
                 Role::Assistant => "assistant",
                 Role::User | Role::Tool => "user",
             };
-            let mut wire_message = ChatMessage::new(role, (!text.is_empty()).then_some(text));
+            let content = if media.is_empty() {
+                (!text.is_empty()).then(|| ChatContent::Text(text))
+            } else {
+                // Text first, then the media, matching the order they were
+                // written in.
+                let mut parts = Vec::with_capacity(media.len() + 1);
+                if !text.is_empty() {
+                    parts.push(ChatContentPart::text(text));
+                }
+                parts.extend(media);
+                Some(ChatContent::Parts(parts))
+            };
+            let mut wire_message = ChatMessage::new(role, content);
             if !tool_calls.is_empty() {
                 wire_message.tool_calls = Some(tool_calls);
             }
             messages.push(wire_message);
+            flush_deferred(&mut messages, deferred);
         }
 
         let tools: Vec<ToolDef> = request
@@ -474,6 +554,7 @@ mod tests {
         ];
         let request = CompletionRequest {
             messages: &messages,
+            artifacts: horsie_agentcore::ArtifactBytes::empty(),
             system: Some("Be brief.".into()),
             tools: vec![ToolSpec {
                 name: "echo".into(),
@@ -530,6 +611,7 @@ mod tests {
         let messages = Vec::new();
         let request = CompletionRequest {
             messages: &messages,
+            artifacts: horsie_agentcore::ArtifactBytes::empty(),
             system: None,
             tools: vec![ToolSpec {
                 name: "echo".into(),
@@ -557,6 +639,7 @@ mod tests {
         let messages = Vec::new();
         let request = CompletionRequest {
             messages: &messages,
+            artifacts: horsie_agentcore::ArtifactBytes::empty(),
             system: None,
             tools: vec![ToolSpec {
                 name: "echo".into(),
@@ -573,5 +656,174 @@ mod tests {
 
         assert_eq!(body.tool_choice, None);
         assert_eq!(body.reasoning_effort.as_deref(), Some("high"));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod artifact_tests {
+    //! Artifacts on the Chat Completions wire, including the one thing this
+    //! protocol cannot do: carry an image inside a tool result.
+    use super::*;
+    use horsie_agentcore::{ArtifactBytes, CompletionRequest, ToolChoice};
+    use horsie_models::agent::{
+        ArtifactKind, ArtifactPart, ArtifactRef, DocumentArtifact, ImageArtifact, Message,
+        ToolResultPart,
+    };
+    use std::collections::HashMap;
+
+    const DATA: &str = "iVBORw0KGgo=";
+
+    fn image_ref() -> ArtifactRef {
+        ArtifactRef {
+            id: "abc123".into(),
+            media_type: "image/png".into(),
+            kind: ArtifactKind::Image(ImageArtifact {
+                width: None,
+                height: None,
+            }),
+            byte_size: 8,
+            filename: None,
+        }
+    }
+
+    fn provider() -> OpenAiProvider {
+        OpenAiProvider::with_api_key("test-key")
+            .expect("provider")
+            .with_model("gpt-test")
+    }
+
+    fn body(messages: &[Message], artifacts: &ArtifactBytes) -> ChatCompletionRequest {
+        provider().build_body(&CompletionRequest {
+            messages,
+            artifacts,
+            system: None,
+            tools: vec![],
+            tool_choice: ToolChoice::Auto,
+            max_tokens: None,
+            thinking_effort: None,
+            conversation_id: "c1",
+        })
+    }
+
+    fn user(parts: Vec<ContentPart>) -> Message {
+        Message {
+            id: "m1".into(),
+            role: Role::User,
+            parts,
+            created_at_ms: 0,
+            started_at_ms: None,
+        }
+    }
+
+    fn hydrated() -> ArtifactBytes {
+        ArtifactBytes::new(HashMap::from([("abc123".to_string(), DATA.to_string())]))
+    }
+
+    #[test]
+    fn an_image_becomes_a_data_url_content_part() {
+        let msgs = vec![user(vec![
+            ContentPart::Text(TextPart {
+                text: "what is this?".into(),
+            }),
+            ContentPart::Artifact(ArtifactPart {
+                artifact: image_ref(),
+            }),
+        ])];
+        let req = body(&msgs, &hydrated());
+        let parts = match req.messages[0].content.as_ref().expect("content") {
+            ChatContent::Parts(p) => p,
+            ChatContent::Text(t) => panic!("expected parts, got text: {t}"),
+        };
+        assert_eq!(parts.len(), 2, "the text and the image");
+        assert!(matches!(
+            &parts[1],
+            ChatContentPart::ImageUrl { image_url }
+                if image_url.url == format!("data:image/png;base64,{DATA}")
+        ));
+    }
+
+    /// A message with no artifact must stay a bare string, so every request
+    /// this provider already sent is byte-identical.
+    #[test]
+    fn a_text_only_message_stays_a_bare_string() {
+        let msgs = vec![user(vec![ContentPart::Text(TextPart {
+            text: "hello".into(),
+        })])];
+        let req = body(&msgs, ArtifactBytes::empty());
+        assert!(matches!(
+            req.messages[0].content.as_ref().expect("content"),
+            ChatContent::Text(t) if t == "hello"
+        ));
+    }
+
+    /// The protocol asymmetry that shapes this provider: Chat Completions
+    /// rejects an image inside a `tool` message, so a tool's screenshot has to
+    /// follow as a user turn. Anthropic needs no such thing.
+    #[test]
+    fn a_tool_results_image_follows_as_a_user_message() {
+        let msgs = vec![Message {
+            id: "m1".into(),
+            role: Role::Tool,
+            parts: vec![ContentPart::ToolResult(ToolResultPart {
+                tool_call_id: "tc1".into(),
+                output: "took a screenshot".into(),
+                is_error: false,
+                artifacts: vec![image_ref()],
+            })],
+            created_at_ms: 0,
+            started_at_ms: None,
+        }];
+        let req = body(&msgs, &hydrated());
+
+        assert_eq!(req.messages.len(), 2, "the tool result, then the image");
+        assert_eq!(req.messages[0].role, "tool");
+        assert_eq!(
+            req.messages[0].tool_call_id.as_deref(),
+            Some("tc1"),
+            "the tool message still answers its call"
+        );
+        assert_eq!(
+            req.messages[1].role, "user",
+            "an image can only live in a user message here"
+        );
+        let parts = match req.messages[1].content.as_ref().expect("content") {
+            ChatContent::Parts(p) => p,
+            ChatContent::Text(t) => panic!("expected parts, got text: {t}"),
+        };
+        assert!(matches!(&parts[1], ChatContentPart::ImageUrl { .. }));
+    }
+
+    #[test]
+    fn a_pdf_becomes_a_file_part_with_a_filename() {
+        let mut pdf = image_ref();
+        pdf.media_type = "application/pdf".into();
+        pdf.kind = ArtifactKind::Document(DocumentArtifact {});
+        pdf.filename = Some("report.pdf".into());
+        let msgs = vec![user(vec![ContentPart::Artifact(ArtifactPart {
+            artifact: pdf,
+        })])];
+        let req = body(&msgs, &hydrated());
+        let parts = match req.messages[0].content.as_ref().expect("content") {
+            ChatContent::Parts(p) => p,
+            ChatContent::Text(t) => panic!("expected parts, got text: {t}"),
+        };
+        assert!(matches!(
+            &parts[0],
+            ChatContentPart::File { file }
+                if file.filename.as_deref() == Some("report.pdf")
+        ));
+    }
+
+    #[test]
+    fn an_unhydrated_artifact_becomes_text() {
+        let msgs = vec![user(vec![ContentPart::Artifact(ArtifactPart {
+            artifact: image_ref(),
+        })])];
+        let req = body(&msgs, ArtifactBytes::empty());
+        assert!(matches!(
+            req.messages[0].content.as_ref().expect("content"),
+            ChatContent::Text(t) if t.contains("omitted")
+        ));
     }
 }

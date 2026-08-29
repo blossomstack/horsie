@@ -49,6 +49,7 @@ fn user_messages(text: &str) -> Vec<Message> {
 
 fn no_tools_request(messages: &[Message]) -> CompletionRequest<'_> {
     CompletionRequest {
+        artifacts: horsie_agentcore::ArtifactBytes::empty(),
         messages,
         system: None,
         tools: vec![],
@@ -302,6 +303,7 @@ async fn the_toolbox_is_sent_in_the_request() {
         input_schema: serde_json::json!({"type": "object", "properties": {}}),
     }];
     let req = CompletionRequest {
+        artifacts: horsie_agentcore::ArtifactBytes::empty(),
         messages: &msgs,
         system: Some("be helpful".into()),
         tools,

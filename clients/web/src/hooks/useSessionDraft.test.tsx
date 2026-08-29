@@ -170,6 +170,7 @@ function storeDraft(draft: Partial<DraftPayload>) {
     memorySpaces: [],
     tools: null,
     thinkingEffort: "",
+    artifacts: [],
     ...draft,
   };
   localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(full));

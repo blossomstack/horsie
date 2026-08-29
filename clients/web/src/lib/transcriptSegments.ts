@@ -1,3 +1,4 @@
+import type { ArtifactRef } from "../api/types";
 import type {
   RenderedMessage,
   RenderedSubAgent,
@@ -25,6 +26,9 @@ export type Segment =
       endedAtMs?: number;
     }
   | { kind: "ask"; key: string; call: RenderedToolCall }
+  /** Images and documents a message carried. Its own segment rather than a
+   * field on `text`, because a message can attach a picture and say nothing. */
+  | { kind: "artifacts"; key: string; artifacts: ArtifactRef[] }
   | { kind: "pulse"; key: string };
 
 /**
@@ -90,6 +94,16 @@ export function buildSegments(
     const contributes = m.thinking.length > 0 || m.toolCalls.length > 0;
     if (contributes) extend(m.startedAtMs ?? m.createdAtMs, m.createdAtMs);
     for (const t of m.thinking) work.push({ kind: "thinking", text: t });
+    // Ahead of the message's own text: an artifact is what the sentence under
+    // it is about, and a caption reads after the thing it captions.
+    if (m.artifacts.length > 0) {
+      flushWork(false);
+      segments.push({
+        kind: "artifacts",
+        key: `artifacts${seq++}`,
+        artifacts: m.artifacts,
+      });
+    }
     if (m.text) {
       flushWork(false);
       segments.push({ kind: "text", key: `text${seq++}`, text: m.text });
