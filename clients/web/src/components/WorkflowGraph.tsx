@@ -1,5 +1,6 @@
 import { layoutGraph, type LayoutEdge, type LayoutNode } from "../lib/graphLayout";
 import { cn } from "../lib/cn";
+import { useTranslation } from "react-i18next";
 
 /**
  * One renderer for both the editor's live preview and a run's execution graph.
@@ -82,6 +83,7 @@ export function WorkflowGraph({
   selected,
   className,
 }: Props) {
+  const { t } = useTranslation();
   const layout = layoutGraph(nodes, edges, start);
   const byStep = new Map(nodes.map((n) => [n.step, n]));
   const placed = new Map(layout.nodes.map((n) => [n.step, n]));
@@ -147,7 +149,7 @@ export function WorkflowGraph({
   if (layout.nodes.length === 0) {
     return (
       <p className={cn("text-sm text-faint", className)}>
-        Add a step to see the graph.
+        {t("workflowGraph.empty")}
       </p>
     );
   }
@@ -159,7 +161,7 @@ export function WorkflowGraph({
       height={height}
       className={cn("max-w-full", className)}
       role="img"
-      aria-label="Workflow graph"
+      aria-label={t("workflowGraph.ariaLabel")}
       data-testid="workflow-graph"
     >
       <defs>
@@ -251,7 +253,7 @@ export function WorkflowGraph({
             ) : null}
             {p.step === start ? (
               <text x={NODE_W - 8} y={NODE_H - 8} textAnchor="end" className="fill-faint text-[9px] uppercase tracking-wide">
-                start
+                {t("workflowGraph.start")}
               </text>
             ) : null}
           </g>

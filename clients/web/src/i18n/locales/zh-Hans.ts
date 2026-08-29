@@ -1,0 +1,1253 @@
+import type en from "./en";
+
+/**
+ * 简体中文.
+ *
+ * Typed `typeof en`, so a key added to the source catalogue is a compile
+ * error here until it is translated, and a key removed there is one until it
+ * is removed here. Chinese has a single plural form, so a `_one`/`_other`
+ * pair carries the same sentence — the pair exists to satisfy the shape, not
+ * because the wording differs.
+ */
+const zhHans: typeof en = {
+  common: {
+    save: "保存",
+    saving: "正在保存…",
+    saved: "已保存",
+    cancel: "取消",
+    close: "关闭",
+    delete: "删除",
+    remove: "移除",
+    edit: "编辑",
+    add: "添加",
+    create: "创建",
+    back: "返回",
+    retry: "重试",
+    copy: "复制",
+    copied: "已复制",
+    loading: "加载中…",
+    none: "无",
+    default: "默认",
+    optional: "可选",
+    enabled: "已启用",
+    disabled: "已禁用",
+    unknown: "未知",
+    failed: "失败",
+    running: "运行中",
+    yes: "是",
+    no: "否",
+    search: "搜索",
+    dismiss: "关闭提示",
+    return: "返回",
+    open: "打开",
+    run: "运行",
+    more: "展开",
+    less: "收起",
+    writeFailed: "写入失败。",
+    deleteNamed: "删除 {{name}}",
+    unreachableShort: "无法连接到服务器。",
+  },
+
+  time: {
+    justNow: "刚刚",
+    inAMoment: "即将",
+    ago: "{{value}}前",
+    in: "{{value}}后",
+    millisecondsShort: "{{value}} 毫秒",
+    secondsShort: "{{value}} 秒",
+    minutesShort: "{{value}} 分",
+    hoursShort: "{{value}} 小时",
+    daysShort: "{{value}} 天",
+    hoursMinutesShort: "{{hours}} 小时 {{minutes}} 分",
+    minutesSecondsShort: "{{minutes}} 分 {{seconds}} 秒",
+  },
+
+  format: {
+    thousands: "{{value}} 千",
+    millions: "{{value}} 百万",
+  },
+
+  status: {
+    provisioning: {
+      label: "正在准备",
+      hint: "正在构建本会话的运行时 —— 你发送的内容会在它就绪后立即执行。",
+    },
+    idle: { label: "空闲", hint: "已就绪，等待你的下一条消息。" },
+    running: {
+      label: "运行中",
+      hint: "智能体正在工作 —— 你发送的内容会在下一轮得到回应。",
+    },
+    awaitingInput: {
+      label: "等待输入",
+      hint: "智能体向你提出了一个问题。",
+    },
+    finished: {
+      label: "已完成",
+      hint: "本次运行已完成。重试某个步骤可以继续推进。",
+    },
+    failed: {
+      label: "已失败",
+      hint: "上一轮失败了 —— 发送一条消息即可重试。",
+    },
+    unrecoverable: {
+      label: "无法恢复",
+      hint: "本会话的运行时已永久丢失。请新建一个会话。",
+    },
+  },
+
+  progression: {
+    startingRuntime: "正在启动运行时…",
+    runtimeFailed: "运行时失败",
+    scanningWorkspace: "正在扫描工作区…",
+    connectingTools: "正在连接工具…",
+  },
+
+  session: {
+    untitled: "新建会话",
+    noSuch: "会话不存在",
+    loadFailed: "无法加载此会话",
+    sessionId: "会话 ID",
+    goneHint: "它已被删除，或从未存在过。你在此输入的内容无法送达。",
+    readFailed: "读取失败。",
+    yourSessionsList: "<lnk>你的会话</lnk>中列出了现存的会话。",
+    thisRun: "此次运行",
+    confirmDeleteRun: "删除“{{name}}”？此操作无法撤销。",
+    confirmDelete: "删除此会话？此操作无法撤销。",
+    view: "视图",
+    reconnecting: "正在重连",
+    reconnectingHint:
+      "已断开实时推送。运行仍在服务器上继续；重连后会补播期间遗漏的内容。",
+    loadingTranscript: "正在加载对话记录",
+    loadingEarlier: "正在加载更早的消息",
+    scrollUp: "向上滚动查看更早的消息",
+    terminal: "此会话已无法运行：{{reason}}",
+    workflowStepHint: "这是一个工作流步骤。它依据自身定义运行，而非依据消息。",
+  },
+
+  ui: {
+    showThinking: {
+      label: "显示思考过程",
+      description: "在对话记录中展示模型的推理步骤。",
+    },
+  },
+
+  nav: {
+    agents: "智能体",
+    environments: "环境",
+    routines: "例行任务",
+    workflows: "工作流",
+    settings: "设置",
+    admin: "管理",
+  },
+
+  rail: {
+    offline: "离线",
+    sessions: "会话",
+    showSessions: "显示会话列表",
+    filterByTag: "按标签筛选",
+    newSession: "新建会话",
+    filterPlaceholder: "筛选会话…",
+    filterSessions: "筛选会话",
+    unreachable: "无法连接到服务器。请确认 horsie-server 正在运行，然后重新加载。",
+    empty: "还没有会话。按 <key>+</key> 新建一个。",
+    noTextMatches: "没有会话匹配“{{query}}”。",
+    noTagMatches: "没有会话匹配这些标签。",
+  },
+
+  statusBadge: {
+    title: "{{label}} —— {{hint}}",
+    ariaLabel: "状态：{{label}}",
+  },
+
+  themeToggle: {
+    toLight: "切换到浅色",
+    toDark: "切换到深色",
+    ariaLabel: "切换浅色与深色",
+  },
+
+  confirm: {
+    ariaLabel: "确认",
+  },
+
+  mutationErrors: {
+    failed: "失败",
+  },
+
+  readError: {
+    body: "无法加载{{what}}。{{detail}}",
+    unreachable: "无法连接 horsie 服务器 —— 请确认它正在运行，然后重新加载。",
+    reload: "请重新加载后重试。",
+  },
+
+  compaction: {
+    compacted: "已压缩",
+    compactedByHand: "已手动压缩",
+    entries_one: "{{count}} 条记录",
+    entries_other: "{{count}} 条记录",
+    tokensFreed: "释放了 {{value}} 个 token",
+    hideDetail: "隐藏已带入的内容",
+    showDetail: "显示摘要与带入的状态",
+    summaryHeading: "先前工作的摘要",
+    carriedHeading: "原样带入的内容",
+    nothingToCompact: "无需压缩",
+    tokensKept: "保留了 {{retain}} 中的 {{used}} 个 token",
+    noWindow: "此模型未声明上下文窗口，因此没有可压缩的额度。",
+    nothingToFold:
+      "本会话约有 {{used}} 个 token，而一次压缩会原样保留最近的 {{retain}} 个 —— 因此之前没有可折叠的内容。强行压缩只会用真实消息换取一份摘要，去腾出并不紧缺的空间。",
+  },
+
+  composer: {
+    ariaLabel: "给智能体发消息",
+    idlePlaceholder: "给智能体发消息…",
+    answerPlaceholder: "回答智能体…",
+    queuePlaceholder: "为下一轮排队一条消息…",
+    stop: "停止本轮",
+    stopTitle: "停止本轮 —— 已排队的消息会保留",
+    send: "发送消息",
+    sendTitle: "发送 —— Enter 发送，Shift+Enter 换行",
+  },
+
+  turnActions: {
+    copyMarkdown: "复制为 Markdown",
+    copyPlain: "复制为纯文本",
+    markdownCopied: "已复制 Markdown",
+    textCopied: "已复制文本",
+  },
+
+  spine: {
+    jumpStart: "跳到会话开头",
+    jumpEnd: "跳到会话末尾",
+    scroll: "滚动对话记录",
+    sessionEnded: "第 {{index}} 段会话在此结束",
+    sessionEndedSummarised_one:
+      "第 {{index}} 段会话在此结束 —— 已摘要 {{count}} 条记录",
+    sessionEndedSummarised_other:
+      "第 {{index}} 段会话在此结束 —— 已摘要 {{count}} 条记录",
+    jumpToCompaction: "跳到第 {{index}} 个压缩点，共 {{total}} 个",
+  },
+
+  agentGraph: {
+    openRun: "打开 {{label}} 这次运行",
+    openTranscript: "打开 {{label}} 的对话记录",
+    showSpawned: "显示 {{label}} 派生出的内容 —— 已隐藏 {{count}} 个",
+    hideSpawned: "隐藏 {{label}} 派生出的内容",
+    empty: "此会话尚未记录任何智能体。它们启动后，图会自动绘制。",
+    ariaLabel: "智能体关系图",
+    nodeTitle: "{{label}} —— {{kind}}，{{detail}}",
+    currentRun: " · 你正在阅读的这次运行",
+  },
+
+  entryMenu: {
+    ariaLabel: "命令、技能与智能体",
+  },
+
+  timeline: {
+    thinkingBlocks_one: "思考 · {{count}} 段",
+    thinkingBlocks_other: "思考 · {{count}} 段",
+    thisSession: "本会话",
+    thisAgent: "此智能体",
+    sessionCompacted: "会话已压缩",
+    empty: "此会话尚无任何进展。智能体开始工作后，时间线会自动绘制。",
+    unplaced: "不在时间线上 —— 没有记录它们的运行时间",
+  },
+
+  subagent: {
+    label: "子智能体",
+  },
+
+  askUser: {
+    notAnswered: "未作回答 —— {{answer}}",
+  },
+
+  tagFilter: {
+    clear: "清除",
+  },
+
+  taskList: {
+    legend: "计划",
+    progress: "已完成 {{done}}/{{total}}",
+    hide: "隐藏计划",
+    show: "显示计划",
+    hideWithCount: "隐藏计划 —— 已完成 {{done}}/{{total}}",
+    showWithCount: "显示计划 —— 已完成 {{done}}/{{total}}",
+    toggle: "切换智能体的计划",
+    toggleWithCount: "切换智能体的计划 —— 共 {{total}} 项，已完成 {{done}} 项",
+    empty: "还没有计划。当任务大到需要分步时，智能体会在这里写下计划。",
+  },
+
+  thinking: {
+    label: "思考了片刻",
+  },
+
+  projects: {
+    newProject: "新建项目…",
+  },
+
+  projectsPage: {
+    what: "项目",
+    readErrorDesc: "此账户的项目。",
+    desc: "每项工作一个项目。项目之间不共享任何内容。",
+    sectionDesc:
+      "此侧栏中的其他一切都归属于某个项目：模型、运行时、技能、记忆空间、集成、智能体与会话。新项目从空白开始，凭据也不例外。",
+    empty: "还没有项目。",
+    defaultHint: "始终存在，且无法删除",
+    cannotDelete: "默认项目无法删除",
+    saveName: "保存名称",
+    newProject: "新建项目",
+    newProjectDesc: "它从空白开始 —— 创建后再为它添加模型与运行时。",
+    namePlaceholder: "这个项目是做什么的？",
+    confirmDelete:
+      "删除项目“{{name}}”？它的会话、智能体、设置与记忆都会一并删除，其运行时也会被销毁。此操作无法撤销。",
+  },
+
+  toolCall: {
+    input: "输入",
+    output: "输出",
+    error: "错误",
+    returnedNothing: "没有返回内容",
+    pluginHooks: "插件钩子",
+    blockedBy: "被 {{plugin}} 阻止",
+  },
+
+  transcript: {
+    working: "智能体正在工作",
+    queued: "尚未发送 —— 将随下一轮一起送出",
+  },
+
+  workGroup: {
+    working: "工作中",
+    thoughtOnly: "思考了片刻",
+    plain: {
+      tools_one: "调用了 {{tools}} 个工具",
+      tools_other: "调用了 {{tools}} 个工具",
+      subagents_one: "{{subagents}} 个子智能体已完成",
+      subagents_other: "{{subagents}} 个子智能体已完成",
+      both: "调用了 {{tools}} 个工具，{{subagents}} 个子智能体已完成",
+    },
+    thought: {
+      tools_one: "思考后调用了 {{tools}} 个工具",
+      tools_other: "思考后调用了 {{tools}} 个工具",
+      subagents_one: "思考后 {{subagents}} 个子智能体已完成",
+      subagents_other: "思考后 {{subagents}} 个子智能体已完成",
+      both: "思考后调用了 {{tools}} 个工具，{{subagents}} 个子智能体已完成",
+    },
+  },
+
+  workflowGraph: {
+    empty: "添加一个步骤即可看到流程图。",
+    ariaLabel: "工作流图",
+    start: "起点",
+  },
+
+  sessionRow: {
+    renameSession: "重命名会话",
+    actions: "会话操作",
+    newTag: "新标签",
+    newTagPlaceholder: "新标签…",
+    rename: "重命名",
+  },
+
+  usage: {
+    input: "输入",
+    inputHint:
+      "完整的提示 token：系统提示、工具定义，以及到目前为止的会话历史。下方的缓存读写已计入此总数，不是额外的。",
+    output: "输出",
+    outputHint: "模型生成返回的 token。",
+    cacheRead: "缓存读取",
+    cacheReadHint:
+      "由服务商的提示缓存以极低价格提供，而不是按全价重新处理。",
+    cacheWrite: "缓存写入",
+    cacheWriteHint:
+      "本轮以溢价写入服务商的提示缓存 —— 在后续复用它的轮次中以缓存读取的形式收回成本。",
+  },
+
+  gauge: {
+    buttonLabel: "上下文已占用 {{percent}}% —— {{word}}。打开用量明细。",
+    buttonLabelUnknown: "打开用量明细",
+    buttonTitle:
+      "上下文已占用 {{percent}}% —— {{word}}。{{window}} 中的 {{used}}。点击查看 token 明细。",
+    buttonTitleUnknown:
+      "已花费 {{spent}} 个 token。此模型的上下文窗口未知。点击查看 token 明细。",
+    nearlyFull: "接近占满",
+    filling: "正在填充",
+    roomToSpare: "余量充足",
+    contextWindow: "上下文窗口",
+    windowHint:
+      "主智能体上下文中当前载入的 token 数，及其上下文窗口上限。缓存状态不会减少这个数字 —— 它只影响价格与速度。",
+    used: "已使用的上下文窗口",
+    compactsAt: "占用约 {{percent}}% 时自动压缩",
+    thisTurn: "本轮",
+    sessionTotal: "会话总计",
+    sessionTotalHint:
+      "本会话在其承载的所有智能体上的全部花费。这是成本，而非上下文占用 —— 上方的表盘才是上下文。",
+  },
+
+  entryPanel: {
+    legend: "条目",
+    close: "隐藏条目面板",
+    timing: "时间",
+    at: "发生于",
+    took: "耗时",
+    tookHint: "生成这条消息的服务商调用耗时。",
+    message: "消息",
+    noText: "此条目本身没有文本 —— 它就是它触发的那些工作。",
+    thinking: "思考",
+    toolCalls: "工具调用",
+    running: "运行中",
+    readInTranscript: "在对话记录中查看",
+  },
+
+  agentPanel: {
+    agent: "智能体",
+    run: "运行",
+    transcript: "对话记录",
+    close: "隐藏智能体面板",
+    contextUsed: "已使用的上下文",
+    timing: "时间",
+    branched: "分支于",
+    opened: "创建于",
+    spawned: "派生于",
+    lastActivity: "最近活动",
+    ended: "结束于",
+    runningFor: "已运行",
+    runningForHint: "以当前时刻为准：此智能体尚未停止。",
+    took: "耗时",
+    tookHint: "从开始到得出此结果之间的时长。",
+    context: "上下文",
+    inContext: "上下文中",
+    inContextHint: "此智能体的模型未配置窗口大小，因此无法给出占比。",
+    asOfLastTurn: "截至此智能体最近一轮结束时。",
+    tokens: "Token",
+    inputHint:
+      "此智能体各轮次的完整提示 token。缓存读写已计入此总数，不是额外的。",
+    outputHint: "此智能体生成返回的 token。",
+    cacheReadHint: "由服务商的提示缓存以折扣价提供。",
+    cacheWriteHint: "以溢价写入服务商的提示缓存。",
+    withSubtree: "含子树",
+    withSubtreeHint:
+      "此智能体加上它下方的一切：它派生的子智能体、由它分支出的子会话，以及它调用的任何工作流的各个步骤。",
+    brief: "简报",
+    task: "任务",
+    result: "结果",
+    deleteAgent: "删除此智能体",
+    deleteSubSession: "删除此子会话",
+    deleteSubagent: "删除此子智能体的运行及其下方的一切",
+  },
+
+  hook: {
+    allowed: "已放行",
+    ran: "已执行",
+    noReason: "未给出原因",
+    couldNotRun: "无法执行 —— {{reason}}",
+    rewroteInput: "改写了输入",
+    rewroteOutput: "改写了输出",
+    stoppedHorsie: "已终止 horsie —— {{why}}（{{outcome}}）",
+    deniedCall: "拒绝了此次调用",
+    askedApproval: "请求批准 —— 已放行",
+    addedResultContext: "为结果补充了上下文",
+    objectedAlreadyRan: "提出异议 —— 但调用已经执行",
+    addedContext: "补充了上下文",
+    objected: "提出异议",
+    addedSessionContext: "补充了会话上下文",
+    addedPromptContext: "为提示补充了上下文",
+    rejectedPrompt: "拒绝了此提示",
+    leftNote: "为下一轮留下了备注",
+    keptTurnGoing: "让本轮继续 —— {{reason}}",
+    hitContinuationLimit: "达到续跑上限 —— {{reason}}",
+    stoppedCompaction: "终止了压缩 —— {{reason}}",
+  },
+
+  agentKind: {
+    main: "主会话",
+    subagent: "子智能体",
+    step: "工作流步骤",
+    sub_session: "子会话",
+    run: "工作流运行",
+    mainAgent: "主智能体",
+  },
+
+  schedule: {
+    manually: "手动触发",
+    every: "每 {{interval}}",
+    once: "一次，于 {{when}}",
+    daily: "每天 {{time}}（{{timezone}}）",
+    weekly: "每 {{days}} 的 {{time}}（{{timezone}}）",
+    monthly: "每月 {{day}} 的 {{time}}（{{timezone}}）",
+    yearly: "每年 {{month}}{{day}} 的 {{time}}（{{timezone}}）",
+    ordinalOne: "{{n}} 日",
+    ordinalTwo: "{{n}} 日",
+    ordinalFew: "{{n}} 日",
+    ordinalOther: "{{n}} 日",
+  },
+
+  newSession: {
+    workflowRun: "工作流运行",
+    stepCount_one: "{{count}} 个步骤",
+    stepCount_other: "{{count}} 个步骤",
+    startsAt: "起始于",
+    loadFailed:
+      "无法加载此服务器的模型与运行时。服务器可访问后请重新加载。",
+    needModel: "请选择一个模型或智能体后开始。",
+    needEnvironment: "请选择一个环境后开始。",
+    needGithub: "请连接 GitHub 以使用这些仓库。",
+  },
+
+  tools: {
+    read: "读取",
+    write: "写入",
+    selectAll: "全选",
+    selectAllIn: "全选 {{group}} 类工具",
+    filterAll: "全部",
+    filterRead: "读取",
+    filterWrite: "写入",
+  },
+
+  channel: {
+    tools: "工具",
+    toolCatalogue: "工具目录",
+    environment: "环境",
+    workflow: "工作流",
+    model: "模型",
+    models: "模型",
+    skills: "技能",
+    skillBundles: "技能包",
+    installSkills: "在设置中安装技能包",
+    mcp: "MCP",
+    mcpServers: "MCP 服务器",
+    mcpServers2: "MCP 服务器",
+    addMcp: "在设置中添加 MCP 服务器",
+    memory: "记忆",
+    memorySpaces: "记忆空间",
+    createMemory: "请先创建一个记忆空间",
+    thinking: "思考",
+    select: "选择",
+    selectedCount: "已选 {{count}} 项",
+    noModels: "尚未配置模型 —— 请在设置中添加一个",
+    defaultEffort: "默认（{{effort}}）",
+    defaultLower: "默认",
+    defaultToolSet: "除控制面之外的所有内置工具 —— 本服务器的默认集合。",
+    modelMissing: "{{model}} —— 已缺失",
+    modelGoneHint:
+      "此模型已不在配置中，因此本会话的下一轮会失败。请在“设置 → 模型”中恢复该别名，或新建一个会话。",
+  },
+
+  modelChannel: {
+    models: "模型",
+    agents: "智能体",
+  },
+
+  workflowChannel: {
+    oneAgent: "单个智能体",
+    define: "先定义一个工作流才能运行",
+  },
+
+  environment: {
+    predefined: "预定义",
+    runtimes: "运行时",
+    runtimesLower: "运行时",
+    repos: "仓库",
+    reposLower: "仓库",
+    repoCount_one: "{{count}} 个仓库",
+    repoCount_other: "{{count}} 个仓库",
+    defaultVendor: "默认",
+    noRuntime:
+      "尚未连接任何运行时，因此会话还无法执行任何一轮。请在存放代码的机器上运行 <cmd>horsie connect</cmd>。",
+    connectGithub: "在设置中连接 GitHub 以选择仓库",
+    connectGithub2: "连接 GitHub",
+    noRepos: "此 App 安装看不到任何仓库。",
+  },
+
+  notFound: {
+    title: "未找到",
+    desc: "此地址下没有任何页面。",
+    requestedPath: "请求的路径",
+    help: "请检查地址是否有笔误，或从<lnk>你的会话</lnk>继续之前的工作。左侧侧栏可以到达其他所有地方。",
+  },
+
+  layout: {
+    skipToContent: "跳到主要内容",
+    closeSessions: "关闭会话列表",
+  },
+
+  login: {
+    signIn: "登录",
+    signingIn: "正在登录…",
+    password: "密码",
+    passwordHint:
+      "此服务器需要密码。首次启动时，horsie 会在其状态目录中生成一个密码并写入 <file>initial-admin-password</file>。",
+    failed: "无法登录。请确认服务器仍在运行，然后重试。",
+  },
+
+  settingsHeader: {
+    saving: "保存中",
+    unsaved: "未保存",
+    discard: "放弃更改",
+  },
+
+  agents: {
+    new: "新建智能体",
+    loading: "正在加载智能体",
+    rosterTitle: "智能体清单",
+    rosterBlurb:
+      "智能体是一份保存下来的会话配置 —— 运行时、模型、仓库、技能、记忆 —— 这样重复的运行就不必每次重新拼装。按<key>新建智能体</key>定义一个，然后在任意机器上调用它：",
+    skillCount_one: "{{count}} 个技能",
+    skillCount_other: "{{count}} 个技能",
+    memoryCount_one: "{{count}} 个记忆",
+    memoryCount_other: "{{count}} 个记忆",
+    mcpCount: "{{count}} 个 MCP",
+    confirmDelete: "删除智能体“{{name}}”？",
+  },
+
+  environments: {
+    confirmDelete: "删除环境“{{name}}”？",
+    new: "新建环境",
+    loading: "正在加载环境",
+    rosterTitle: "环境清单",
+    rosterBlurb:
+      "环境是一份保存下来的“运行时 + 仓库”组合 —— 决定工作在哪里运行、在那里检出什么。按<key>新建环境</key>定义一个。",
+  },
+
+  routines: {
+    confirmDelete: "删除例行任务“{{name}}”及它创建的所有会话？",
+    new: "新建例行任务",
+    noSuch: "例行任务不存在：{{name}}。",
+    runFailed: "运行失败。",
+    paused: "已暂停",
+    starting: "正在启动…",
+    runNow: "立即运行",
+    agent: "智能体",
+    noRuntime: "无运行时",
+    runs: "运行记录",
+    runsRead: "此例行任务的运行记录",
+    next: "下次",
+    notScheduled: "未排期",
+    prompt: "提示词",
+    lastTriggerFailed: "上次触发失败：{{error}}",
+    noRuns:
+      "还没有运行记录。运行记录出现在这里而不是侧栏，且每次运行只依据提示词工作 —— 它无法向你提问。",
+    rosterTitle: "例行任务清单",
+    rosterBlurb:
+      "例行任务让一个智能体针对固定提示词运行 —— 可以定时、经由 API，或在你按下运行时触发。它的会话位于它自己的页面，而不是侧栏。按<key>新建例行任务</key>定义一个。",
+  },
+
+  workflows: {
+    rowMeta_one: "{{count}} 个步骤 · 起始于 {{start}}",
+    rowMeta_other: "{{count}} 个步骤 · 起始于 {{start}}",
+    confirmDelete: "删除工作流“{{name}}”？它的运行记录会继续留在会话侧栏中。",
+    new: "新建工作流",
+    noSuch: "工作流不存在。",
+    graph: "流程图",
+    graphBlurb:
+      "每个步骤共享同一个运行时与同一个工作区。<step>{{start}}</step> 会收到本次运行的初始输入。",
+    runsRead: "此工作流的运行记录",
+    noRuns: "还没有运行记录。",
+    rosterTitle: "工作流清单",
+    rosterBlurb:
+      "工作流让多个智能体依次运行，每一个都决定下一个去哪里。所有步骤共享一个工作区，因此前一个写下的内容后一个就能读到。运行记录会与你的会话一同出现在侧栏。按<key>新建工作流</key>定义一个。",
+  },
+
+  settingsNav: {
+    projects: "项目",
+    models: "模型",
+    runtimes: "运行时",
+    skills: "技能",
+    memory: "记忆",
+    integrations: "集成",
+    appearance: "外观",
+    account: "账户",
+  },
+
+  adminNav: {
+    modelCards: "模型卡",
+    githubApp: "GitHub App",
+  },
+
+  device: {
+    title: "授权一次命令行登录",
+    desc: "请核对此代码与终端中显示的一致。批准后，那台机器将以你的身份访问此服务器。",
+    approved: "已批准。你的终端应会在几秒内继续 —— 可以关闭此页面了。",
+    denied: "已拒绝。该次登录尝试被驳回。",
+    codePlaceholder: "XXXX-XXXX",
+    approve: "批准",
+    deny: "拒绝",
+  },
+
+  chatgpt: {
+    signedIn: "已登录",
+    signOut: "退出登录",
+    notSignedIn: "未登录",
+    signIn: "使用 ChatGPT 登录",
+    starting: "正在启动…",
+    openAndEnter: "打开 <here>{{url}}</here> 并输入此代码：",
+    waiting:
+      "正在等待批准…你可以在任意设备上完成。用量会计入此 ChatGPT 套餐的 Codex 额度。",
+  },
+
+  skills: {
+    hooks: "钩子",
+    defaultForNew: "新会话默认启用",
+    update: "更新",
+    deleteBundle: "删除技能包",
+    confirmDeleteBundle: "删除技能包“{{name}}”？",
+    removeMarketplace:
+      "移除市场",
+    confirmRemoveMarketplace:
+      "移除市场“{{name}}”？从中安装的技能包会继续保留。",
+    filterPlugins: "筛选插件…",
+    filterPluginsLabel: "筛选插件",
+  },
+
+  authored: {
+    historyOf: "{{name}} 的历史",
+    confirmDeleteSkill: "删除技能“{{name}}”？它的历史会保留，因此还可以恢复。",
+    confirmDeletePlugin:
+      "删除“{{name}}”？这会移除其中的每个技能，以及它在技能包库中的条目。",
+    title: "在此创作",
+    desc: "技能存放在本服务器数据库中的插件。智能体通过创作工具写入它们；你可以在这里阅读、回滚与删除。",
+    loadingHistory: "正在加载历史…",
+    historyFailed: "无法读取此技能的历史。",
+    deleted: "已删除",
+    restore: "恢复",
+    newPlugin: "新建插件",
+    newPluginPlaceholder: "field-notes",
+    empty: "还没有创作内容。选中创作工具的会话可以在这里写入技能。",
+  },
+
+  run: {
+    loading: "正在加载运行…",
+    tokens: "{{value}} 个 token",
+    interrupt: "中断",
+    retry: "重试",
+    retryStep: "重试 {{step}}",
+    confirmRetry:
+      "重试 {{step}}？它会在上一次尝试留下的工作区状态上重新运行。",
+    waitingOnQuestion: "<step>{{step}}</step> 正在等待回答一个问题。",
+    answerIt: "去回答",
+    wasInterrupted:
+      "<step>{{step}}</step> 已被中断。在你重试之前不会有任何运行 —— 工作区不会回滚，因此它会从上一次尝试留下的状态继续。",
+    steps: "步骤",
+    stepsHint: "选择一个步骤查看它的尝试记录，或打开它阅读它实际做了什么。",
+    neverReached: "本次运行从未到达此步骤。",
+    attempt: "第 {{n}} 次尝试",
+    stepRunning: "当前有步骤正在运行。",
+    retryHint: "重新运行此步骤。工作区不会回滚。",
+  },
+
+  skillsPage: {
+    desc: "可共享的技能包，从 git 仓库安装 —— 可按会话选用。",
+    installTitle: "安装技能包",
+    installDesc: "可以是一个技能包，也可以是一个技能市场 —— horsie 会自行判断。这可能需要几秒。",
+    gitUrl: "Git 地址",
+    gitUrlPlaceholder: "https://github.com/owner/skills-bundle",
+    ref: "分支或标签（可选）",
+    refPlaceholder: "main",
+    install: "安装",
+    marketplaces: "市场",
+    marketplacesWhat: "市场",
+    marketplacesDesc: "你添加过的目录。移除其中一个不会影响已从中安装的技能包。",
+    installedTitle: "已安装的技能包",
+    installedDesc: "打开某个技能包的开关，即可让新会话默认选中它。",
+    empty: "尚未安装任何技能包。",
+  },
+
+  memoryPage: {
+    desc: "智能体保存并回读的持久笔记 —— 归入可按会话选用的空间。",
+    spaces: "记忆空间",
+    spacesDesc: "空间是记忆的命名空间。会话可以选择自己能读写哪些空间。",
+    newSpace: "新建空间",
+    newSpacePlaceholder: "ops",
+    createSpaceFailed: "创建空间失败。",
+    noSpaces: "还没有记忆空间。请在上方创建一个。",
+    memories: "记忆",
+    memoriesIn: "{{space}} 中的记忆",
+    memoriesWhat: "记忆",
+    memoriesDesc: "这些由智能体自己写入。凡是有误或不再有用的，都可以编辑或删除。",
+    createSpaceFirst: "请先创建一个记忆空间。",
+    addMemory: "添加记忆",
+    noMemories: "此空间中还没有记忆。",
+    memoryCount_one: "{{count}} 条记忆",
+    memoryCount_other: "{{count}} 条记忆",
+    holdsNoMemories: "它不含任何记忆。",
+    alsoDeletes_one: "这也会删除其中的 {{count}} 条记忆。",
+    alsoDeletes_other: "这也会删除其中的 {{count}} 条记忆。",
+    confirmDeleteSpace: "删除记忆空间“{{name}}”？{{tail}}",
+    confirmDeleteMemory: "删除记忆“{{name}}”？",
+    deleteSpace: "删除空间",
+    deleteMemory: "删除记忆",
+    name: "名称",
+    namePlaceholder: "deploy-order",
+    description: "描述",
+    descriptionPlaceholder: "velos 必须先于服务器启动",
+    content: "内容",
+    contentPlaceholder: "Markdown。引用另一条记忆写作 [[space/name]]。",
+    saveMemory: "保存记忆",
+    saveMemoryFailed: "保存记忆失败。",
+    saveChanges: "保存更改",
+    updateMemoryFailed: "更新记忆失败。",
+  },
+
+  account: {
+    desc: "此服务器的登录方式。",
+    tokens: "机器令牌",
+    tokensWhat: "机器令牌",
+    tokensDesc:
+      "供无人值守运行的运行时供应方进程使用。在你自己的机器上，<cmd>horsie auth login</cmd> 就够了 —— 只有在无人批准的场景才需要令牌。机器令牌只能连接运行时，别的什么都做不了：它不能读取会话、修改设置，也不能再创建令牌。",
+    tokenLabelPlaceholder: "这个令牌给哪台机器用？",
+    copyNow: "请立即复制 —— 它不会再次显示。",
+    noTokens: "还没有机器令牌。",
+    inUse: "使用中",
+    neverUsed: "从未使用",
+    revoke: "吊销",
+    confirmRevoke: "吊销机器令牌“{{label}}”？仍在使用它的一切都将无法连接。",
+    disabled:
+      "此部署未启用身份验证，因此没有需要管理的账户。任何能访问此服务器的人都拥有完全权限。",
+    mustChange:
+      "此服务器仍在使用首次启动时生成的密码。请在下方修改 —— 这也会从状态目录中删除 <file>initial-admin-password</file> 文件。",
+    external: "此服务器的登录由别处管理，因此这里没有可修改的密码。",
+    currentPassword: "当前密码",
+    newPassword: "新密码（至少 8 个字符）",
+    passwordChanged: "密码已修改。其他浏览器已被登出。",
+    changePassword: "修改密码",
+  },
+
+  runtimesPage: {
+    vendorExists:
+      "已存在名为“{{name}}”的云端供应方。请从列表中编辑它，或另取一个名称。",
+    absentDefault:
+      "已设为默认，但它的智能体尚未连接。在它接入之前，以它为默认的会话都会启动失败。",
+    loading: "正在加载运行时",
+    loadFailed: "无法加载设置。请确认 horsie-server 正在运行，然后重新加载。",
+    desc: "会话在哪里执行。智能体进程会连接到此服务器，并在其所在处完成配置；云端供应方则在这里配置。",
+    vendors: "供应方",
+    vendorsDesc:
+      "在某台机器上运行 horsie connect，或启动 horsie-velos-runtime 之类的供应方进程，它就会出现在这里。云端供应方无需你自己的进程 —— 每个沙箱都会回拨其回调地址，因此该地址必须能从此服务器之外访问。新会话在未指定时会使用默认项。",
+    empty: "还没有运行时，因此会话无法执行任何一轮。请连接一个智能体，或在下方添加云端供应方。",
+    cloudVendors: "云端供应方",
+    checking: "检查中…",
+    answering: "有响应",
+    connected: "已连接",
+    notConnected: "未连接",
+    makeDefault: "将 {{name}} 设为默认",
+    check: "检查 {{name}}",
+    edit: "编辑 {{name}}",
+    clearDefault: "清除默认项",
+    addFly: "添加 Fly",
+    addVelos: "添加 velos",
+    confirmDeleteVendor: "删除云端供应方“{{name}}”？指定它的会话将无法再启动。",
+  },
+
+  vendorForm: {
+    name: "名称",
+    flyAppPlaceholder: "horsie-runtimes",
+    velosUrlPlaceholder: "http://velos.example:8080",
+    regionPlaceholder: "iad",
+    imagePlaceholder: "ghcr.io/you/horsie-runtime:latest",
+    workspaceRootPlaceholder: "/workspaces",
+    flyApp: "Fly 应用",
+    flyAppHint:
+      "必须已经存在 —— 请用 `fly apps create` 创建。horsie 只在其中创建机器。",
+    velosUrl: "velos 服务器地址",
+    apiToken: "API 令牌",
+    leaveBlank: "留空表示保持不变",
+    flyTokenPlaceholder: "fly api 令牌",
+    velosTokenPlaceholder: "可选 —— velos 可能无需鉴权即可运行",
+    region: "区域",
+    image: "运行时镜像",
+    callbackUrl: "回调地址",
+    workspaceRoot: "工作区根目录",
+    memoryMb: "内存（MB）",
+    cpus: "CPU 核数",
+    volumeSizeGb: "卷大小（GB）",
+    volumesHint: "为每个运行时分配一个卷，这样停止后仍能保留其工作区",
+    velosNoVolumes:
+      "velos 没有卷：停止会话会删除其容器，下一条消息会调度一个全新的容器并重新执行预置流程。",
+  },
+
+  githubApp: {
+    desc: "此服务器所扮演的 GitHub App 的注册信息。设置一次即可；用户随后可在“设置 → 集成”中连接自己的账户。",
+    credentials: "凭据",
+    credentialsDesc:
+      "来自该应用在 GitHub 上的页面。密钥与私钥只写不读 —— 服务器只会报告它们是否已设置。",
+    clientId: "Client ID",
+    clientIdError: "Client ID 是用来标识该应用的。",
+    clientSecret: "Client Secret",
+    appId: "App ID",
+    appIdHint: "该应用在 GitHub 页面上显示的数字。",
+    appIdError: "App ID 是该应用在 GitHub 页面上显示的数字。",
+    privateKey: "私钥（PEM 或 base64）",
+    privateKeyHint: "请粘贴完整的 PEM，包含 BEGIN 与 END 行。",
+    storedBlankKeeps: "•••• 已存储 —— 留空则保持不变",
+    notSet: "未设置",
+    saveFailed: "保存失败。",
+    configured: "应用已配置。<lnk>连接一个账户</lnk>",
+    notConfigured: "尚未配置 —— 在配置好之前，会话无法克隆任何仓库。",
+    callback: "回调",
+    callbackDesc:
+      "GitHub 在用户授权后将其送回的地址。horsie 会依据请求推导它，并遵循 X-Forwarded-Proto，因此配置正确的反向代理无需在此设置。只有当 horsie 无法得知自己的公开地址时才需要设置 —— 例如代理不转发协议，或存在路径前缀。",
+    callbackBase: "回调基础地址",
+    callbackPlaceholder: "https://horsie.example.com",
+    callbackError: "需要一个绝对地址，例如 https://horsie.example.com。",
+  },
+
+  agentEdit: {
+    noSuch: "智能体不存在：{{name}}。",
+    editTitle: "编辑 {{name}}",
+    needName: "请为该智能体取一个名称后再保存。",
+    needModel: "请选择一个模型后再保存此智能体。",
+    saveFailed: "保存智能体失败。",
+    namePlaceholder: "reviewer",
+    descriptionPlaceholder: "这个智能体是做什么的",
+    descriptionHint: "用于清单展示。智能体本身看不到它。",
+    instructions: "指令",
+    instructionsPlaceholder: "该智能体应如何工作 —— 会加入它的系统提示",
+    instructionsHint: "每一轮都会发送给模型，位于工作区自带的指令文件之后。",
+    configuration: "配置",
+    configurationHint: "由此预设启动的每个会话所使用的配置。",
+    tuning: "调优",
+    tunable: "允许调优智能体改进此预设",
+    tunableHint:
+      "定时智能体可以读取由此预设产生的会话记录并改写它 —— 包括指令、技能、工具与记忆。除非你打开，否则不会启用。",
+  },
+
+  modelCards: {
+    nameRequired: "名称为必填项。",
+    mustBePositive: "{{label}}必须是正整数。",
+    desc: "常见模型及其 token 上限。“设置 → 模型”会据此自动补全模型 ID 并预填空白的上限字段；编辑模型卡永远不会改动已配置好的模型。",
+    catalog: "目录",
+    catalogDesc: "每个常见模型一条记录。",
+    empty: "还没有模型卡。",
+    loadFailed: "无法加载模型卡。",
+    filterPlaceholder: "按模型 ID 或名称筛选…",
+    filterLabel: "筛选模型卡",
+    ctx: "{{value}} 上下文",
+    out: "{{value}} 输出",
+    detailsFor: "{{name}} 的详情",
+    modelId: "模型 ID",
+    modelIdPlaceholder: "claude-sonnet-4-6",
+    namePlaceholder: "Claude Sonnet 4.6",
+    contextWindow: "上下文窗口",
+    contextWindowOptional: "上下文窗口（可选）",
+    maxTokens: "最大 token 数",
+    maxTokensOptional: "最大 token 数（可选）",
+    baseUrl: "基础地址",
+    baseUrlOptional: "基础地址（可选）",
+    baseUrlPlaceholder: "https://api.deepseek.com",
+    thinkingDialect: "思考协议方言",
+    thinkingDialectOptional: "思考协议方言（可选）",
+    thinkingEfforts: "思考强度",
+    thinkingEffortsOptional: "思考强度（可选）",
+    thinkingEffortsHint: "此模型接受的取值，由低到高。不支持思考控制的模型请留空。",
+    defaultEffort: "默认强度",
+    defaultEffortOptional: "默认思考强度（可选）",
+    forcedTools: "固定工具选择时禁用思考",
+    forcedToolsHint:
+      "适用于在开启思考时拒绝强制 <mono>tool_choice</mono> 的后端 —— DeepSeek 会返回 400“Thinking mode does not support this tool_choice”。",
+    addCard: "添加模型卡",
+    confirmDelete: "删除模型卡“{{name}}”？已配置的模型会保留当前取值。",
+  },
+
+  environmentEdit: {
+    noSuch: "环境不存在：{{name}}。",
+    needName: "请为该环境取一个名称后再保存。",
+    needVendor: "请选择此环境运行所在的运行时供应方。",
+    saveFailed: "保存环境失败。",
+    namePlaceholder: "staging",
+    descriptionPlaceholder: "这个环境是做什么的",
+    vendor: "运行时供应方",
+    selectVendor: "选择一个运行时供应方",
+    vendorNotConnected: "{{name}} —— 未连接",
+    vendorHint: "只有能自行预置工作区的供应方才能运行环境，因此本地运行时不会列出。",
+    noProvisioningVendor:
+      "已连接的供应方中没有一个能自行预置工作区，因此目前无法运行任何环境。请在<lnk>设置 › 运行时</lnk>中添加一个。",
+    envVars: "环境变量",
+    envVarsHint: "仅限纯文本 —— 请勿在此放置机密。",
+    envVarName: "NAME",
+    envVarValue: "value",
+    removeEnvVar: "移除环境变量",
+    addEnvVar: "添加环境变量",
+    provision: "预置步骤",
+    provisionHint: "一个由 {name, uses, with} 步骤组成的 JSON 数组。目前还没有任何东西会执行它们。",
+    provisionInvalid: "预置步骤必须是由 {name, uses, with} 组成的 JSON 数组。",
+    reposFromGithub:
+      "仓库来自你的 GitHub App 安装。<lnk>连接 GitHub</lnk> 即可选择。",
+    loadingRepos: "正在加载仓库…",
+    noReposVisible: "此 App 安装看不到任何仓库。<lnk>检查它的访问权限</lnk>。",
+    filterRepos: "筛选仓库",
+    notInInstallation: "不在此安装范围内",
+    ref: "分支或标签",
+    gitRefFor: "{{name}} 的 Git 引用",
+    noRepoMatches: "没有仓库匹配“{{query}}”。",
+  },
+
+  routineEdit: {
+    saveFailed: "保存例行任务失败。",
+    namePlaceholder: "nightly-triage",
+    descriptionPlaceholder: "这个例行任务是做什么的",
+    chooseAgent: "选择一个智能体…",
+    agentHint: "例行任务会使用该智能体的模型、技能与记忆。这些请在“智能体”页面编辑。",
+    environmentHint:
+      "每次运行发生的地方。若某次运行的环境已不存在 —— 运行时离线、环境被删除 —— 该次运行会失败并在此说明。",
+    promptPlaceholder: "运行时会收到的全部说明。它无法向你提问，因此请写明遇到取舍时该怎么做。",
+    trigger: "触发方式",
+    kindManual: "仅在我手动运行时",
+    kindEvery: "按间隔重复",
+    kindOnce: "一次，在指定时刻",
+    kindDaily: "每天，在指定时刻",
+    kindWeekly: "每周，在选定的日子",
+    kindMonthly: "每月，在指定日",
+    kindYearly: "每年，在指定日期",
+    everyLabel: "每",
+    minutes: "分钟",
+    atLabel: "于",
+    onLabel: "在",
+    onTheLabel: "在每月",
+    dayLabel: "日",
+    browserTimezone: "浏览器时区",
+    customTimezone: "自定义时区",
+    timezone: "时区",
+    done: "完成",
+    change: "更改",
+    daysOfWeek: "星期",
+    weekdays: "工作日",
+    pickADay: "请至少选择一天。",
+    shortestInterval_one: "最短间隔为 {{count}} 分钟。",
+    shortestInterval_other: "最短间隔为 {{count}} 分钟。",
+    timerActive: "启用定时",
+    timerHint:
+      "无论是否启用定时，运行按钮与 API 都可用 —— 暂停只会停掉定时器。运行之间不会互相阻止重叠，因此请留出足够的间隔让它跑完。",
+  },
+
+  stepForm: {
+    namePlaceholder: "步骤名称",
+    missingAgent:
+      "名为 <name>{{agent}}</name> 的智能体已不存在，因此工作流运行时该步骤会失败。请另选一个，或重新创建它。",
+    promptPlaceholder: "此步骤应做什么。它的输入会附加在下方。",
+    outcomes: "结果",
+    outcomesHint:
+      "此步骤可能的结束方式。步骤会选定其中之一，而这也是流转判断唯一读取的东西。每一项都需要描述 —— 模型正是靠它来做选择。",
+    outcomePlaceholder: "success",
+    outcomeDescPlaceholder: "它代表什么",
+    removeOutcome: "移除结果 {{name}}",
+    addOutcome: "添加结果",
+    fields: "结果字段",
+    fieldNamePlaceholder: "severity",
+    fieldDescPlaceholder: "它保存什么",
+    typeString: "字符串",
+    typeNumber: "数字",
+    typeBoolean: "布尔值",
+    typeStringList: "字符串列表",
+    required: "必填",
+    removeField: "移除字段 {{name}}",
+    addField: "添加字段",
+    canAsk: "可以向人提问",
+    canAskHint: "为此步骤提供 ask_user 工具。没有它，步骤就无法提问，只能自行决定。",
+    goesTo: "流转到",
+    goesToHint:
+      "按顺序尝试，第一个匹配的生效。未指定结果的一行即为兜底。若都不匹配，运行结束。",
+    opAlways: "总是",
+    opIn: "结果属于",
+    opNotIn: "结果不属于",
+    chooseStep: "选择一个步骤…",
+    removeTransition: "移除流转 {{n}}",
+    addTransition: "添加流转",
+    limits: "上限",
+    maxIterations: "最大轮数",
+    unlimited: "不限",
+    retries: "重试次数",
+    limitsHint:
+      "此步骤在失败前最多可进行多少轮，以及其中的临时性服务商错误最多重试几次。两项留空即使用默认值。",
+  },
+
+  workflowEdit: {
+    reorder: "用方向键调整 {{name}} 的顺序",
+    removeStep: "移除步骤 {{name}}",
+    stepFallback: "步骤",
+    noSuch: "工作流不存在：{{name}}。",
+    contents: "工作流内容",
+    definition: "定义",
+    unnamed: "未命名",
+    addStep: "添加步骤",
+    visualize: "查看图示",
+    chooseStep: "选择一个步骤进行编辑。",
+    namePlaceholder: "fix-bug",
+    stepBudget: "步骤预算",
+    stepBudgetPlaceholder: "100（默认）",
+    stepBudgetHint:
+      "一次运行最多可执行的步骤数。它用来终止那些条件永远不翻转的循环；若某个图确实需要多次循环，请调高它。",
+    startsAt: "起始步骤",
+    chooseAStep: "—— 请选择一个步骤 ——",
+    noSuchStep: "{{name}}（此步骤不存在）",
+  },
+
+  modelsPage: {
+    addProvider: "添加服务商",
+    addModel: "添加模型",
+    saveProvider: "保存服务商",
+    saveModel: "保存模型",
+    noProviders: "还没有服务商。",
+    noModelsFor: "还没有模型经由 {{provider}} 路由。",
+    title: "模型与服务商",
+    desc: "API 端点，以及会话可选用的模型别名。每个服务商与每个模型各自独立保存 —— 打开一个、编辑它、按它自己的“保存”。",
+    loadFailed: "无法加载设置。<cmd>horsie serve</cmd> 在运行吗？",
+    providers: "服务商",
+    providersDesc: "API 端点。选择其中一个即可查看经由它路由的模型。",
+    kind: {
+      anthropic: "Anthropic",
+      openai: "OpenAI 兼容",
+      "openai-responses": "OpenAI Responses",
+      chatgpt: "ChatGPT 套餐",
+    },
+    kindLabel: "类型",
+    keySet: "已设置密钥",
+    noKey: "无密钥",
+    signedInHint: "已登录某个 ChatGPT 套餐。",
+    notSignedInHint: "未登录 —— 请先连接此服务商，再为它添加模型。",
+    keyStoredHint: "此服务商已存储 API 密钥。",
+    noKeyHint: "未存储 API 密钥 —— 请先添加一个，再为它添加模型。",
+    selectProviderFirst: "请先选择一个服务商。",
+    connectFirst: "请先将“{{name}}”连接到 ChatGPT 套餐。",
+    addKeyFirst: "请先为“{{name}}”添加 API 密钥。",
+    needProviderName: "每个服务商都需要名称。",
+    providerExists: "已存在名为“{{name}}”的服务商。",
+    confirmDeleteProvider: "删除服务商“{{name}}”？",
+    confirmDeleteProviderWithModels_one:
+      "删除服务商“{{name}}”及其模型（{{aliases}}）？",
+    confirmDeleteProviderWithModels_other:
+      "删除服务商“{{name}}”及其 {{count}} 个模型（{{aliases}}）？",
+    needAlias: "每个模型都需要别名。",
+    aliasExists: "已存在别名为“{{alias}}”的模型。",
+    mustBeNumber: "“{{alias}}”的{{label}}必须是数字。",
+    confirmDeleteModel: "删除模型“{{alias}}”？",
+    modelCount_one: "{{count}} 个模型",
+    modelCount_other: "{{count}} 个模型",
+    chatgptSignInFor: "{{name}} 的 ChatGPT 登录",
+    connect: "连接",
+    modelsFor: "模型 · {{provider}}",
+    modelsDesc: "会话可选用的别名。每个别名都指向此服务商上的一个模型 ID。",
+    providerNamePlaceholder: "anthropic",
+    baseUrlHint: "只填主机 —— horsie 会自行补上 API 路径。应填 {{example}}，而不是 {{example}}/v1。",
+    inlineKey: "内联密钥",
+    willBeCleared: "保存时将被清除",
+    notSetLower: "未设置",
+    clearKey: "保存时清除已存储的密钥",
+    chatgptHint: "ChatGPT 套餐通过登录授权，而非密钥。请在列表中它所在的那一行连接。",
+    chatgptHintNew:
+      "ChatGPT 套餐通过登录授权，而非密钥。保存之后，请在列表中它所在的那一行连接。",
+    keepSignatures: "保留思考签名",
+    keepSignaturesHint:
+      "api.anthropic.com 必需，它会在重放时校验这些签名。对于 Anthropic 兼容端点请关闭 —— 每个思考块的签名有好几 KB，而且没有任何东西会读它们。",
+    alias: "别名",
+    aliasPlaceholder: "sonnet",
+    provider: "服务商",
+    thinkingEfforts: "此模型提供的思考强度",
+    wireDialect: "协议方言",
+    forcedToolsHint:
+      "DeepSeek 必需，它在开启思考时会拒绝强制的工具选择。必须调用交接工具的子智能体将在不思考的情况下运行。",
+  },
+
+  integrations: {
+    desc: "GitHub、MCP 服务器，以及此服务器的构建信息。",
+    github: "GitHub",
+    githubDesc: "连接你的 GitHub 账户，让会话可以克隆你的仓库。",
+    connectedAs: "已连接为 <login>@{{login}}</login>",
+    disconnect: "断开连接",
+    appConfigured: "应用已配置 —— 连接你的账户。",
+    noApp:
+      "此服务器尚未注册 GitHub App。请在<lnk>管理 → GitHub App</lnk>中设置一个。",
+    registerFirst: "请先在“管理”中注册 GitHub App",
+    githubTools: "GitHub 工具（MCP）",
+    githubToolsDesc:
+      "让会话通过此连接调用 GitHub MCP 服务器（创建 PR、搜索 issue 等）。",
+    enable: "启用",
+    disable: "停用",
+    test: "测试",
+    testFailed: "测试失败。",
+    enabledTools_one: "已启用 · {{count}} 个工具",
+    enabledTools_other: "已启用 · {{count}} 个工具",
+    notTested: "未测试",
+    mcpDesc:
+      "远程 Model Context Protocol 服务器。会话可选择使用哪些；它们的工具会以 <mono>{{pattern}}</mono> 的形式出现。",
+    addServer: "添加服务器",
+    noServers: "尚未配置 MCP 服务器。",
+    namePlaceholder: "linear",
+    nameHint:
+      "字母、数字、“-”与“_”。它会成为每个工具 ID 的一部分：mcp__<name>__<tool>。",
+    url: "地址",
+    urlPlaceholder: "https://mcp.example.com/",
+    auth: "鉴权",
+    authNone: "无（公开）",
+    authBearer: "Bearer 令牌",
+    authOAuth: "OAuth 2.1",
+    clientId: "Client ID（可选）",
+    clientSecret: "Client Secret（可选）",
+    autoRegister: "留空 = 自动注册",
+    authorized: "已授权",
+    connectFailed: "连接失败。",
+    reauthorize: "重新授权",
+    server: "服务器",
+    none: "（无）",
+    configFile: "配置文件",
+    database: "数据库",
+    stateDir: "状态目录",
+    dataDir: "数据目录",
+    pluginsDir: "插件目录",
+    version: "版本",
+  },
+
+  settingsMenu: {
+    title: "此面板显示什么",
+    ariaLabel: "显示选项",
+    heading: "显示",
+  },
+
+  appearance: {
+    title: "外观",
+    desc: "此浏览器如何呈现 horsie。设置保存在本地而非服务器，因此你用的每个浏览器可以各不相同。",
+    themeTitle: "主题",
+    themeDesc:
+      "布局相同，质感不同。每个主题都提供浅色与深色，且两者都经过 WCAG AA 实测。",
+    themeGroup: "主题",
+    modeTitle: "浅色或深色",
+    modeDesc: "“跟随系统”会采用你的操作系统设置，并在此标签页打开期间持续跟随。",
+    modeGroup: "模式",
+    modeLight: "浅色",
+    modeDark: "深色",
+    modeSystem: "跟随系统",
+    textSizeTitle: "文字大小",
+    textSizeDesc:
+      "会缩放界面中的每一处尺寸，让间距随字号一起变化，而不是让字撑破它的位置。",
+    textSizeGroup: "文字大小",
+    transcriptTitle: "对话记录",
+    transcriptDesc:
+      "会话视图显示什么。这些是显示开关，而不是会话设置 —— 它们完全不会改变智能体的运行方式。",
+    languageTitle: "语言",
+    languageDesc: "此界面所使用的语言。“跟随系统”会采用你的浏览器设置并持续跟随。",
+    languageGroup: "语言",
+    languageSystem: "跟随系统",
+    languageSystemNote: "跟随浏览器",
+    skin: {
+      paper: {
+        name: "纸感",
+        blurb:
+          "由内到外的暖调 —— 浅色下是骨白，深色下是暖炭黑，只有那一个提交操作用朱红。",
+      },
+      signal: {
+        name: "信号",
+        blurb: "与之相反的冷调 —— 蓝黑底色配单一的青柠强调色。布局相同，色温不同。",
+      },
+    },
+    textSize: {
+      compact: {
+        name: "紧凑",
+        blurb: "最密的排布 —— 屏幕上能放下最多的对话记录。",
+      },
+      default: { name: "默认", blurb: "随产品发布的默认密度。" },
+      large: {
+        name: "宽松",
+        blurb: "更大的字号与间距，同屏内容更少。",
+      },
+    },
+  },
+};
+
+export default zhHans;

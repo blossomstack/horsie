@@ -12,6 +12,7 @@ import {
   useSetPluginDefault,
   useUpdatePlugin,
 } from "../../../hooks/usePlugins";
+import { useTranslation } from "react-i18next";
 
 /** What a user types to reach an entry. Agents answer to `@`, the rest to `/`. */
 export function sigilFor(kind: string): string {
@@ -63,6 +64,7 @@ function marketplaceOf(kind: PluginKind): string | undefined {
 }
 
 export function BundleRow({ bundle }: { bundle: PluginView }) {
+  const { t } = useTranslation();
   const setDefault = useSetPluginDefault();
   const update = useUpdatePlugin();
   const remove = useRemovePlugin();
@@ -98,7 +100,7 @@ export function BundleRow({ bundle }: { bundle: PluginView }) {
             )}
             {bundle.hasHooks && (
               <span className="chip !py-0 flex items-center gap-1 text-[0.625rem]">
-                <Webhook size={11} /> hooks
+                <Webhook size={11} /> {t("skills.hooks")}
               </span>
             )}
           </div>
@@ -148,7 +150,7 @@ export function BundleRow({ bundle }: { bundle: PluginView }) {
 
         <div className="flex shrink-0 items-center gap-2">
           <Toggle
-            label="Default for new sessions"
+            label={t("skills.defaultForNew")}
             checked={bundle.enabledDefault}
             disabled={setDefault.isPending}
             onChange={() =>
@@ -176,16 +178,20 @@ export function BundleRow({ bundle }: { bundle: PluginView }) {
                 ) : (
                   <RotateCcw size={13} />
                 )}
-                Update
+                {t("skills.update")}
               </button>
               <button
                 className="key-icon shrink-0 text-faint hover:text-red-ink"
                 onClick={async () => {
-                  if (await askConfirm(`Delete skill bundle "${bundle.name}"?`))
+                  if (
+                    await askConfirm(
+                      t("skills.confirmDeleteBundle", { name: bundle.name }),
+                    )
+                  )
                     remove.mutate(bundle.name);
                 }}
                 disabled={remove.isPending}
-                aria-label="Delete bundle"
+                aria-label={t("skills.deleteBundle")}
               >
                 <Trash2 size={15} />
               </button>

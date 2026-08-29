@@ -4,6 +4,7 @@ import {
   QueryClientProvider,
 } from "@tanstack/react-query";
 import { ApiRequestError } from "./api/client";
+import { i18n } from "./i18n";
 import { pushMutationError } from "./api/mutationErrors";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { MutationErrors } from "./components/MutationErrors";
@@ -52,7 +53,7 @@ const client = new QueryClient({
       // error is not reported twice in two places.
       if (mutation.options.meta?.inlineError) return;
       pushMutationError(
-        error instanceof Error ? error.message : "The write failed.",
+        error instanceof Error ? error.message : i18n.t("common.writeFailed"),
       );
     },
   }),

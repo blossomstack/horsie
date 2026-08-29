@@ -12,6 +12,7 @@ import {
   useRoutineSessions,
   useRunRoutine,
 } from "../../hooks/useRoutines";
+import { useTranslation } from "react-i18next";
 
 export function RoutineDetailPage() {
   const { name } = useParams<{ name: string }>();
@@ -23,13 +24,16 @@ export function RoutineDetailPage() {
   } = useRoutineSessions(name);
   const run = useRunRoutine();
   const [error, setError] = useState<string | null>(null);
+  const { t } = useTranslation();
 
   if (isLoading) {
-    return <p className="px-6 py-4 text-sm text-faint">Loading…</p>;
+    return <p className="px-6 py-4 text-sm text-faint">{t("common.loading")}</p>;
   }
   if (isError || !routine) {
     return (
-      <p className="px-6 py-4 text-sm text-red-ink">No such routine: {name}.</p>
+      <p className="px-6 py-4 text-sm text-red-ink">
+        {t("routines.noSuch", { name })}
+      </p>
     );
   }
 
@@ -38,7 +42,7 @@ export function RoutineDetailPage() {
     try {
       await run.mutateAsync(routine.name);
     } catch (e) {
-      setError(e instanceof ApiRequestError ? e.message : "Failed to run.");
+      setError(e instanceof ApiRequestError ? e.message : t("routines.runFailed"));
     }
   };
 
@@ -52,12 +56,12 @@ export function RoutineDetailPage() {
           data-testid="return-to-routines"
         >
           <ArrowLeft size={15} />
-          Return
+          {t("common.return")}
         </Link>
         <h1 className="page-title min-w-0 flex-1 truncate">{routine.name}</h1>
         {!routine.enabled && (
           <span className="rounded-full px-2 py-0.5 text-[0.6875rem] text-faint">
-            paused
+            {t("routines.paused")}
           </span>
         )}
         <Link
@@ -66,7 +70,7 @@ export function RoutineDetailPage() {
           data-testid="edit-routine-link"
         >
           <Pencil size={15} />
-          Edit
+          {t("common.edit")}
         </Link>
         <button
           className="key key-go key-sm"
@@ -75,7 +79,7 @@ export function RoutineDetailPage() {
           data-testid="run-routine-button"
         >
           <Play size={15} />
-          {run.isPending ? "Starting…" : "Run now"}
+          {run.isPending ? t("routines.starting") : t("routines.runNow")}
         </button>
       </div>
 
@@ -86,7 +90,7 @@ export function RoutineDetailPage() {
           )}
 
           <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
-            <dt className="text-faint">Agent</dt>
+            <dt className="text-faint">{t("routines.agent")}</dt>
             <dd className="text-legend">
               <Link
                 className="hover:underline"
@@ -95,7 +99,7 @@ export function RoutineDetailPage() {
                 {routine.agent}
               </Link>
             </dd>
-            <dt className="text-faint">Environment</dt>
+            <dt className="text-faint">{t("channel.environment")}</dt>
             <dd className="text-legend">
               {routine.environment.type === "Named" ? (
                 <Link
@@ -105,26 +109,27 @@ export function RoutineDetailPage() {
                   {routine.environment.value.name}
                 </Link>
               ) : routine.environment.type === "None" ? (
-                <span className="text-faint">No runtime</span>
+                <span className="text-faint">{t("routines.noRuntime")}</span>
               ) : (
                 <>
                   <span className="font-mono">{routine.environment.value.vendor}</span>
                   {(routine.environment.value.repos?.length ?? 0) > 0 && (
                     <span className="text-faint">
                       {" · "}
-                      {routine.environment.value.repos?.length} repo
-                      {routine.environment.value.repos?.length === 1 ? "" : "s"}
+                      {t("environment.repoCount", {
+                        count: routine.environment.value.repos?.length ?? 0,
+                      })}
                     </span>
                   )}
                 </>
               )}
             </dd>
-            <dt className="text-faint">Runs</dt>
+            <dt className="text-faint">{t("routines.runs")}</dt>
             <dd className="text-legend">{describeSchedule(routine.schedule)}</dd>
-            <dt className="text-faint">Next</dt>
+            <dt className="text-faint">{t("routines.next")}</dt>
             <dd className="text-legend">
               {routine.nextRunAtMs === undefined ? (
-                <span className="text-faint">not scheduled</span>
+                <span className="text-faint">{t("routines.notScheduled")}</span>
               ) : (
                 <span title={absoluteTime(routine.nextRunAtMs)}>
                   {relativeTime(routine.nextRunAtMs)}
@@ -134,7 +139,7 @@ export function RoutineDetailPage() {
           </dl>
 
           <div>
-            <div className="mb-1 text-xs font-medium text-dim">Prompt</div>
+            <div className="mb-1 text-xs font-medium text-dim">{t("routines.prompt")}</div>
             <pre className="whitespace-pre-wrap rounded-[var(--radius-control)] bg-raised px-3 py-2 font-mono text-xs text-legend">
               {routine.prompt}
             </pre>
@@ -145,26 +150,22 @@ export function RoutineDetailPage() {
               className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2 text-sm text-red-ink"
               data-testid="routine-run-error"
             >
-              {error ?? `Last trigger failed: ${routine.lastError}`}
+              {error ?? t("routines.lastTriggerFailed", { error: routine.lastError })}
             </div>
           )}
 
           <div>
-            <div className="legend mb-2">
-              Runs
-            </div>
+            <div className="legend mb-2">{t("routines.runs")}</div>
             {runsFailed && (
               <ReadError
-                what="this routine's runs"
+                what={t("routines.runsRead")}
                 error={runsError}
                 testId="routine-runs-error"
               />
             )}
             {runs && runs.length === 0 && (
               <p className="screen px-3 py-5 text-center text-sm leading-relaxed text-faint">
-                No runs yet. Runs appear here rather than in the rail, and each
-                works from the prompt alone — it has no way to ask you a
-                question.
+{t("routines.noRuns")}
               </p>
             )}
             <div className="space-y-px">

@@ -6,6 +6,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { useTranslation } from "react-i18next";
 
 /** Below `md` the session rail is a drawer, not a column — at 390px it would
  * otherwise eat two thirds of the viewport and leave the transcript unusable.
@@ -31,13 +32,14 @@ export function useRail() {
 
 /** Opens the rail on small screens. Invisible once the rail is a real column. */
 export function RailToggle() {
+  const { t } = useTranslation();
   const { setOpen } = useRail();
   return (
     <button
       className="key-icon -ml-1.5 shrink-0 md:hidden"
       onClick={() => setOpen(true)}
-      aria-label="Show sessions"
-      title="Show sessions"
+      aria-label={t("rail.showSessions")}
+      title={t("rail.showSessions")}
       data-testid="rail-toggle"
     >
       <Menu size={16} aria-hidden />

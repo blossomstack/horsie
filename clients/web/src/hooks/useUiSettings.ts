@@ -1,22 +1,14 @@
 import { useSyncExternalStore } from "react";
 
+/** The transcript display switches. `key` names both the stored value and the
+ * catalogue entry the words come from, so adding a toggle is an entry here
+ * plus two strings per language — no new component code. */
 export interface SettingDef {
-  key: string;
-  label: string;
-  description: string;
+  key: "showThinking";
   default: boolean;
 }
 
-/** Extensible list of boolean display settings shown in `SettingsMenu` —
- * add an entry here to add a new toggle, no new component code needed. */
-export const SETTINGS: SettingDef[] = [
-  {
-    key: "showThinking",
-    label: "Show thinking",
-    description: "Reveal the model's reasoning steps in the transcript.",
-    default: false,
-  },
-];
+export const SETTINGS: SettingDef[] = [{ key: "showThinking", default: false }];
 
 const STORAGE_KEY = "horsie-ui-settings";
 

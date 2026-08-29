@@ -19,6 +19,7 @@ import { Prose } from "./Prose";
 import { ToolCallCard } from "./ToolCallCard";
 import { TurnActions } from "./TurnActions";
 import { WorkGroup } from "./WorkGroup";
+import { useTranslation } from "react-i18next";
 
 /**
  * One entry in the recording.
@@ -56,6 +57,7 @@ function SegmentView({
   segment: Segment;
   showThinking: boolean;
 }) {
+  const { t } = useTranslation();
   switch (segment.kind) {
     case "text":
       return (
@@ -88,7 +90,7 @@ function SegmentView({
     case "pulse":
       return (
         <div className="pt-0.5" data-testid="pulse">
-          <span className="caret" aria-label="The agent is working" />
+          <span className="caret" aria-label={t("transcript.working")} />
         </div>
       );
   }
@@ -109,6 +111,7 @@ function AssistantTurn({
   showThinking: boolean;
 }) {
   const segments = buildSegments(msgs, live);
+  const { t } = useTranslation();
   const bodyRef = useRef<HTMLDivElement>(null);
 
   // What a copy takes: the prose the user reads, not the tool traffic
@@ -142,7 +145,7 @@ function AssistantTurn({
     >
       <div ref={bodyRef} className="min-w-0 space-y-2">
         {segments.length === 0 ? (
-          <span className="caret" aria-label="The agent is working" />
+          <span className="caret" aria-label={t("transcript.working")} />
         ) : (
           segments.map((s) => (
             <SegmentView key={s.key} segment={s} showThinking={showThinking} />
@@ -157,6 +160,7 @@ function UserTurn({ msg }: { msg: RenderedMessage }) {
   // One copy button, not two: a user message is plain text already, so a
   // markdown flavour would be a second control with the same outcome.
   const settled = !msg.optimistic && !msg.queued;
+  const { t } = useTranslation();
   return (
     <Turn
       className={cn((msg.optimistic || msg.queued) && "opacity-60")}
@@ -179,7 +183,7 @@ function UserTurn({ msg }: { msg: RenderedMessage }) {
       </CollapsibleText>
       {msg.queued && (
         <div className="legend" data-testid="queued-marker">
-          Unsent — goes in with the next turn
+          {t("transcript.queued")}
         </div>
       )}
     </Turn>

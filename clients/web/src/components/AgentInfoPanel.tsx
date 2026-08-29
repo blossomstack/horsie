@@ -1,7 +1,7 @@
 import { MessageSquareText, Trash2 } from "lucide-react";
 import type { AgentStats, SubAgentView, SubSessionView, UsageView } from "../api/types";
 import {
-  KIND_LABEL,
+  kindLabel,
   isLive,
   isRunNode,
   runGroups,
@@ -12,6 +12,7 @@ import { absoluteTime, clockTime, compactNumber, humanDuration } from "../lib/fo
 import { cn } from "../lib/cn";
 import { Prose } from "./Prose";
 import { SidePanel } from "./SidePanel";
+import { useTranslation } from "react-i18next";
 
 /**
  * One agent, as the session's own record has it.
@@ -212,6 +213,7 @@ function tokensOf(u: UsageView): number {
 /** How full the context is, as a bar. The same three bands the header dial
  * uses, so one agent's fullness reads the same wherever it is drawn. */
 function ContextBar({ tokens, window }: { tokens: number; window: number }) {
+  const { t } = useTranslation();
   const pct = Math.min(100, Math.round((tokens / window) * 100));
   const tone = pct >= 90 ? "bg-red" : pct >= 70 ? "bg-live" : "bg-lamp-ok";
   return (
@@ -228,7 +230,7 @@ function ContextBar({ tokens, window }: { tokens: number; window: number }) {
         aria-valuenow={pct}
         aria-valuemin={0}
         aria-valuemax={100}
-        aria-label="Context used"
+        aria-label={t("agentPanel.contextUsed")}
         data-testid="agent-context-bar"
       >
         <div className={cn("h-full rounded-full", tone)} style={{ width: `${pct}%` }} />
@@ -246,6 +248,7 @@ function ContextBar({ tokens, window }: { tokens: number; window: number }) {
  * an empty section teaches that the panel has nothing to say about time.
  */
 function TimingSection({ agent }: { agent: SelectedAgent }) {
+  const { t } = useTranslation();
   const { startedAtMs: from, endedAtMs: to } = agent;
   if (from <= 0 && to <= 0) return null;
   const live = isLive(agent.status);
@@ -255,11 +258,15 @@ function TimingSection({ agent }: { agent: SelectedAgent }) {
   const until = live ? Date.now() : to;
   const elapsed = from > 0 && until > from ? until - from : null;
   return (
-    <Section title="Timing">
+    <Section title={t("agentPanel.timing")}>
       {from > 0 && (
         <Row
           label={
-            agent.kind === "sub_session" ? "Branched" : agent.kind === "main" ? "Opened" : "Spawned"
+            agent.kind === "sub_session"
+              ? t("agentPanel.branched")
+              : agent.kind === "main"
+                ? t("agentPanel.opened")
+                : t("agentPanel.spawned")
           }
           value={clockTime(from)}
           hint={absoluteTime(from)}
@@ -269,19 +276,23 @@ function TimingSection({ agent }: { agent: SelectedAgent }) {
         <Row
           // A session has no end, so the same stamp is named for what it
           // actually is on one and for what it actually is on the other.
-          label={agent.kind === "sub_session" || live ? "Last activity" : "Ended"}
+          label={
+            agent.kind === "sub_session" || live
+              ? t("agentPanel.lastActivity")
+              : t("agentPanel.ended")
+          }
           value={clockTime(to)}
           hint={absoluteTime(to)}
         />
       )}
       {elapsed != null && (
         <Row
-          label={live ? "Running for" : "Took"}
+          label={live ? t("agentPanel.runningFor") : t("agentPanel.took")}
           value={humanDuration(elapsed)}
           hint={
             live
-              ? "Measured against now: this agent has not stopped."
-              : "From when it began to when it reached this result."
+              ? t("agentPanel.runningForHint")
+              : t("agentPanel.tookHint")
           }
         />
       )}
@@ -306,6 +317,7 @@ export function AgentInfoPanel({
   deleting?: boolean;
 }) {
   const stats = agent.stats;
+  const { t } = useTranslation();
   // Worth drawing only when it differs: on a leaf the two totals are the same
   // number, and a second identical figure invites the reader to look for a
   // difference that is not there.
@@ -314,14 +326,14 @@ export function AgentInfoPanel({
 
   return (
     <SidePanel
-      legend={agent.kind === "run" ? "Run" : "Agent"}
+      legend={agent.kind === "run" ? t("agentPanel.run") : t("agentPanel.agent")}
       readout={
         <span className="readout truncate text-[0.6875rem]" data-testid="agent-panel-readout">
-          {KIND_LABEL[agent.kind]}
+          {kindLabel(agent.kind)}
         </span>
       }
       onClose={onClose}
-      closeLabel="Hide the agent panel"
+      closeLabel={t("agentPanel.close")}
       testId="agent-panel"
       closeTestId="agent-panel-collapse"
     >
@@ -357,54 +369,54 @@ export function AgentInfoPanel({
             agents, each with a window of its own, and the run's page says as
             much by carrying no gauge either. */}
         {stats && agent.kind !== "run" && (
-          <Section title="Context">
+          <Section title={t("agentPanel.context")}>
             {stats.contextWindow != null && stats.contextWindow > 0 ? (
               <ContextBar tokens={stats.contextTokens} window={stats.contextWindow} />
             ) : (
               <Row
-                label="In context"
+                label={t("agentPanel.inContext")}
                 value={compactNumber(stats.contextTokens)}
-                hint="No window is configured for this agent's model, so there is no fraction to draw."
+                hint={t("agentPanel.inContextHint")}
               />
             )}
             <p className="mt-1.5 text-[0.6875rem] leading-relaxed text-faint">
-              As of the end of this agent's last turn.
+              {t("agentPanel.asOfLastTurn")}
             </p>
           </Section>
         )}
 
         {stats && (
-          <Section title="Tokens">
+          <Section title={t("agentPanel.tokens")}>
             <Row
-              label="Input"
+              label={t("usage.input")}
               value={compactNumber(stats.usage.inputTokens)}
-              hint="Full prompt tokens across this agent's turns. Cache reads and writes are included in this total, not additional."
+              hint={t("agentPanel.inputHint")}
             />
             <Row
-              label="Output"
+              label={t("usage.output")}
               value={compactNumber(stats.usage.outputTokens)}
-              hint="Tokens this agent generated back."
+              hint={t("agentPanel.outputHint")}
             />
             {stats.usage.cacheReadTokens != null && (
               <Row
-                label="Cache read"
+                label={t("usage.cacheRead")}
                 value={compactNumber(stats.usage.cacheReadTokens)}
-                hint="Served from the provider's prompt cache at a discount."
+                hint={t("agentPanel.cacheReadHint")}
               />
             )}
             {stats.usage.cacheCreationTokens != null && (
               <Row
-                label="Cache write"
+                label={t("usage.cacheWrite")}
                 value={compactNumber(stats.usage.cacheCreationTokens)}
-                hint="Written to the provider's prompt cache at a premium."
+                hint={t("agentPanel.cacheWriteHint")}
               />
             )}
             {subtreeDiffers && (
               <div className="mt-2 border-t pt-2" data-testid="agent-panel-subtree">
                 <Row
-                  label="With subtree"
+                  label={t("agentPanel.withSubtree")}
                   value={compactNumber(tokensOf(stats.subtreeUsage))}
-                  hint="This agent plus everything below it: the subagents it spawned, the sub sessions branched from it, and the steps of any workflow it invoked."
+                  hint={t("agentPanel.withSubtreeHint")}
                 />
               </div>
             )}
@@ -419,7 +431,13 @@ export function AgentInfoPanel({
             rendering nobody wanted, least of all for the two blocks in this
             panel anyone actually reads at length. */}
         {agent.input && (
-          <Section title={agent.kind === "sub_session" ? "Brief" : "Task"}>
+          <Section
+            title={
+              agent.kind === "sub_session"
+                ? t("agentPanel.brief")
+                : t("agentPanel.task")
+            }
+          >
             <div data-testid="agent-panel-input">
               <Prose text={agent.input} compact />
             </div>
@@ -427,7 +445,7 @@ export function AgentInfoPanel({
         )}
 
         {agent.output && (
-          <Section title="Result">
+          <Section title={t("agentPanel.result")}>
             <div data-testid="agent-panel-output">
               <Prose text={agent.output} compact />
             </div>
@@ -446,7 +464,7 @@ export function AgentInfoPanel({
               icon: the panel's key and the node's key go to the same place. */}
           <MessageSquareText size={13} aria-hidden />
           {/* A run's page is its graph; every other kind has a transcript. */}
-          {agent.kind === "run" ? "Run" : "Transcript"}
+          {agent.kind === "run" ? t("agentPanel.run") : t("agentPanel.transcript")}
         </button>
         )}
         {onDelete && (
@@ -456,10 +474,10 @@ export function AgentInfoPanel({
             disabled={deleting}
             title={
               agent.kind === "sub_session"
-                ? "Delete this sub session"
-                : "Delete this subagent run and everything below it"
+                ? t("agentPanel.deleteSubSession")
+                : t("agentPanel.deleteSubagent")
             }
-            aria-label="Delete this agent"
+            aria-label={t("agentPanel.deleteAgent")}
             data-testid="agent-panel-delete"
           >
             <Trash2 size={14} aria-hidden />

@@ -1,4 +1,5 @@
-import { Check, Monitor, Moon, Sun } from "lucide-react";
+import { Check, Globe, Monitor, Moon, Sun } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { SETTINGS, useUiSettings } from "../../hooks/useUiSettings";
 import {
   SKINS,
@@ -7,14 +8,23 @@ import {
   type Skin,
   type ThemeChoice,
 } from "../../hooks/useTheme";
+import {
+  LOCALES,
+  useLocaleChoice,
+  type LocaleChoice,
+} from "../../i18n";
 import { cn } from "../../lib/cn";
 import { Section, SettingsPage } from "./fields";
 
-const MODES: { id: ThemeChoice; label: string; icon: typeof Sun }[] = [
-  { id: "light", label: "Light", icon: Sun },
-  { id: "dark", label: "Dark", icon: Moon },
-  { id: "system", label: "System", icon: Monitor },
-];
+const MODES = [
+  { id: "light", icon: Sun, labelKey: "appearance.modeLight" },
+  { id: "dark", icon: Moon, labelKey: "appearance.modeDark" },
+  { id: "system", icon: Monitor, labelKey: "appearance.modeSystem" },
+] as const satisfies readonly {
+  id: ThemeChoice;
+  icon: typeof Sun;
+  labelKey: string;
+}[];
 
 /**
  * A miniature of one world, drawn from that world's own tokens.
@@ -63,62 +73,79 @@ function SkinSwatch({ skin, mode }: { skin: Skin; mode: "light" | "dark" }) {
   );
 }
 
-/** How the interface looks, and what it shows. Both are per-browser choices —
- * the server has no opinion about either. */
+/** How the interface looks, what language it speaks, and what it shows. All
+ * three are per-browser choices — the server has no opinion about any. */
 export function AppearanceSettings() {
+  const { t } = useTranslation();
   const { choice, mode, skin, textSize, setChoice, setSkin, setTextSize } =
     useTheme();
+  const { choice: localeChoice, locale, setChoice: setLocale } =
+    useLocaleChoice();
   const { values, toggle } = useUiSettings();
 
+  // `system` first: it is the default, and it is the entry whose current
+  // resolution is worth showing next to it.
+  const localeOptions: { id: LocaleChoice; name: string; note: string }[] = [
+    {
+      id: "system",
+      name: t("appearance.languageSystem"),
+      note: t("appearance.languageSystemNote"),
+    },
+    ...LOCALES,
+  ];
+
   return (
-    <SettingsPage
-        title="Appearance"
-        desc="How this browser renders horsie. Stored locally, not on the server, so each browser you use can differ."
-    >
+    <SettingsPage title={t("appearance.title")} desc={t("appearance.desc")}>
         <Section
-          title="Theme"
-          desc="Same layouts, different material. Every theme ships light and dark, and every one is measured to WCAG AA in both."
+          title={t("appearance.themeTitle")}
+          desc={t("appearance.themeDesc")}
         >
           <div
             className="grid grid-cols-1 gap-2.5 sm:grid-cols-2"
             role="radiogroup"
-            aria-label="Theme"
+            aria-label={t("appearance.themeGroup")}
           >
             {SKINS.map((s) => (
               <button
-                key={s.id}
+                key={s}
                 type="button"
                 role="radio"
-                aria-checked={skin === s.id}
-                onClick={() => setSkin(s.id)}
-                data-testid={`skin-option-${s.id}`}
+                aria-checked={skin === s}
+                onClick={() => setSkin(s)}
+                data-testid={`skin-option-${s}`}
                 className={cn(
                   "flex flex-col gap-2 rounded-[var(--radius-control)] p-2.5 text-left transition-colors",
                   // Selection is a fill and a tick, like every other selected
                   // thing in the build — not a ring around the card.
-                  skin === s.id ? "bg-raised" : "hover:bg-raised",
+                  skin === s ? "bg-raised" : "hover:bg-raised",
                 )}
               >
-                <SkinSwatch skin={s.id} mode={mode} />
+                <SkinSwatch skin={s} mode={mode} />
                 <span className="flex items-center gap-1.5">
                   <span className="text-[0.8125rem] font-semibold text-legend">
-                    {s.name}
+                    {t(`appearance.skin.${s}.name`)}
                   </span>
-                  {skin === s.id && (
+                  {skin === s && (
                     <Check size={13} className="text-accent" aria-hidden />
                   )}
                 </span>
-                <span className="text-xs leading-snug text-faint">{s.blurb}</span>
+                <span className="text-xs leading-snug text-faint">
+                  {t(`appearance.skin.${s}.blurb`)}
+                </span>
               </button>
             ))}
           </div>
         </Section>
 
         <Section
-          title="Light or dark"
-          desc="System follows your operating system and keeps following it while this tab is open."
+          title={t("appearance.modeTitle")}
+          desc={t("appearance.modeDesc")}
         >
-          <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Mode">
+          <div
+            className="flex flex-wrap gap-2"
+            role="radiogroup"
+            aria-label={t("appearance.modeGroup")}
+          >
             {MODES.map((m) => (
               <button
                 key={m.id}
@@ -130,9 +157,14 @@ export function AppearanceSettings() {
                 className={cn("key", choice === m.id ? "key-go" : "key-blank")}
               >
                 <m.icon size={13} aria-hidden />
-                {m.label}
+                {t(m.labelKey)}
                 {m.id === "system" && choice === "system" && (
-                  <span className="opacity-70">· {mode}</span>
+                  <span className="opacity-70">
+                    ·{" "}
+                    {mode === "light"
+                      ? t("appearance.modeLight")
+                      : t("appearance.modeDark")}
+                  </span>
                 )}
               </button>
             ))}
@@ -140,34 +172,69 @@ export function AppearanceSettings() {
         </Section>
 
         <Section
-          title="Text size"
-          desc="Scales every measurement in the interface, so the spacing grows with the type rather than the type outgrowing its slots."
+          title={t("appearance.languageTitle")}
+          desc={t("appearance.languageDesc")}
         >
           <div
             className="flex flex-wrap gap-2"
             role="radiogroup"
-            aria-label="Text size"
+            aria-label={t("appearance.languageGroup")}
           >
-            {TEXT_SIZES.map((t) => (
+            {localeOptions.map((option) => (
               <button
-                key={t.id}
+                key={option.id}
                 type="button"
                 role="radio"
-                aria-checked={textSize === t.id}
-                onClick={() => setTextSize(t.id)}
-                data-testid={`text-size-option-${t.id}`}
-                title={t.blurb}
-                className={cn("key", textSize === t.id ? "key-go" : "key-blank")}
+                aria-checked={localeChoice === option.id}
+                onClick={() => setLocale(option.id)}
+                data-testid={`locale-option-${option.id}`}
+                title={option.note}
+                className={cn(
+                  "key",
+                  localeChoice === option.id ? "key-go" : "key-blank",
+                )}
               >
-                {t.name}
+                {option.id === "system" && <Globe size={13} aria-hidden />}
+                {option.name}
+                {option.id === "system" && localeChoice === "system" && (
+                  <span className="opacity-70">
+                    · {LOCALES.find((l) => l.id === locale)?.name}
+                  </span>
+                )}
               </button>
             ))}
           </div>
         </Section>
 
         <Section
-          title="Transcript"
-          desc="What the session view shows. These are display switches, not session settings — they change nothing about how the agent runs."
+          title={t("appearance.textSizeTitle")}
+          desc={t("appearance.textSizeDesc")}
+        >
+          <div
+            className="flex flex-wrap gap-2"
+            role="radiogroup"
+            aria-label={t("appearance.textSizeGroup")}
+          >
+            {TEXT_SIZES.map((size) => (
+              <button
+                key={size}
+                type="button"
+                role="radio"
+                aria-checked={textSize === size}
+                onClick={() => setTextSize(size)}
+                data-testid={`text-size-option-${size}`}
+                title={t(`appearance.textSize.${size}.blurb`)}
+                className={cn("key", textSize === size ? "key-go" : "key-blank")}
+              >
+                {t(`appearance.textSize.${size}.name`)}
+              </button>
+            ))}
+          </div>
+        </Section>
+
+        <Section
+          title={t("appearance.transcriptTitle")}
+          desc={t("appearance.transcriptDesc")}
         >
           {SETTINGS.map((def) => (
             <button
@@ -193,9 +260,11 @@ export function AppearanceSettings() {
                 {values[def.key] && <Check size={11} strokeWidth={3} />}
               </span>
               <span className="min-w-0">
-                <span className="block text-[0.8125rem] text-legend">{def.label}</span>
+                <span className="block text-[0.8125rem] text-legend">
+                  {t(`ui.${def.key}.label`)}
+                </span>
                 <span className="mt-0.5 block text-xs leading-snug text-faint">
-                  {def.description}
+                  {t(`ui.${def.key}.description`)}
                 </span>
               </span>
             </button>

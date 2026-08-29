@@ -111,3 +111,69 @@ test.describe("appearance", () => {
     await expect(page.locator("html")).not.toHaveAttribute("data-text-size", /.+/);
   });
 });
+
+test.describe("language", () => {
+  test("R5: choosing a language translates the app and survives a reload", async ({
+    page,
+    appBase,
+  }) => {
+    // Start on the new-session view, which draws the config row: its legends
+    // come from `configPickers`, which reads the catalogue through the global
+    // `t` rather than through `useTranslation`. Nothing in that subtree
+    // subscribes to the language, so it is the surface a partial switch
+    // leaves in English — which is what the remount in `App` exists for.
+    await page.goto(appBase);
+    await expect(page.getByTestId("config-tools")).toHaveAttribute(
+      "aria-label",
+      /Tools/,
+    );
+
+    await page.goto(`${appBase}/settings/appearance`);
+    await expect(page.locator("html")).toHaveAttribute("lang", "en");
+
+    await page.getByTestId("locale-option-zh-Hans").click();
+    await expect(page.locator("html")).toHaveAttribute("lang", "zh-Hans");
+    // The page's own heading, and the rail beside it: a switch that only
+    // repaints the settings page is the failure this asserts against, since
+    // most of the app's strings arrive through helpers rather than through a
+    // component that subscribed to the language.
+    await expect(
+      page.getByRole("heading", { level: 1, name: "外观" }),
+    ).toBeVisible();
+    await expect(page.getByTestId("agents-link")).toContainText("智能体");
+
+    // The unsubscribed subtree moved too, without a reload.
+    await page.goto(appBase);
+    await expect(page.getByTestId("config-tools")).toHaveAttribute(
+      "aria-label",
+      /工具/,
+    );
+
+    await page.reload();
+    await expect(page.locator("html")).toHaveAttribute("lang", "zh-Hans");
+    await page.goto(`${appBase}/settings/appearance`);
+    await expect(page.getByTestId("agents-link")).toContainText("智能体");
+
+    // Traditional is a separate catalogue, not a character conversion of the
+    // Simplified one — 智慧代理 rather than 智能體 is the tell.
+    await page.getByTestId("locale-option-zh-Hant").click();
+    await expect(page.locator("html")).toHaveAttribute("lang", "zh-Hant");
+    await expect(page.getByTestId("agents-link")).toContainText("智慧代理");
+
+    await page.getByTestId("locale-option-en").click();
+    await expect(page.locator("html")).toHaveAttribute("lang", "en");
+    await expect(page.getByTestId("agents-link")).toContainText("Agents");
+  });
+
+  test("R6: System follows the browser's language", async ({ browser, appBase }) => {
+    // A fresh context, because the choice is per-browser and `system` is only
+    // the default until something has been picked.
+    const context = await browser.newContext({ locale: "zh-TW" });
+    const page = await context.newPage();
+    await page.goto(`${appBase}/settings/appearance`);
+
+    await expect(page.locator("html")).toHaveAttribute("lang", "zh-Hant");
+    await expect(page.getByTestId("agents-link")).toContainText("智慧代理");
+    await context.close();
+  });
+});

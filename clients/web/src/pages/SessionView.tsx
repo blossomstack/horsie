@@ -48,6 +48,7 @@ import { sessionTitle } from "../lib/format";
 import { buildTimeline } from "../lib/timeline";
 import { isRunNode, layoutAgentTree } from "../lib/agentTree";
 import { progressionLabel, showsProgression, statusMeta } from "../lib/status";
+import { Trans, useTranslation } from "react-i18next";
 
 type SessionViewId = "transcript" | "timeline" | "graph";
 
@@ -110,32 +111,35 @@ function SessionTitle({ name }: { name: string | undefined }) {
  * Kept inside the sessions layout, and keeping the rail toggle, for the same
  * reason `NotFoundPage` is: the dead end is the defect, not the copy. */
 function SessionUnavailable({ id, error }: { id: string; error: unknown }) {
+  const { t } = useTranslation();
   const gone = error instanceof ApiRequestError && error.status === 404;
   return (
     <div className="flex h-full flex-col" data-testid="session-unavailable">
       <header className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
         <RailToggle />
         <h1 data-testid="session-title" className="page-title min-w-0 flex-1 truncate">
-          {gone ? "No such session" : "Could not load this session"}
+          {gone ? t("session.noSuch") : t("session.loadFailed")}
         </h1>
       </header>
       <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-6">
         <div className="mx-auto max-w-3xl">
           <section className="section">
-            <h2 className="legend">Session id</h2>
+            <h2 className="legend">{t("session.sessionId")}</h2>
             <pre className="screen mt-3 overflow-x-auto px-3 py-2.5 font-mono text-[0.6875rem] leading-relaxed text-legend select-all">
               {id}
             </pre>
             <p className="mt-3 max-w-prose text-sm leading-relaxed text-dim">
               {gone
-                ? "It was deleted, or it never existed. Nothing you type here can reach it."
+                ? t("session.goneHint")
                 : error instanceof Error
                   ? error.message
-                  : "The read failed."}{" "}
-              <Link className="text-legend underline" to="/">
-                Your sessions
-              </Link>{" "}
-              lists the ones that are there.
+                  : t("session.readFailed")}{" "}
+              <Trans
+                i18nKey="session.yourSessionsList"
+                components={{
+                  lnk: <Link className="text-legend underline" to="/" />,
+                }}
+              />
             </p>
           </section>
         </div>
@@ -145,6 +149,7 @@ function SessionUnavailable({ id, error }: { id: string; error: unknown }) {
 }
 
 export function SessionView() {
+  const { t } = useTranslation();
   const { id, agentId } = useParams<{ id: string; agentId?: string }>();
   const navigate = useNavigate();
   const { data: detail, isLoading, isError, error } = useSession(id);
@@ -667,7 +672,7 @@ export function SessionView() {
    *  by the panel beside the structural views, so the confirmation and the
    *  navigation afterwards are written once. */
   const deleteRun = async (runId: string, name: string) => {
-    if (!(await askConfirm(`Delete “${name}”? This cannot be undone.`))) return;
+    if (!(await askConfirm(t("session.confirmDeleteRun", { name })))) return;
     try {
       await delAgent.mutateAsync({ id, agentId: runId });
       // Back to the session, which still exists. Only when the page *was* that
@@ -684,10 +689,10 @@ export function SessionView() {
   // thing under the same key.
   const handleDelete = async () => {
     if (runDeletable && agentId) {
-      await deleteRun(agentId, runTitle ?? "this run");
+      await deleteRun(agentId, runTitle ?? t("session.thisRun"));
       return;
     }
-    if (!(await askConfirm("Delete this session? This cannot be undone.")))
+    if (!(await askConfirm(t("session.confirmDelete"))))
       return;
     try {
       await del.mutateAsync(id);
@@ -762,7 +767,7 @@ export function SessionView() {
             <div
               className="flex shrink-0 items-center gap-0.5 rounded-[var(--radius-control)] bg-screen p-0.5"
               role="radiogroup"
-              aria-label="View"
+              aria-label={t("session.view")}
               data-testid="view-switch"
             >
                 {/* One control with three settings rather than two independent
@@ -801,11 +806,11 @@ export function SessionView() {
               <span
                 className="flex shrink-0 items-center gap-2 text-live-ink"
                 data-testid="session-reconnecting"
-                title="Lost the live feed. The run continues on the server; this reconnects and replays anything missed."
+                title={t("session.reconnectingHint")}
               >
                 <span className="lamp lamp-live" aria-hidden />
                 <span className="legend hidden text-current sm:inline">
-                  Reconnecting
+                  {t("session.reconnecting")}
                 </span>
               </span>
             )}
@@ -845,13 +850,19 @@ export function SessionView() {
                 aria-pressed={tasksOpen}
                 title={
                   tasks.length
-                    ? `${tasksOpen ? "Hide" : "Show"} the plan — ${tasksDone}/${tasks.length} done`
-                    : `${tasksOpen ? "Hide" : "Show"} the plan`
+                    ? t(
+                        tasksOpen ? "taskList.hideWithCount" : "taskList.showWithCount",
+                        { done: tasksDone, total: tasks.length },
+                      )
+                    : t(tasksOpen ? "taskList.hide" : "taskList.show")
                 }
                 aria-label={
                   tasks.length
-                    ? `Toggle the agent's plan — ${tasksDone} of ${tasks.length} done`
-                    : "Toggle the agent's plan"
+                    ? t("taskList.toggleWithCount", {
+                        done: tasksDone,
+                        total: tasks.length,
+                      })
+                    : t("taskList.toggle")
                 }
                 data-testid="task-list-toggle"
                 data-has-plan={tasks.length > 0 ? "true" : undefined}
@@ -947,7 +958,7 @@ export function SessionView() {
             {isLoading && stream.items.length === 0 ? (
               <div className="flex h-full items-center justify-center gap-2">
                 <span className="lamp lamp-live text-live-ink" aria-hidden />
-                <span className="legend">Loading transcript</span>
+                <span className="legend">{t("session.loadingTranscript")}</span>
               </div>
             ) : stream.items.length === 0 &&
               stream.streaming.length === 0 &&
@@ -980,11 +991,11 @@ export function SessionView() {
                           className="lamp lamp-live text-live-ink"
                           aria-hidden
                         />
-                        <span className="legend">Loading earlier messages</span>
+                        <span className="legend">{t("session.loadingEarlier")}</span>
                       </>
                     ) : (
                       <span className="legend">
-                        Scroll up for earlier messages
+                        {t("session.scrollUp")}
                       </span>
                     )}
                   </div>
@@ -1052,14 +1063,14 @@ export function SessionView() {
               >
                 <CircleAlert size={16} className="mt-0.5 shrink-0" />
                 <div className="min-w-0">
-                  <p>This session can no longer run: {terminal}</p>
+                  <p>{t("session.terminal", { reason: terminal })}</p>
                   <button
                     type="button"
                     className="key key-flat mt-2 !text-red-ink hover:!bg-red-quiet"
                     onClick={() => navigate("/")}
                     data-testid="session-terminal-new"
                   >
-                    Start a new session
+                    {t("rail.newSession")}
                   </button>
                 </div>
               </div>
@@ -1088,8 +1099,7 @@ export function SessionView() {
           {overlayOpen ? null : agentId && detail?.workflow ? (
             <div className="bar-scroll flex items-center gap-3 px-4 py-2">
               <span className="text-xs text-faint">
-                This is a workflow step. It works from its definition, not from
-                messages.
+{t("session.workflowStepHint")}
               </span>
               {/* Only while there is something to interrupt. The step's own
                   document says what became of it; offering the control on a
@@ -1101,7 +1111,7 @@ export function SessionView() {
                   onClick={handleStop}
                   data-testid="step-stop"
                 >
-                  Interrupt
+                  {t("run.interrupt")}
                 </button>
               )}
             </div>

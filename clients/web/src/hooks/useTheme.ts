@@ -11,26 +11,11 @@ export type Skin = "paper" | "signal";
  * spacing grows with the type instead of the type outgrowing its slots. */
 export type TextSize = "compact" | "default" | "large";
 
-export const TEXT_SIZES: { id: TextSize; name: string; blurb: string }[] = [
-  { id: "compact", name: "Compact", blurb: "The densest fit — most transcript on screen." },
-  { id: "default", name: "Default", blurb: "The shipped density." },
-  { id: "large", name: "Large", blurb: "Roomier type and spacing, less on screen at once." },
-];
+/** The ids only — a world's name and blurb are words, so they live in the
+ * catalogue and are looked up where they are drawn. */
+export const TEXT_SIZES: TextSize[] = ["compact", "default", "large"];
 
-export const SKINS: { id: Skin; name: string; blurb: string }[] = [
-  {
-    id: "paper",
-    name: "Paper",
-    blurb:
-      "Warm all the way down — bone in the light, warm charcoal in the dark, one vermillion for the control that commits.",
-  },
-  {
-    id: "signal",
-    name: "Signal",
-    blurb:
-      "The cold opposite — a blue-black ground under a single lime accent. Same layout, other temperature.",
-  },
-];
+export const SKINS: Skin[] = ["paper", "signal"];
 
 const THEME_KEY = "horsie-theme";
 const SKIN_KEY = "horsie-skin";
@@ -55,7 +40,7 @@ function readChoice(): ThemeChoice {
 function readSkin(): Skin {
   try {
     const raw = localStorage.getItem(SKIN_KEY);
-    return SKINS.some((s) => s.id === raw) ? (raw as Skin) : "paper";
+    return SKINS.some((s) => s === raw) ? (raw as Skin) : "paper";
   } catch {
     return "paper";
   }

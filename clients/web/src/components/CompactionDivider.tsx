@@ -1,5 +1,6 @@
 import { ChevronDown, ChevronRight, FoldVertical } from "lucide-react";
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import type { RenderedCompaction } from "../hooks/useSessionStream";
 import { compactNumber } from "../lib/format";
 import { Prose } from "./Prose";
@@ -15,6 +16,7 @@ import { Prose } from "./Prose";
  * fact at a glance is *that* it happened and what it bought; the text matters
  * only when you are working out why the agent said something afterwards. */
 export function CompactionDivider({ value }: { value: RenderedCompaction }) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const saved = value.tokensBefore - value.tokensAfter;
   return (
@@ -28,21 +30,29 @@ export function CompactionDivider({ value }: { value: RenderedCompaction }) {
           className="flex shrink-0 items-center gap-1.5 rounded-full border border-[var(--rule)] px-2.5 py-1 text-[0.6875rem] uppercase tracking-wide text-dim transition-colors hover:border-live hover:text-legend"
           title={
             open
-              ? "Hide what was carried across"
-              : "Show the summary and the state carried across"
+              ? t("compaction.hideDetail")
+              : t("compaction.showDetail")
           }
         >
           <FoldVertical size={11} aria-hidden />
           <span>
-            Compacted
-            {value.manual ? " by hand" : ""}
+            {value.manual
+              ? t("compaction.compactedByHand")
+              : t("compaction.compacted")}
             {/* Entries, not messages: a tool result is an entry too, and
                 counting only what the reader would call a message would
                 undercount what the boundary actually covers. Omitted entirely
                 when the session before this one has not been paged in —
                 no count beats a wrong one. */}
-            {value.covered !== null && <> · {value.covered} entries</>}
-            {saved > 0 && <> · {compactNumber(saved)} tokens freed</>}
+            {value.covered !== null && (
+              <> · {t("compaction.entries", { count: value.covered })}</>
+            )}
+            {saved > 0 && (
+              <>
+                {" "}
+                · {t("compaction.tokensFreed", { value: compactNumber(saved) })}
+              </>
+            )}
           </span>
           {open ? (
             <ChevronDown size={11} aria-hidden />
@@ -59,7 +69,7 @@ export function CompactionDivider({ value }: { value: RenderedCompaction }) {
           className="panel mx-auto mt-3 max-w-[46rem] p-4 text-sm"
         >
           <h4 className="mb-1.5 text-[0.6875rem] uppercase tracking-wide text-faint">
-            Summary of earlier work
+            {t("compaction.summaryHeading")}
           </h4>
           <Prose text={value.summary} />
           {value.carriedState && (
@@ -69,7 +79,7 @@ export function CompactionDivider({ value }: { value: RenderedCompaction }) {
                   wrong at the edges, the other is exact and was never shown to
                   the summariser. */}
               <h4 className="mb-1.5 mt-4 text-[0.6875rem] uppercase tracking-wide text-faint">
-                Carried across exactly
+                {t("compaction.carriedHeading")}
               </h4>
               <pre className="overflow-x-auto whitespace-pre-wrap font-mono text-[0.8125rem] leading-relaxed text-dim">
                 {value.carriedState}

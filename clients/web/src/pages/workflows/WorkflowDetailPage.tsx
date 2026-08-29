@@ -7,6 +7,7 @@ import { renderFilter } from "./stepDraft";
 import { RailToggle } from "../../components/rail";
 import { ReadError } from "../../components/ReadError";
 import { useWorkflow, useWorkflowRuns } from "../../hooks/useWorkflows";
+import { Trans, useTranslation } from "react-i18next";
 
 /**
  * A workflow's page: the graph it will run, and the runs it has had.
@@ -24,10 +25,14 @@ export function WorkflowDetailPage() {
     isError: runsFailed,
     error: runsError,
   } = useWorkflowRuns(name);
+  const { t } = useTranslation();
 
-  if (isLoading) return <p className="p-6 text-sm text-faint">Loading…</p>;
+  if (isLoading)
+    return <p className="p-6 text-sm text-faint">{t("common.loading")}</p>;
   if (isError || !workflow) {
-    return <p className="p-6 text-sm text-red-ink">No such workflow.</p>;
+    return (
+      <p className="p-6 text-sm text-red-ink">{t("workflows.noSuch")}</p>
+    );
   }
 
   const nodes = workflow.steps.map((s) => ({ step: s.name, detail: s.agent }));
@@ -49,7 +54,7 @@ export function WorkflowDetailPage() {
           data-testid="return-to-workflows"
         >
           <ArrowLeft size={14} />
-          Return
+          {t("common.return")}
         </Link>
         <h1 className="page-title min-w-0 flex-1 truncate">{workflow.name}</h1>
         <Link
@@ -58,7 +63,7 @@ export function WorkflowDetailPage() {
           data-testid="edit-workflow"
         >
           <Pencil size={14} />
-          Edit
+          {t("common.edit")}
         </Link>
         <Link
           to={`/?workflow=${encodeURIComponent(workflow.name)}`}
@@ -66,7 +71,7 @@ export function WorkflowDetailPage() {
           data-testid="run-workflow"
         >
           <Play size={14} />
-          Run
+          {t("common.run")}
         </Link>
       </div>
 
@@ -76,11 +81,13 @@ export function WorkflowDetailPage() {
         )}
 
         <section className="section">
-          <h2 className="legend">Graph</h2>
+          <h2 className="legend">{t("workflows.graph")}</h2>
           <p className="mt-1 text-xs text-faint">
-            Every step shares one runtime and one workspace.{" "}
-            <span className="text-dim">{workflow.start}</span> is handed the
-            input the run starts with.
+            <Trans
+              i18nKey="workflows.graphBlurb"
+              values={{ start: workflow.start }}
+              components={{ step: <span className="text-dim" /> }}
+            />
           </p>
           <div className="mt-3 overflow-auto">
             <WorkflowGraph nodes={nodes} edges={edges} start={workflow.start} />
@@ -88,16 +95,16 @@ export function WorkflowDetailPage() {
         </section>
 
         <section className="section">
-          <h2 className="legend">Runs</h2>
+          <h2 className="legend">{t("routines.runs")}</h2>
           {runsFailed ? (
             <ReadError
-              what="this workflow's runs"
+              what={t("workflows.runsRead")}
               error={runsError}
               testId="workflow-runs-error"
               className="mt-2"
             />
           ) : (runs ?? []).length === 0 ? (
-            <p className="mt-2 text-sm text-faint">No runs yet.</p>
+            <p className="mt-2 text-sm text-faint">{t("workflows.noRuns")}</p>
           ) : (
             <div className="mt-3 space-y-2">
               {(runs ?? []).map((s) => (

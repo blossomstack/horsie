@@ -7,6 +7,7 @@ import {
   makeFilter,
   type StepDraft,
 } from "./stepDraft";
+import { Trans, useTranslation } from "react-i18next";
 
 /**
  * One step's editor, as the right panel shows it.
@@ -51,31 +52,32 @@ export function StepForm({
   stepNames: string[];
   onChange: (patch: Partial<StepDraft>) => void;
 }) {
+  const { t } = useTranslation();
   const missingAgent =
     step.agent !== "" && !agents.some((a) => a.name === step.agent);
   return (
     <div className="space-y-4" data-testid="step-form" data-step-name={step.name}>
       <section className="section space-y-3">
         <label className="block">
-          <span className="section-title">Name</span>
+          <span className="section-title">{t("memoryPage.name")}</span>
           <input
             className="field mt-1 w-full"
             value={step.name}
-            placeholder="step name"
+            placeholder={t("stepForm.namePlaceholder")}
             onChange={(e) => onChange({ name: e.target.value })}
             data-testid="step-name"
           />
         </label>
 
         <label className="block">
-          <span className="section-title">Agent</span>
+          <span className="section-title">{t("routines.agent")}</span>
           <select
             className="field mt-1 w-full"
             value={step.agent}
             onChange={(e) => onChange({ agent: e.target.value })}
             data-testid="step-agent"
           >
-            <option value="">Choose an agent…</option>
+            <option value="">{t("routineEdit.chooseAgent")}</option>
             {agents.map((a) => (
               <option key={a.name} value={a.name}>
                 {a.name}
@@ -92,19 +94,17 @@ export function StepForm({
           </select>
           {missingAgent && (
             <span className="mt-1 block text-xs leading-relaxed text-red-ink">
-              No agent named <span className="font-mono">{step.agent}</span>{" "}
-              exists any more, so this step fails when the workflow runs. Pick
-              another, or recreate it.
+              <Trans i18nKey="stepForm.missingAgent" values={{ agent: step.agent }} components={{ name: <span className="font-mono" /> }} />
             </span>
           )}
         </label>
 
         <label className="block">
-          <span className="section-title">Prompt</span>
+          <span className="section-title">{t("routines.prompt")}</span>
           <textarea
             className="field mt-1 min-h-32 w-full"
             value={step.prompt}
-            placeholder="What this step should do. Its input is appended below it."
+            placeholder={t("stepForm.promptPlaceholder")}
             onChange={(e) => onChange({ prompt: e.target.value })}
             data-testid="step-prompt"
           />
@@ -112,11 +112,9 @@ export function StepForm({
       </section>
 
       <section className="section">
-        <h2 className="legend">Outcomes</h2>
+        <h2 className="legend">{t("stepForm.outcomes")}</h2>
         <p className="mt-1 text-xs text-faint">
-          How this step can end. The step picks one, and it is the only thing a
-          transition reads. Each needs a description — it is what the model
-          reads to choose between them.
+{t("stepForm.outcomesHint")}
         </p>
         <div className="mt-3 space-y-2">
           {step.outcomes.map((o, oi) => (
@@ -124,7 +122,7 @@ export function StepForm({
               <input
                 className="field field-mono w-40"
                 value={o.value}
-                placeholder="success"
+                placeholder={t("stepForm.outcomePlaceholder")}
                 onChange={(e) =>
                   onChange({
                     outcomes: step.outcomes.map((x, j) =>
@@ -137,7 +135,7 @@ export function StepForm({
               <input
                 className="field flex-1"
                 value={o.description}
-                placeholder="what it means"
+                placeholder={t("stepForm.outcomeDescPlaceholder")}
                 onChange={(e) =>
                   onChange({
                     outcomes: step.outcomes.map((x, j) =>
@@ -149,7 +147,7 @@ export function StepForm({
               />
               <button
                 className="key key-danger key-sm"
-                aria-label={`Remove outcome ${o.value || oi + 1}`}
+                aria-label={t("stepForm.removeOutcome", { name: o.value || oi + 1 })}
                 onClick={() =>
                   onChange({ outcomes: step.outcomes.filter((_, j) => j !== oi) })
                 }
@@ -164,13 +162,13 @@ export function StepForm({
             data-testid="add-outcome"
           >
             <Plus size={13} />
-            Add outcome
+            {t("stepForm.addOutcome")}
           </button>
         </div>
       </section>
 
       <section className="section">
-        <h2 className="legend">Result fields</h2>
+        <h2 className="legend">{t("stepForm.fields")}</h2>
         <p className="mt-1 text-xs text-faint">
           Extra values this step returns, beyond its outcome and the markdown
           summary every step writes. A description is required: an undocumented
@@ -182,7 +180,7 @@ export function StepForm({
               <input
                 className="field flex-1"
                 value={f.name}
-                placeholder="severity"
+                placeholder={t("stepForm.fieldNamePlaceholder")}
                 onChange={(e) =>
                   onChange({
                     fields: step.fields.map((x, j) =>
@@ -204,15 +202,15 @@ export function StepForm({
                 }
                 data-testid="output-field-type"
               >
-                <option value="String">string</option>
-                <option value="Number">number</option>
-                <option value="Boolean">boolean</option>
-                <option value="StringList">string list</option>
+                <option value="String">{t("stepForm.typeString")}</option>
+                <option value="Number">{t("stepForm.typeNumber")}</option>
+                <option value="Boolean">{t("stepForm.typeBoolean")}</option>
+                <option value="StringList">{t("stepForm.typeStringList")}</option>
               </select>
               <input
                 className="field flex-1"
                 value={f.description}
-                placeholder="what it holds"
+                placeholder={t("stepForm.fieldDescPlaceholder")}
                 onChange={(e) =>
                   onChange({
                     fields: step.fields.map((x, j) =>
@@ -235,11 +233,11 @@ export function StepForm({
                   }
                   data-testid="output-field-required"
                 />
-                required
+                {t("stepForm.required")}
               </label>
               <button
                 className="key key-danger key-sm"
-                aria-label={`Remove field ${f.name || fi + 1}`}
+                aria-label={t("stepForm.removeField", { name: f.name || fi + 1 })}
                 onClick={() =>
                   onChange({ fields: step.fields.filter((_, j) => j !== fi) })
                 }
@@ -254,7 +252,7 @@ export function StepForm({
             data-testid="add-output-field"
           >
             <Plus size={13} />
-            Add field
+            {t("stepForm.addField")}
           </button>
         </div>
       </section>
@@ -269,33 +267,31 @@ export function StepForm({
             data-testid="step-interactive"
           />
           <span>
-            <span className="section-title">Can ask the person</span>
+            <span className="section-title">{t("stepForm.canAsk")}</span>
             <span className="mt-1 block text-xs text-faint">
-              Gives this step the ask_user tool. Without it the step has no way
-              to ask, and must decide for itself.
+{t("stepForm.canAskHint")}
             </span>
           </span>
         </label>
       </section>
 
       <section className="section">
-        <h2 className="legend">Goes to</h2>
+        <h2 className="legend">{t("stepForm.goesTo")}</h2>
         <p className="mt-1 text-xs text-faint">
-          Tried in order; the first match wins. A row that names no outcome is
-          the catch-all. No match ends the run.
+{t("stepForm.goesToHint")}
         </p>
         <div className="mt-3 space-y-2">
-          {step.transitions.map((t, ti) => (
+          {step.transitions.map((transition, ti) => (
             <div key={ti} className="flex items-center gap-2">
               <select
                 className="field w-24"
-                value={t.when?.op ?? "any"}
+                value={transition.when?.op ?? "any"}
                 onChange={(e) => onChange({ transitions: setOp(step, ti, e.target.value) })}
                 data-testid="transition-op"
               >
-                <option value="any">always</option>
-                <option value="In">outcome in</option>
-                <option value="NotIn">outcome not in</option>
+                <option value="any">{t("stepForm.opAlways")}</option>
+                <option value="In">{t("stepForm.opIn")}</option>
+                <option value="NotIn">{t("stepForm.opNotIn")}</option>
               </select>
               {/* Checkboxes over the step's own outcomes, not free text: a
                   filter may only name outcomes this step reports, and offering
@@ -305,7 +301,7 @@ export function StepForm({
                 className="flex flex-1 flex-wrap items-center gap-2"
                 data-testid="transition-outcomes"
               >
-                {t.when === undefined
+                {transition.when === undefined
                   ? null
                   : step.outcomes
                       .filter((o) => o.value.trim() !== "")
@@ -316,7 +312,7 @@ export function StepForm({
                         >
                           <input
                             type="checkbox"
-                            checked={filterValues(t.when).includes(o.value)}
+                            checked={filterValues(transition.when).includes(o.value)}
                             onChange={(e) =>
                               onChange({
                                 transitions: toggleValue(step, ti, o.value, e.target.checked),
@@ -329,7 +325,7 @@ export function StepForm({
               </div>
               <select
                 className="field w-40"
-                value={t.to}
+                value={transition.to}
                 onChange={(e) =>
                   onChange({
                     transitions: step.transitions.map((x, j) =>
@@ -339,7 +335,7 @@ export function StepForm({
                 }
                 data-testid="transition-target"
               >
-                <option value="">Choose a step…</option>
+                <option value="">{t("stepForm.chooseStep")}</option>
                 {stepNames.map((n) => (
                   <option key={n} value={n}>
                     {n}
@@ -348,7 +344,7 @@ export function StepForm({
               </select>
               <button
                 className="key key-danger key-sm"
-                aria-label={`Remove transition ${ti + 1}`}
+                aria-label={t("stepForm.removeTransition", { n: ti + 1 })}
                 onClick={() =>
                   onChange({
                     transitions: step.transitions.filter((_, j) => j !== ti),
@@ -369,7 +365,7 @@ export function StepForm({
             data-testid="add-transition"
           >
             <Plus size={13} />
-            Add transition
+            {t("stepForm.addTransition")}
           </button>
         </div>
       </section>
@@ -379,16 +375,16 @@ export function StepForm({
           without being shown at all — so a budget set through the API was
           invisible here while quietly surviving a save. */}
       <section className="section space-y-3">
-        <h3 className="legend">Limits</h3>
+        <h3 className="legend">{t("stepForm.limits")}</h3>
         <div className="grid grid-cols-2 gap-3">
           <label className="block">
-            <span className="section-title">Max iterations</span>
+            <span className="section-title">{t("stepForm.maxIterations")}</span>
             <input
               className="field mt-1 w-full"
               type="number"
               min={1}
               value={step.maxIterations ?? ""}
-              placeholder="unlimited"
+              placeholder={t("stepForm.unlimited")}
               onChange={(e) =>
                 onChange({ maxIterations: numberOrUndefined(e.target.value) })
               }
@@ -396,7 +392,7 @@ export function StepForm({
             />
           </label>
           <label className="block">
-            <span className="section-title">Retries</span>
+            <span className="section-title">{t("stepForm.retries")}</span>
             <input
               className="field mt-1 w-full"
               type="number"
@@ -411,9 +407,7 @@ export function StepForm({
           </label>
         </div>
         <p className="text-xs text-faint">
-          How many turns this step may take before it fails, and how many times a
-          transient provider error is retried within it. Leave both blank for the
-          defaults.
+{t("stepForm.limitsHint")}
         </p>
       </section>
     </div>

@@ -11,6 +11,7 @@ import {
   Check,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 import { useGithubRepos } from "../hooks/useGithub";
 import { useMcpServers } from "../hooks/useMcp";
@@ -25,6 +26,7 @@ import type {
   ToolGroupView,
 } from "../api/types";
 import { ToolAccess } from "../api/types";
+import { i18n } from "../i18n";
 import { cn } from "../lib/cn";
 import { basename } from "../lib/format";
 import { ReadError } from "./ReadError";
@@ -134,7 +136,7 @@ function AccessBadge({ access }: { access: ToolAccess }) {
       data-testid="tool-access"
       data-access={read ? "read" : "write"}
     >
-      {read ? "read" : "write"}
+      {read ? i18n.t("tools.read") : i18n.t("tools.write")}
     </span>
   );
 }
@@ -186,7 +188,7 @@ function ToolGroup({
           ref={(el) => {
             if (el) el.indeterminate = chosen > 0 && !all;
           }}
-          aria-label={`Select all ${group.label} tools`}
+          aria-label={i18n.t("tools.selectAllIn", { group: group.label })}
           data-testid={`tool-group-all-${group.key}`}
           onChange={() => onSet(names, !all)}
         />
@@ -308,7 +310,7 @@ function toolsPicker(
 
   return {
     key: "tools",
-    legend: "Tools",
+    legend: i18n.t("channel.tools"),
     icon: <Wrench size={15} />,
     label,
     // Only an explicit narrowing is worth marking. "Default" is the resting
@@ -324,7 +326,7 @@ function toolsPicker(
     body: () =>
       failed ? (
         <ReadError
-          what="the tool catalogue"
+          what={i18n.t("channel.toolCatalogue")}
           error={error}
           testId="tools-read-error"
           className="mx-1 my-0.5"
@@ -418,9 +420,9 @@ function ToolsBody({
     });
 
   const filters: { key: AccessFilter; label: string }[] = [
-    { key: "all", label: "All" },
-    { key: "read", label: "Read" },
-    { key: "write", label: "Write" },
+    { key: "all", label: i18n.t("tools.filterAll") },
+    { key: "read", label: i18n.t("tools.filterRead") },
+    { key: "write", label: i18n.t("tools.filterWrite") },
   ];
 
   return (
@@ -450,7 +452,7 @@ function ToolsBody({
             data-testid="tool-quick-default"
             onClick={onDefault}
           >
-            Default
+            {i18n.t("common.default")}
           </button>
           <button
             type="button"
@@ -458,7 +460,7 @@ function ToolsBody({
             data-testid="tool-quick-all"
             onClick={() => onSet(visibleNames, true)}
           >
-            Select all
+            {i18n.t("tools.selectAll")}
           </button>
           <button
             type="button"
@@ -466,7 +468,7 @@ function ToolsBody({
             data-testid="tool-quick-none"
             onClick={() => onSet(visibleNames, false)}
           >
-            Clear
+            {i18n.t("tagFilter.clear")}
           </button>
         </span>
       </div>
@@ -522,6 +524,10 @@ function ToolsBody({
  * identical rather than merely similar.
  */
 export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
+  // These specs read the catalogue through the global `t` rather than a
+  // per-string hook, so nothing in them would re-render on a language change.
+  // Subscribing once here moves every picker built below.
+  useTranslation();
   const { data: settings, isError: settingsFailed, error: settingsError } =
     useSettings();
   const { data: repoList, isError: reposFailed, error: reposError } =
@@ -547,7 +553,7 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
   const repos = new Map(Object.entries(adhoc?.repos ?? {}));
   return {
     key: "environment",
-    legend: "Environment",
+    legend: i18n.t("channel.environment"),
     icon: <Server size={15} />,
     label: chosen || "Select",
     marked: !!chosen,
@@ -565,7 +571,7 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
         {d.environments.length > 0 && (
           <>
             <p className="px-2 pt-0.5 text-[0.6875rem] tracking-wide text-faint uppercase">
-              Predefined
+              {i18n.t("environment.predefined")}
             </p>
             {d.environments.map((e) => {
               const selected =
@@ -590,7 +596,7 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
                   <span className="text-[0.6875rem] text-faint">
                     {e.vendor}
                     {e.repos.length > 0 &&
-                      ` · ${e.repos.length} repo${e.repos.length === 1 ? "" : "s"}`}
+                      ` · ${i18n.t("environment.repoCount", { count: e.repos.length })}`}
                   </span>
                   {selected && <SelectedMark />}
                 </button>
@@ -599,23 +605,24 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
           </>
         )}
         <p className="px-2 pt-0.5 text-[0.6875rem] tracking-wide text-faint uppercase">
-          Runtimes
+          {i18n.t("environment.runtimes")}
         </p>
         {settingsFailed ? (
           // Without the config read there is no roster to be empty: saying "no
           // runtime is connected" here would send someone to re-run `horsie
           // connect` for a runtime that is probably already there.
           <ReadError
-            what="runtimes"
+            what={i18n.t("environment.runtimesLower")}
             error={settingsError}
             testId="environment-read-error"
             className="mx-1 my-0.5"
           />
         ) : activeVendors.length === 0 ? (
           <p className="px-2 py-1.5 text-sm leading-relaxed text-dim">
-            No runtime is connected, so a session can’t run a turn yet. Run{" "}
-            <code className="font-mono text-legend">horsie connect</code> on the
-            machine holding your code.
+            <Trans
+              i18nKey="environment.noRuntime"
+              components={{ cmd: <code className="font-mono text-legend" /> }}
+            />
           </p>
         ) : (
           activeVendors.map((v) => {
@@ -645,7 +652,9 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
               >
                 <span className="min-w-0 flex-1 truncate font-mono">{v.name}</span>
                 {v.isDefault && (
-                  <span className="text-[0.6875rem] text-faint">default</span>
+                  <span className="text-[0.6875rem] text-faint">
+                    {i18n.t("environment.defaultVendor")}
+                  </span>
                 )}
                 {selected && <SelectedMark />}
               </button>
@@ -662,10 +671,12 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
         {named && (
           <div className="pt-1.5" data-testid="environment-summary">
             <p className="px-2 pb-0.5 text-[0.6875rem] tracking-wide text-faint uppercase">
-              Repos
+              {i18n.t("environment.repos")}
             </p>
             {named.repos.length === 0 ? (
-              <p className="px-2 py-1 text-sm text-faint">None</p>
+              <p className="px-2 py-1 text-sm text-faint">
+                {i18n.t("common.none")}
+              </p>
             ) : (
               <ul className="space-y-0.5 px-2 py-0.5">
                 {named.repos.map((r) => (
@@ -684,11 +695,11 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
         {adhoc && d.provisions && (
           <div className="pt-1.5" data-testid="environment-repos">
             <p className="px-2 pb-0.5 text-[0.6875rem] tracking-wide text-faint uppercase">
-              Repos
+              {i18n.t("environment.repos")}
             </p>
             {!d.githubConnected ? (
               <EmptyLink to="/settings/integrations">
-                Connect GitHub in Settings to pick repos
+                {i18n.t("environment.connectGithub")}
               </EmptyLink>
             ) : (
               checkList({
@@ -706,14 +717,14 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
                 },
                 empty: reposFailed ? (
                   <ReadError
-                    what="repos"
+                    what={i18n.t("environment.reposLower")}
                     error={reposError}
                     testId="environment-repos-read-error"
                     className="mx-1 my-0.5"
                   />
                 ) : (
                   <p className="px-2 py-1 text-sm text-dim">
-                    No repos visible to the app installation.
+                    {i18n.t("environment.noRepos")}
                   </p>
                 ),
               })
@@ -733,6 +744,7 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
  * single decision rather than two unrelated switches.
  */
 export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
+  useTranslation();
   const { data: settings, isError: settingsFailed, error: settingsError } =
     useSettings();
   const { data: bundles, isError: bundlesFailed, error: bundlesError } =
@@ -760,9 +772,9 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
     const d = draft;
     pickers.push({
       key: "workflow",
-      legend: "Workflow",
+      legend: i18n.t("channel.workflow"),
       icon: <Workflow size={15} />,
-      label: d.workflow || "None",
+      label: d.workflow || i18n.t("common.none"),
       marked: !!d.workflow,
       width: "w-64",
       testId: "config-workflow",
@@ -781,12 +793,14 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
               close();
             }}
           >
-            None
-            <span className="ml-auto text-[0.6875rem] text-faint">one agent</span>
+            {i18n.t("common.none")}
+            <span className="ml-auto text-[0.6875rem] text-faint">
+              {i18n.t("workflowChannel.oneAgent")}
+            </span>
             {d.workflow === "" && <SelectedMark />}
           </button>
           {d.workflows.length === 0 ? (
-            <EmptyLink to="/workflows">Define a workflow to run one</EmptyLink>
+            <EmptyLink to="/workflows">{i18n.t("workflowChannel.define")}</EmptyLink>
           ) : (
             d.workflows.map((w) => (
               <button
@@ -827,7 +841,7 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
   if (selectedAgent && agentChannel) {
     pickers.push({
       key: "model",
-      legend: "Model",
+      legend: i18n.t("channel.model"),
       icon: <Cpu size={15} />,
       label: selectedAgent,
       marked: true,
@@ -837,7 +851,7 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
       body: (close) => (
         <>
           <p className="px-2 pt-0.5 text-[0.6875rem] tracking-wide text-faint uppercase">
-            Models
+            {i18n.t("modelChannel.models")}
           </p>
           {models.map((m) => (
             <button
@@ -862,7 +876,7 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
             </button>
           ))}
           <p className="px-2 pt-1.5 text-[0.6875rem] tracking-wide text-faint uppercase">
-            Agents
+            {i18n.t("modelChannel.agents")}
           </p>
           {agentChannel.agents.map((agent) => (
             <button
@@ -897,9 +911,11 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
   // is the most common self-hosted vendor.
   pickers.push({
     key: "skills",
-    legend: "Skills",
+    legend: i18n.t("channel.skills"),
     icon: <Boxes size={15} />,
-    label: draft.skills.size ? `${draft.skills.size} selected` : "None",
+    label: draft.skills.size
+      ? i18n.t("channel.selectedCount", { count: draft.skills.size })
+      : i18n.t("common.none"),
     marked: draft.skills.size > 0,
     width: "w-80",
     testId: "config-skills",
@@ -915,14 +931,14 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
         },
         empty: bundlesFailed ? (
           <ReadError
-            what="skill bundles"
+            what={i18n.t("channel.skillBundles")}
             error={bundlesError}
             testId="skills-read-error"
             className="mx-1 my-0.5"
           />
         ) : (
           <EmptyLink to="/settings/skills">
-            Install skill bundles in Settings
+            {i18n.t("channel.installSkills")}
           </EmptyLink>
         ),
       }),
@@ -930,9 +946,11 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
 
   pickers.push({
     key: "mcp",
-    legend: "MCP",
+    legend: i18n.t("channel.mcp"),
     icon: <Plug size={15} />,
-    label: draft.mcp.size ? `${draft.mcp.size} selected` : "None",
+    label: draft.mcp.size
+      ? i18n.t("channel.selectedCount", { count: draft.mcp.size })
+      : i18n.t("common.none"),
     marked: draft.mcp.size > 0,
     width: "w-72",
     testId: "config-mcp",
@@ -948,14 +966,14 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
         },
         empty: mcpFailed ? (
           <ReadError
-            what="MCP servers"
+            what={i18n.t("channel.mcpServers")}
             error={mcpError}
             testId="mcp-read-error"
             className="mx-1 my-0.5"
           />
         ) : (
           <EmptyLink to="/settings/integrations">
-            Add MCP servers in Settings
+            {i18n.t("channel.addMcp")}
           </EmptyLink>
         ),
       }),
@@ -965,9 +983,11 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
   // that cannot provision a workspace too.
   pickers.push({
     key: "memory",
-    legend: "Memory",
+    legend: i18n.t("channel.memory"),
     icon: <Brain size={15} />,
-    label: draft.memorySpaces.size ? `${draft.memorySpaces.size} selected` : "None",
+    label: draft.memorySpaces.size
+      ? i18n.t("channel.selectedCount", { count: draft.memorySpaces.size })
+      : i18n.t("common.none"),
     marked: draft.memorySpaces.size > 0,
     width: "w-72",
     testId: "config-memory",
@@ -983,13 +1003,15 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
         },
         empty: memoryFailed ? (
           <ReadError
-            what="memory spaces"
+            what={i18n.t("channel.memorySpaces")}
             error={memoryError}
             testId="memory-read-error"
             className="mx-1 my-0.5"
           />
         ) : (
-          <EmptyLink to="/settings/memory">Create a memory space first</EmptyLink>
+          <EmptyLink to="/settings/memory">
+            {i18n.t("channel.createMemory")}
+          </EmptyLink>
         ),
       }),
   });
@@ -1000,9 +1022,9 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
 
   pickers.push({
     key: "model",
-    legend: "Model",
+    legend: i18n.t("channel.model"),
     icon: <Cpu size={15} />,
-    label: models.find((m) => m.alias === draft.model)?.alias ?? "Select",
+    label: models.find((m) => m.alias === draft.model)?.alias ?? i18n.t("channel.select"),
     marked: !!draft.model,
     width: "w-72",
     testId: "config-model",
@@ -1010,19 +1032,19 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
     body: (close) =>
       settingsFailed ? (
         <ReadError
-          what="models"
+          what={i18n.t("channel.models")}
           error={settingsError}
           testId="model-read-error"
           className="mx-1 my-0.5"
         />
       ) : models.length === 0 ? (
         <EmptyLink to="/settings/models">
-          No models configured — add one in Settings
+          {i18n.t("channel.noModels")}
         </EmptyLink>
       ) : agentChannel ? (
         <>
           <p className="px-2 pt-0.5 text-[0.6875rem] tracking-wide text-faint uppercase">
-            Models
+            {i18n.t("modelChannel.models")}
           </p>
           {models.map((m) => (
             <button
@@ -1047,7 +1069,7 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
             </button>
           ))}
           <p className="px-2 pt-1.5 text-[0.6875rem] tracking-wide text-faint uppercase">
-            Agents
+            {i18n.t("modelChannel.agents")}
           </p>
           {agentChannel.agents.map((agent) => (
             <button
@@ -1099,9 +1121,9 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
   if (draft.thinkingEfforts.length > 0) {
     pickers.push({
       key: "thinking",
-      legend: "Thinking",
+      legend: i18n.t("channel.thinking"),
       icon: <Lightbulb size={15} />,
-      label: draft.thinkingEffort || "Default",
+      label: draft.thinkingEffort || i18n.t("common.default"),
       marked: !!draft.thinkingEffort,
       width: "w-52",
       testId: "config-thinking",
@@ -1119,8 +1141,10 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
             />
             <span className="min-w-0 flex-1 truncate">
               {draft.modelDefaultThinkingEffort
-                ? `default (${draft.modelDefaultThinkingEffort})`
-                : "default"}
+                ? i18n.t("channel.defaultEffort", {
+                    effort: draft.modelDefaultThinkingEffort,
+                  })
+                : i18n.t("channel.defaultLower")}
             </span>
             {draft.thinkingEffort === "" && <SelectedMark />}
           </label>
@@ -1166,6 +1190,7 @@ export function useLockedChannels(
   detail: SessionDetail,
   agent: AgentDocument,
 ): PickerSpec[] {
+  useTranslation();
   const { data: settings } = useSettings();
   // A model alias can be renamed or deleted out from under a live session, and
   // the next turn then fails `no provider registered for model '…'`. The row
@@ -1177,12 +1202,12 @@ export function useLockedChannels(
     !!settings && !settings.models.some((m) => m.alias === agent.model);
 
   const value = (items: string[]) =>
-    items.length ? items.join(", ") : "None";
+    items.length ? items.join(", ") : i18n.t("common.none");
 
   const readout = (items: string[]) => () => (
     <div className="space-y-1.5 px-1 py-0.5">
       {items.length === 0 ? (
-        <p className="text-sm text-faint">None</p>
+        <p className="text-sm text-faint">{i18n.t("common.none")}</p>
       ) : (
         <ul className="space-y-0.5">
           {items.map((v) => (
@@ -1226,7 +1251,7 @@ export function useLockedChannels(
   // leads with its name, because that is what was chosen.
   const environment: PickerSpec = {
     key: "environment",
-    legend: "Environment",
+    legend: i18n.t("channel.environment"),
     icon: <Server size={15} />,
     label: detail.environment ?? detail.vendor,
     marked: true,
@@ -1245,17 +1270,37 @@ export function useLockedChannels(
   // session-wide — the bundle union is provisioned for the whole run.
   const channels: PickerSpec[] = [
     environment,
-    ...optional("skills", "Skills", <Boxes size={15} />, "w-80", detail.plugins),
-    ...optional("mcp", "MCP", <Plug size={15} />, "w-72", agent.mcpServers),
-    ...optional("memory", "Memory", <Brain size={15} />, "w-72", agent.memorySpaces),
+    ...optional(
+      "skills",
+      i18n.t("channel.skills"),
+      <Boxes size={15} />,
+      "w-80",
+      detail.plugins,
+    ),
+    ...optional(
+      "mcp",
+      i18n.t("channel.mcp"),
+      <Plug size={15} />,
+      "w-72",
+      agent.mcpServers,
+    ),
+    ...optional(
+      "memory",
+      i18n.t("channel.memory"),
+      <Brain size={15} />,
+      "w-72",
+      agent.memorySpaces,
+    ),
     // Unlike the others, absent is a real answer here rather than "nothing to
     // show": a session on the default set has no list to read out, and saying
     // so is what tells you the tools were *not* the reason a call was refused.
     {
       key: "tools",
-      legend: "Tools",
+      legend: i18n.t("channel.tools"),
       icon: <Wrench size={15} />,
-      label: agent.allowedTools ? `${agent.allowedTools.length} selected` : "Default",
+      label: agent.allowedTools
+        ? i18n.t("channel.selectedCount", { count: agent.allowedTools.length })
+        : i18n.t("common.default"),
       marked: !!agent.allowedTools,
       width: "w-80",
       testId: "config-tools",
@@ -1263,16 +1308,17 @@ export function useLockedChannels(
         ? readout(agent.allowedTools)
         : () => (
             <p className="px-1 py-0.5 text-sm text-faint">
-              Every built-in tool except the control plane — this server's
-              default set.
+              {i18n.t("channel.defaultToolSet")}
             </p>
           ),
     },
     {
       key: "model",
-      legend: "Model",
+      legend: i18n.t("channel.model"),
       icon: <Cpu size={15} />,
-      label: modelGone ? `${agent.model} — missing` : agent.model,
+      label: modelGone
+        ? i18n.t("channel.modelMissing", { model: agent.model })
+        : agent.model,
       marked: true,
       warn: modelGone,
       width: "w-72",
@@ -1284,9 +1330,7 @@ export function useLockedChannels(
                 {agent.model}
               </p>
               <p className="text-sm leading-relaxed text-red-ink">
-                This model is no longer configured, so the next turn in this
-                session will fail. Restore the alias in Settings → Models, or
-                start a new session.
+                {i18n.t("channel.modelGoneHint")}
               </p>
             </div>
           )
@@ -1297,7 +1341,7 @@ export function useLockedChannels(
   if (agent.thinkingEffort) {
     channels.push({
       key: "thinking",
-      legend: "Thinking",
+      legend: i18n.t("channel.thinking"),
       icon: <Lightbulb size={15} />,
       label: agent.thinkingEffort,
       marked: true,

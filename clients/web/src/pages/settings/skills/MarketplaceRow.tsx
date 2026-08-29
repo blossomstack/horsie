@@ -14,6 +14,7 @@ import {
   useRefreshMarketplace,
   useRemoveMarketplace,
 } from "../../../hooks/usePlugins";
+import { useTranslation } from "react-i18next";
 
 /** One registered source: what it offers, and the two buttons that maintain it.
  *
@@ -31,6 +32,7 @@ export function MarketplaceRow({
   onToggle: () => void;
 }) {
   const install = useInstallPlugin();
+  const { t } = useTranslation();
   const refresh = useRefreshMarketplace();
   const remove = useRemoveMarketplace();
   const [filter, setFilter] = useState("");
@@ -96,14 +98,16 @@ export function MarketplaceRow({
             onClick={async () => {
               if (
                 await askConfirm(
-                  `Remove marketplace "${marketplace.name}"? Bundles installed from it stay installed.`,
-                  "Remove",
+                  t("skills.confirmRemoveMarketplace", {
+                    name: marketplace.name,
+                  }),
+                  t("common.remove"),
                 )
               )
                 remove.mutate(marketplace.name);
             }}
             disabled={remove.isPending}
-            aria-label="Remove marketplace"
+            aria-label={t("skills.removeMarketplace")}
           >
             <Trash2 size={15} />
           </button>
@@ -118,8 +122,8 @@ export function MarketplaceRow({
             className="field w-full"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
-            placeholder="Filter plugins…"
-            aria-label="Filter plugins"
+            placeholder={t("skills.filterPlugins")}
+            aria-label={t("skills.filterPluginsLabel")}
             data-testid="marketplace-filter"
           />
 

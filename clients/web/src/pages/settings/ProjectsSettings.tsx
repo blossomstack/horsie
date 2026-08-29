@@ -10,6 +10,7 @@ import {
 } from "../../hooks/useProjects";
 import { askConfirm } from "../../lib/confirm";
 import { ListRow, RowAction, Rows, Section, SettingsPage } from "./fields";
+import { useTranslation } from "react-i18next";
 
 /**
  * Settings → Projects.
@@ -30,11 +31,12 @@ export function ProjectsSettings() {
   const [name, setName] = useState("");
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  const { t } = useTranslation();
 
   const onDelete = async (id: string, label: string) => {
     const ok = await askConfirm(
-      `Delete project “${label}”? Its sessions, agents, settings and memories go with it, and its runtimes are destroyed. This cannot be undone.`,
-      "Delete",
+      t("projectsPage.confirmDelete", { name: label }),
+      t("common.delete"),
     );
     if (!ok) return;
     await remove.mutateAsync(id);
@@ -46,23 +48,26 @@ export function ProjectsSettings() {
 
   if (projects.error) {
     return (
-      <SettingsPage title="Projects" desc="This account's projects.">
-        <ReadError error={projects.error} what="projects" />
+      <SettingsPage
+        title={t("settingsNav.projects")}
+        desc={t("projectsPage.readErrorDesc")}
+      >
+        <ReadError error={projects.error} what={t("projectsPage.what")} />
       </SettingsPage>
     );
   }
 
   return (
     <SettingsPage
-      title="Projects"
-      desc="One per body of work. Nothing is shared between them."
+      title={t("settingsNav.projects")}
+      desc={t("projectsPage.desc")}
     >
       <Section
-        title="Projects"
-        desc="Everything else on this rail belongs to one project: its models, runtimes, skills, memory spaces, integrations, agents and sessions. A new project starts empty, credentials included."
+        title={t("settingsNav.projects")}
+        desc={t("projectsPage.sectionDesc")}
         empty={
           projects.data && projects.data.length === 0
-            ? "No projects yet."
+            ? t("projectsPage.empty")
             : null
         }
       >
@@ -93,8 +98,8 @@ export function ProjectsSettings() {
             }
             meta={
               p.isDefault ? (
-                <span className="chip" title="Always present, and cannot be deleted">
-                  Default
+                <span className="chip" title={t("projectsPage.defaultHint")}>
+                  {t("common.default")}
                 </span>
               ) : undefined
             }
@@ -103,7 +108,7 @@ export function ProjectsSettings() {
                 <>
                   <RowAction
                     icon={<Check size={13} aria-hidden />}
-                    label="Save name"
+                    label={t("projectsPage.saveName")}
                     onClick={() => {
                       rename.mutate({ id: p.id, name: draft });
                       setEditing(null);
@@ -111,7 +116,7 @@ export function ProjectsSettings() {
                   />
                   <RowAction
                     icon={<X size={13} aria-hidden />}
-                    label="Cancel"
+                    label={t("common.cancel")}
                     onClick={() => setEditing(null)}
                   />
                 </>
@@ -119,7 +124,7 @@ export function ProjectsSettings() {
                 <>
                   <RowAction
                     icon={<Pencil size={13} aria-hidden />}
-                    label="Rename"
+                    label={t("sessionRow.rename")}
                     testId={`rename-${p.id}`}
                     onClick={() => {
                       setEditing(p.id);
@@ -130,8 +135,8 @@ export function ProjectsSettings() {
                     icon={<Trash2 size={13} aria-hidden />}
                     label={
                       p.isDefault
-                        ? "The default project cannot be deleted"
-                        : "Delete"
+                        ? t("projectsPage.cannotDelete")
+                        : t("common.delete")
                     }
                     testId={`delete-${p.id}`}
                     danger
@@ -146,7 +151,10 @@ export function ProjectsSettings() {
         </Rows>
       </Section>
 
-      <Section title="New project" desc="It starts empty — add its models and runtimes once it exists.">
+      <Section
+        title={t("projectsPage.newProject")}
+        desc={t("projectsPage.newProjectDesc")}
+      >
         <form
           className="flex gap-2"
           onSubmit={(e) => {
@@ -158,7 +166,7 @@ export function ProjectsSettings() {
           <input
             className="field flex-1"
             data-testid="new-project-name"
-            placeholder="What is this project for?"
+            placeholder={t("projectsPage.namePlaceholder")}
             value={name}
             onChange={(e) => setName(e.target.value)}
           />
@@ -168,7 +176,7 @@ export function ProjectsSettings() {
             data-testid="create-project"
             disabled={!name.trim() || create.isPending}
           >
-            Create
+            {t("common.create")}
           </button>
         </form>
       </Section>

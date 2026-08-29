@@ -7,21 +7,25 @@ import type { AgentView } from "../../api/types";
 import { useAgent, useCreateAgent, useUpdateAgent } from "../../hooks/useAgents";
 import { useAgentDraft } from "../../hooks/useAgentDraft";
 import { RowLabel } from "../settings/fields";
+import { useTranslation } from "react-i18next";
 
 /** Create (`/agents/new`) and edit (`/agents/:name/edit`) share one form. The
  * form is a child component mounted only once the preset has loaded: its
  * pickers seed from `initial` with `useState`, which cannot pick up a value
  * that arrives later. */
 export function AgentEditPage() {
+  const { t } = useTranslation();
   const { name } = useParams<{ name: string }>();
   const { data: existing, isLoading, isError } = useAgent(name);
 
   if (name && isLoading) {
-    return <p className="px-6 py-4 text-sm text-faint">Loading…</p>;
+    return <p className="px-6 py-4 text-sm text-faint">{t("common.loading")}</p>;
   }
   if (name && (isError || !existing)) {
     return (
-      <p className="px-6 py-4 text-sm text-red-ink">No such agent: {name}.</p>
+      <p className="px-6 py-4 text-sm text-red-ink">
+        {t("agentEdit.noSuch", { name })}
+      </p>
     );
   }
   return <AgentForm key={name ?? "new"} initial={existing} />;
@@ -49,15 +53,16 @@ function AgentForm({ initial }: { initial?: AgentView }) {
   const [instructions, setInstructions] = useState(initial?.instructions ?? "");
   const [error, setError] = useState<string | null>(null);
   const draft = useAgentDraft(initial);
+  const { t } = useTranslation();
   const busy = create.isPending || update.isPending;
   // Name the requirement rather than just greying the button out: the Model
   // picker reads "Select" much like the optional Skills, MCP and Memory pickers
   // beside it, so a disabled Save with no message is a dead end.
   const blockedReason =
     agentName.trim() === ""
-      ? "Give the agent a name to save it."
+      ? t("agentEdit.needName")
       : draft.model.trim() === ""
-        ? "Pick a model to save this agent."
+        ? t("agentEdit.needModel")
         : null;
   const canSave = !busy && blockedReason === null;
 
@@ -70,7 +75,7 @@ function AgentForm({ initial }: { initial?: AgentView }) {
       navigate("/agents");
     } catch (e) {
       setError(
-        e instanceof ApiRequestError ? e.message : "Failed to save agent.",
+        e instanceof ApiRequestError ? e.message : t("agentEdit.saveFailed"),
       );
     }
   };
@@ -80,14 +85,14 @@ function AgentForm({ initial }: { initial?: AgentView }) {
       <header className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 bg-panel px-4 sm:px-6">
         <RailToggle />
         <h1 className="page-title min-w-0 flex-1 truncate">
-          {editing ? `Edit ${initial.name}` : "New agent"}
+          {editing ? t("agentEdit.editTitle", { name: initial.name }) : t("agents.new")}
         </h1>
         <button
           className="key key-blank"
           onClick={() => navigate("/agents")}
           data-testid="cancel-agent-button"
         >
-          Cancel
+          {t("common.cancel")}
         </button>
         <button
           className="key key-go"
@@ -95,7 +100,7 @@ function AgentForm({ initial }: { initial?: AgentView }) {
           onClick={handleSave}
           data-testid="save-agent-button"
         >
-          {busy ? "Saving…" : "Save"}
+          {busy ? t("common.saving") : t("common.save")}
         </button>
       </header>
 
@@ -104,10 +109,10 @@ function AgentForm({ initial }: { initial?: AgentView }) {
           <section className="section space-y-4">
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <label className="block">
-                <RowLabel>Name</RowLabel>
+                <RowLabel>{t("memoryPage.name")}</RowLabel>
                 <input
                   className="field field-mono"
-                  placeholder="reviewer"
+                  placeholder={t("agentEdit.namePlaceholder")}
                   value={agentName}
                   disabled={editing}
                   onChange={(e) => setAgentName(e.target.value)}
@@ -115,16 +120,16 @@ function AgentForm({ initial }: { initial?: AgentView }) {
                 />
               </label>
               <label className="block">
-                <RowLabel>Description</RowLabel>
+                <RowLabel>{t("memoryPage.description")}</RowLabel>
                 <input
                   className="field"
-                  placeholder="What this agent is for"
+                  placeholder={t("agentEdit.descriptionPlaceholder")}
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
                   data-testid="agent-description-input"
                 />
                 <p className="mt-1 text-xs text-faint">
-                  For the roster. The agent never sees it.
+{t("agentEdit.descriptionHint")}
                 </p>
               </label>
               {/* The full width of the grid: it is a textarea sharing a row
@@ -132,30 +137,29 @@ function AgentForm({ initial }: { initial?: AgentView }) {
                   width of the Name box — the smallest control on the form for
                   the longest thing anyone types into it. */}
               <label className="block sm:col-span-2">
-                <RowLabel>Instructions</RowLabel>
+                <RowLabel>{t("agentEdit.instructions")}</RowLabel>
                 {/* A textarea, and its own field: the description sat directly
                     above the configuration and read like the place to say how
                     the agent should behave, while being the one field that
                     never reached the model. */}
                 <textarea
                   className="field min-h-28 resize-y"
-                  placeholder="How this agent should work — added to its system prompt"
+                  placeholder={t("agentEdit.instructionsPlaceholder")}
                   value={instructions}
                   maxLength={8000}
                   onChange={(e) => setInstructions(e.target.value)}
                   data-testid="agent-instructions-input"
                 />
                 <p className="mt-1 text-xs text-faint">
-                  Sent to the model on every turn, after the workspace's own
-                  instruction files.
+{t("agentEdit.instructionsHint")}
                 </p>
               </label>
             </div>
 
             <div className="pt-4">
-              <h2 className="section-title">Configuration</h2>
+              <h2 className="section-title">{t("agentEdit.configuration")}</h2>
               <p className="mb-3 mt-1.5 max-w-prose text-xs leading-relaxed text-faint">
-                What every session started from this preset runs with.
+{t("agentEdit.configurationHint")}
               </p>
               <ConfigFields draft={draft} />
               {/* "Let this agent manage this horsie server" was a checkbox
@@ -169,7 +173,7 @@ function AgentForm({ initial }: { initial?: AgentView }) {
                 everything above says how this agent runs, and this says who
                 else may change that. */}
             <div className="pt-4">
-              <h2 className="section-title">Tuning</h2>
+              <h2 className="section-title">{t("agentEdit.tuning")}</h2>
               <label className="mt-2 flex items-start gap-2 text-sm">
                 <input
                   type="checkbox"
@@ -179,11 +183,9 @@ function AgentForm({ initial }: { initial?: AgentView }) {
                   data-testid="agent-tunable"
                 />
                 <span>
-                  Let a tuning agent improve this preset
+                  {t("agentEdit.tunable")}
                   <span className="mt-1 block max-w-prose text-xs leading-relaxed text-faint">
-                    A scheduled agent may read what sessions from this preset
-                    did and rewrite it — its instructions, skills, tools and
-                    memory. Off unless you turn it on.
+                    {t("agentEdit.tunableHint")}
                   </span>
                 </span>
               </label>

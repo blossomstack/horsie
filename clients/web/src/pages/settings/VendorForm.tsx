@@ -6,6 +6,7 @@ import type {
   VelosVendorSettings,
 } from "../../api/types";
 import { TextField } from "./fields";
+import { useTranslation } from "react-i18next";
 
 /**
  * The fields of one cloud runtime vendor, and nothing about which vendors
@@ -141,6 +142,7 @@ export function VendorForm({
   saving: boolean;
   error: string | null;
 }) {
+  const { t } = useTranslation();
   /** Patch the settings of whichever kind the draft is, keeping the tag. */
   const patch = (
     values: Partial<FlyVendorSettings> & Partial<VelosVendorSettings>,
@@ -163,59 +165,59 @@ export function VendorForm({
     <>
       <div className="grid gap-3 sm:grid-cols-2">
         <TextField
-          label="Name"
+          label={t("vendorForm.name")}
           value={draft.name}
           onChange={(name) => setDraft({ ...draft, name })}
           placeholder={draft.settings.kind === "Fly" ? "fly" : "velos"}
         />
         {draft.settings.kind === "Fly" ? (
           <TextField
-            label="Fly app"
+            label={t("vendorForm.flyApp")}
             value={draft.settings.value.app}
             onChange={(app) => patch({ app })}
-            placeholder="horsie-runtimes"
+            placeholder={t("vendorForm.flyAppPlaceholder")}
             // horsie never creates the app, and nothing said so: a typo here
             // saved cleanly and failed hours later at the first session, as a
             // machine-create rejection.
-            hint="Must already exist — create it with `fly apps create`. horsie only makes machines in it."
+            hint={t("vendorForm.flyAppHint")}
           />
         ) : (
           <TextField
-            label="velos server URL"
+            label={t("vendorForm.velosUrl")}
             value={draft.settings.value.serverUrl}
             onChange={(serverUrl) => patch({ serverUrl })}
-            placeholder="http://velos.example:8080"
+            placeholder={t("vendorForm.velosUrlPlaceholder")}
           />
         )}
         <TextField
-          label="API token"
+          label={t("vendorForm.apiToken")}
           type="password"
           value={draft.credential}
           onChange={(credential) => setDraft({ ...draft, credential })}
           placeholder={
             draft.existing
-              ? "Leave blank to keep"
+              ? t("vendorForm.leaveBlank")
               : draft.settings.kind === "Fly"
-                ? "fly api token"
-                : "optional — velos may run without auth"
+                ? t("vendorForm.flyTokenPlaceholder")
+                : t("vendorForm.velosTokenPlaceholder")
           }
         />
         {draft.settings.kind === "Fly" && (
           <TextField
-            label="Region"
+            label={t("vendorForm.region")}
             value={draft.settings.value.region}
             onChange={(region) => patch({ region })}
-            placeholder="iad"
+            placeholder={t("vendorForm.regionPlaceholder")}
           />
         )}
         <TextField
-          label="Runtime image"
+          label={t("vendorForm.image")}
           value={draft.settings.value.image}
           onChange={(image) => patch({ image })}
-          placeholder="ghcr.io/you/horsie-runtime:latest"
+          placeholder={t("vendorForm.imagePlaceholder")}
         />
         <TextField
-          label="Callback URL"
+          label={t("vendorForm.callbackUrl")}
           value={callbackOf(draft.settings)}
           onChange={(callbackUrl) => patch({ callbackUrl })}
           placeholder={
@@ -225,18 +227,18 @@ export function VendorForm({
           }
         />
         <TextField
-          label="Workspace root"
+          label={t("vendorForm.workspaceRoot")}
           value={draft.settings.value.workspaceRoot}
           onChange={(workspaceRoot) => patch({ workspaceRoot })}
-          placeholder="/workspaces"
+          placeholder={t("vendorForm.workspaceRootPlaceholder")}
         />
         <TextField
-          label="Memory (MB)"
+          label={t("vendorForm.memoryMb")}
           value={String(draft.settings.value.memoryMb)}
           onChange={(v) => setNumber("memoryMb", v)}
         />
         <TextField
-          label="CPUs"
+          label={t("vendorForm.cpus")}
           value={String(
             draft.settings.kind === "Fly"
               ? draft.settings.value.cpus
@@ -248,7 +250,7 @@ export function VendorForm({
         />
         {draft.settings.kind === "Fly" && (
           <TextField
-            label="Volume size (GB)"
+            label={t("vendorForm.volumeSizeGb")}
             value={String(draft.settings.value.volumeSizeGb)}
             onChange={(v) => setNumber("volumeSizeGb", v)}
           />
@@ -261,12 +263,11 @@ export function VendorForm({
             checked={draft.settings.value.volumes}
             onChange={(e) => patch({ volumes: e.target.checked })}
           />
-          Give each runtime a volume, so a stopped one keeps its workspace
+{t("vendorForm.volumesHint")}
         </label>
       ) : (
         <p className="mt-3 text-xs leading-relaxed text-faint">
-          velos has no volumes: stopping a session deletes its container, and the
-          next message schedules a fresh one that re-runs provisioning.
+{t("vendorForm.velosNoVolumes")}
         </p>
       )}
       {/* Beside the button that caused it. This sat at the top of the pane,
@@ -287,10 +288,10 @@ export function VendorForm({
           disabled={saving}
           data-testid="cloud-vendor-save"
         >
-          {saving ? "Saving…" : "Save"}
+          {saving ? t("common.saving") : t("common.save")}
         </button>
         <button className="key" onClick={onCancel}>
-          Cancel
+          {t("common.cancel")}
         </button>
       </div>
     </>

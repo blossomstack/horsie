@@ -15,6 +15,7 @@ import { relativeTime } from "../../lib/format";
 import { TONE_TEXT, statusMeta } from "../../lib/status";
 import { useSession } from "../../hooks/useSessions";
 import { useRetryStep, useWorkflowRun } from "../../hooks/useWorkflows";
+import { Trans, useTranslation } from "react-i18next";
 
 /**
  * A run's page.
@@ -120,12 +121,13 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
   const retry = useRetryStep(sessionId);
   const navigate = useNavigate();
   const [selected, setSelected] = useState<string | undefined>();
+  const { t } = useTranslation();
 
   const retryStep = async (index: number, step: string) => {
     if (
       !(await askConfirm(
-        `Retry ${step}? It runs again against the workspace as the previous attempt left it.`,
-        "Retry",
+        t("run.confirmRetry", { step }),
+        t("run.retry"),
       ))
     ) {
       return;
@@ -134,7 +136,7 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
   };
 
   if (isLoading || !graph || status === undefined) {
-    return <p className="p-6 text-sm text-faint">Loading run…</p>;
+    return <p className="p-6 text-sm text-faint">{t("run.loading")}</p>;
   }
 
   const nodes = graph.nodes.map((n) => ({
@@ -170,7 +172,9 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
           </span>
         </div>
         <span className="ml-auto text-xs text-faint" data-testid="run-usage">
-          {(graph.inputTokens + graph.outputTokens).toLocaleString()} tokens
+          {t("run.tokens", {
+            value: (graph.inputTokens + graph.outputTokens).toLocaleString(),
+          })}
         </span>
         <button
           className="key key-stop key-sm"
@@ -179,7 +183,7 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
           data-testid="run-stop"
         >
           <Square size={13} />
-          Interrupt
+          {t("run.interrupt")}
         </button>
         <button
           className="key key-danger key-sm"
@@ -187,7 +191,7 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
           data-testid="run-delete"
         >
           <Trash2 size={13} />
-          Delete
+          {t("common.delete")}
         </button>
       </header>
 
@@ -204,8 +208,11 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
         >
           <MessageCircleQuestion size={15} className="shrink-0" />
           <span>
-            <strong className="font-medium">{parked.step}</strong> is waiting on
-            a question.
+            <Trans
+              i18nKey="run.waitingOnQuestion"
+              values={{ step: parked.step }}
+              components={{ step: <strong className="font-medium" /> }}
+            />
           </span>
           {/* The primary action on the page while a run is blocked: nothing else
               here moves it, and the question itself lives in the step's own
@@ -217,7 +224,7 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
             }
             data-testid="open-parked-step"
           >
-            Answer it
+            {t("run.answerIt")}
           </button>
         </div>
       )}
@@ -229,9 +236,11 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
         >
           <PauseCircle size={15} className="shrink-0" />
           <span>
-            <strong className="font-medium">{resume.step}</strong> was
-            interrupted. Nothing runs until you retry it — the workspace is not
-            rolled back, so it starts from whatever the last attempt left.
+            <Trans
+              i18nKey="run.wasInterrupted"
+              values={{ step: resume.step }}
+              components={{ step: <strong className="font-medium" /> }}
+            />
           </span>
           <button
             className="key key-go ml-auto key-sm"
@@ -240,7 +249,7 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
             data-testid="resume-run"
           >
             <RotateCcw size={12} />
-            Retry {resume.step}
+            {t("run.retryStep", { step: resume.step })}
           </button>
         </div>
       )}
@@ -263,7 +272,7 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
               what the page is *for* once the run is over. */}
           {graph.output !== undefined && graph.output !== null && (
             <div className="section" data-testid="run-output">
-              <h2 className="legend">Result</h2>
+              <h2 className="legend">{t("agentPanel.result")}</h2>
               <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words text-xs text-dim">
                 {formatOutput(graph.output)}
               </pre>
@@ -272,17 +281,16 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
 
           {!selectedNode ? (
             <div className="section">
-              <h2 className="legend">Steps</h2>
+              <h2 className="legend">{t("run.steps")}</h2>
               <p className="mt-2 text-xs text-faint">
-                Choose a step to see its attempts, or open one to read what it
-                actually did.
+{t("run.stepsHint")}
               </p>
             </div>
           ) : (
             <div className="section" data-testid="step-detail">
               <h2 className="legend">{selectedNode.step}</h2>
               {selectedNode.runs.length === 0 ? (
-                <p className="mt-2 text-xs text-faint">This run never reached it.</p>
+                <p className="mt-2 text-xs text-faint">{t("run.neverReached")}</p>
               ) : (
                 <div className="mt-3 space-y-3">
                   {selectedNode.runs
@@ -296,7 +304,7 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
                       >
                         <div className="flex items-center gap-2">
                           <span className="text-xs text-dim">
-                            Attempt {r.attempt}
+                            {t("run.attempt", { n: r.attempt })}
                           </span>
                           <span
                             className={`ml-auto text-xs ${
@@ -322,7 +330,7 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
                             onClick={() => navigate(`/sessions/${sessionId}/agents/${r.agentId}`)}
                             data-testid="open-step"
                           >
-                            Open
+                            {t("common.open")}
                           </button>
                           <button
                             className="key key-sm"
@@ -331,12 +339,12 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
                             data-testid="retry-step"
                             title={
                               retryUnavailable(status, retry.isPending, r)
-                                ? "A step is currently running."
-                                : "Re-run this step. The workspace is not rolled back."
+                                ? t("run.stepRunning")
+                                : t("run.retryHint")
                             }
                           >
                             <RotateCcw size={12} />
-                            Retry
+                            {t("run.retry")}
                           </button>
                         </div>
                       </div>

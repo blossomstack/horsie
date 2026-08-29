@@ -3,10 +3,12 @@ import { Sidebar } from "../components/Sidebar";
 import { RailProvider, useRail, useRailAutoClose } from "../components/rail";
 import { useGlobalSessionFeed } from "../hooks/useSessions";
 import { cn } from "../lib/cn";
+import { useTranslation } from "react-i18next";
 
 function Shell() {
   // Single global SSE feed keeps the rail statuses live.
   useGlobalSessionFeed();
+  const { t } = useTranslation();
   const { open, setOpen } = useRail();
   const { pathname } = useLocation();
   useRailAutoClose(pathname);
@@ -19,14 +21,14 @@ function Shell() {
           without this the composer is roughly the hundredth stop on a busy
           account. */}
       <a href="#main" className="skip-link" data-testid="skip-to-main">
-        Skip to content
+{t("layout.skipToContent")}
       </a>
       {/* Scrim: only ever present while the drawer is open on a narrow screen. */}
       {open && (
         <button
           className="fixed inset-0 z-30 bg-[oklch(0.1_0.01_255/0.6)] md:hidden"
           onClick={() => setOpen(false)}
-          aria-label="Close sessions"
+          aria-label={t("layout.closeSessions")}
           tabIndex={-1}
         />
       )}

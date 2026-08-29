@@ -2,6 +2,7 @@ import { Circle, CircleCheck } from "lucide-react";
 import { TaskStatus, type TaskItem } from "../api/types";
 import { cn } from "../lib/cn";
 import { SidePanel } from "./SidePanel";
+import { useTranslation } from "react-i18next";
 
 function StatusIcon({ status }: { status: TaskStatus }) {
   switch (status) {
@@ -37,20 +38,21 @@ export function TaskListPanel({
   tasks: TaskItem[];
   onClose: () => void;
 }) {
+  const { t } = useTranslation();
   const done = tasks.filter((t) => t.status === TaskStatus.Completed).length;
 
   return (
     <SidePanel
-      legend="Plan"
+      legend={t("taskList.legend")}
       readout={
         tasks.length > 0 ? (
           <span className="readout text-[0.6875rem]" data-testid="task-list-progress">
-            {done}/{tasks.length} done
+            {t("taskList.progress", { done, total: tasks.length })}
           </span>
         ) : undefined
       }
       onClose={onClose}
-      closeLabel="Hide the plan"
+      closeLabel={t("taskList.hide")}
       testId="task-list-panel"
       closeTestId="task-list-collapse"
     >
@@ -59,8 +61,7 @@ export function TaskListPanel({
             className="px-3 py-6 text-center text-xs leading-relaxed text-faint"
             data-testid="task-list-empty"
           >
-            No plan yet. The agent writes one here when a task is big enough to
-            need steps.
+{t("taskList.empty")}
           </p>
         ) : (
           <ul className="flex-1 space-y-0.5 overflow-y-auto p-2">

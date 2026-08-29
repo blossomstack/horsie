@@ -1,5 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { ApiRequestError, api } from "../api/client";
 import { AUTH_STATUS_KEY } from "../hooks/useAuth";
 
@@ -10,6 +11,7 @@ import { AUTH_STATUS_KEY } from "../hooks/useAuth";
  * than leaving them to search the docs for it.
  */
 export function LoginPage() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const [password, setPassword] = useState("");
   const login = useMutation({
@@ -26,7 +28,7 @@ export function LoginPage() {
     login.error instanceof ApiRequestError
       ? login.error.message
       : login.error
-        ? "Could not sign in. Check the server is still running, then try again."
+        ? t("login.failed")
         : null;
 
   return (
@@ -46,23 +48,24 @@ export function LoginPage() {
           >
             h
           </span>
+          {/* i18n-ignore: the product's name, not a word to translate. */}
           <span className="font-mono text-sm font-semibold tracking-[0.16em] text-legend">
             HORSIE
           </span>
         </div>
 
-        <h1 className="mt-5 text-[0.9375rem] font-semibold text-legend">Sign in</h1>
+        <h1 className="mt-5 text-[0.9375rem] font-semibold text-legend">
+          {t("login.signIn")}
+        </h1>
         <p className="mt-1 text-xs leading-relaxed text-faint">
-          This server requires a password. On first boot horsie writes a
-          generated one to{" "}
-          <code className="font-mono text-dim">
-            initial-admin-password
-          </code>{" "}
-          in its state directory.
+          <Trans
+            i18nKey="login.passwordHint"
+            components={{ file: <code className="font-mono text-dim" /> }}
+          />
         </p>
 
         <label className="mt-4 block">
-          <span className="legend mb-1 block">Password</span>
+          <span className="legend mb-1 block">{t("login.password")}</span>
           <input
             className="field"
             type="password"
@@ -89,7 +92,7 @@ export function LoginPage() {
           className="key key-go mt-4 w-full justify-center"
           disabled={login.isPending || password.length === 0}
         >
-          {login.isPending ? "Signing in…" : "Sign in"}
+          {login.isPending ? t("login.signingIn") : t("login.signIn")}
         </button>
       </form>
     </div>

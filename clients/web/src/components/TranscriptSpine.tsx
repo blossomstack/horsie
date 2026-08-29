@@ -1,5 +1,6 @@
 import { ChevronsDown, ChevronsUp } from "lucide-react";
 import { useRef } from "react";
+import { useTranslation } from "react-i18next";
 import type { RenderedCompaction } from "../hooks/useSessionStream";
 
 /** Seeking across a session's sessions.
@@ -35,6 +36,7 @@ export function TranscriptSpine({
   /** Scroll to a fraction of the way down. */
   onScrollTo: (fraction: number) => void;
 }) {
+  const { t } = useTranslation();
   const trackRef = useRef<HTMLDivElement>(null);
   // A very long session would otherwise leave nothing to grab.
   const thumbFraction = Math.max(view, 0.06);
@@ -79,7 +81,7 @@ export function TranscriptSpine({
        * move. */}
       <div className="pointer-events-auto flex h-full flex-col items-center py-6">
         <Cap
-          label="Jump to the start of the session"
+          label={t("spine.jumpStart")}
           testid="spine-start"
           onClick={() => onSeek("start")}
         >
@@ -115,7 +117,7 @@ export function TranscriptSpine({
               data-testid="spine-thumb"
               role="scrollbar"
               aria-orientation="vertical"
-              aria-label="Scroll the transcript"
+              aria-label={t("spine.scroll")}
               aria-valuenow={Math.round(progress * 100)}
               aria-valuemin={0}
               aria-valuemax={100}
@@ -144,16 +146,22 @@ export function TranscriptSpine({
               className="absolute left-1/2 h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-[var(--rule-strong)] bg-[var(--panel)] transition-colors hover:border-live hover:bg-live"
               title={
                 b.covered === null
-                  ? `Session ${i + 1} ended here`
-                  : `Session ${i + 1} ended here — ${b.covered} entries summarised`
+                  ? t("spine.sessionEnded", { index: i + 1 })
+                  : t("spine.sessionEndedSummarised", {
+                      index: i + 1,
+                      count: b.covered,
+                    })
               }
-              aria-label={`Jump to compaction ${i + 1} of ${boundaries.length}`}
+              aria-label={t("spine.jumpToCompaction", {
+                index: i + 1,
+                total: boundaries.length,
+              })}
             />
           ))}
         </div>
 
         <Cap
-          label="Jump to the end of the session"
+          label={t("spine.jumpEnd")}
           testid="spine-end"
           onClick={() => onSeek("end")}
         >

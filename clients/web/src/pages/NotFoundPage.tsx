@@ -1,3 +1,4 @@
+import { Trans, useTranslation } from "react-i18next";
 import { Link, useLocation } from "react-router-dom";
 import { RailToggle } from "../components/rail";
 
@@ -13,6 +14,7 @@ import { RailToggle } from "../components/rail";
  * chrome would fix the blankness and keep the dead end.
  */
 export function NotFoundPage() {
+  const { t } = useTranslation();
   const { pathname } = useLocation();
 
   return (
@@ -20,9 +22,9 @@ export function NotFoundPage() {
       <div className="bar-scroll flex items-center gap-2 bg-panel px-4 py-3.5 sm:gap-3 sm:px-6">
         <RailToggle />
         <div className="min-w-0 flex-1">
-          <h1 className="page-title">Not found</h1>
+          <h1 className="page-title">{t("notFound.title")}</h1>
           <p className="mt-0.5 text-xs text-faint">
-            No page is served at this address.
+{t("notFound.desc")}
           </p>
         </div>
       </div>
@@ -31,17 +33,18 @@ export function NotFoundPage() {
           {/* Same shape as the empty roster on /agents: a labelled panel, not
             a centred icon-in-a-box. */}
           <section className="section">
-            <h2 className="legend">Requested path</h2>
+            <h2 className="legend">{t("notFound.requestedPath")}</h2>
             {/* A path is a machine string, so it belongs in the mono face. */}
             <pre className="screen mt-3 overflow-x-auto px-3 py-2.5 font-mono text-[0.6875rem] leading-relaxed text-legend select-all">
               {pathname}
             </pre>
             <p className="mt-3 max-w-prose text-sm leading-relaxed text-dim">
-              Check the address for a typo, or pick up where you left off from{" "}
-              <Link className="text-legend underline" to="/">
-                your sessions
-              </Link>
-              . The rail on the left reaches everything else.
+              <Trans
+                i18nKey="notFound.help"
+                components={{
+                  lnk: <Link className="text-legend underline" to="/" />,
+                }}
+              />
             </p>
           </section>
         </div>

@@ -1,5 +1,6 @@
 import { useScrolledUnder } from "../../hooks/useScrolledUnder";
 import { Plus } from "lucide-react";
+import { Trans, useTranslation } from "react-i18next";
 import { RosterRow } from "../../components/RosterRow";
 import { useNavigate } from "react-router-dom";
 import { relativeTime } from "../../lib/format";
@@ -8,6 +9,7 @@ import { RailToggle } from "../../components/rail";
 import { useDeleteWorkflow, useWorkflows } from "../../hooks/useWorkflows";
 
 export function WorkflowsPage() {
+  const { t } = useTranslation();
   const { onScroll, barProps } = useScrolledUnder();
   const { data: workflows, isLoading, isError } = useWorkflows();
   const del = useDeleteWorkflow();
@@ -18,28 +20,29 @@ export function WorkflowsPage() {
       <div {...barProps}
         className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
         <RailToggle />
-        <h1 className="page-title">Workflows</h1>
+        <h1 className="page-title">{t("nav.workflows")}</h1>
         <button
           className="key key-go ml-auto key-sm"
           onClick={() => navigate("/workflows/new")}
           data-testid="new-workflow-button"
         >
           <Plus size={15} />
-          New workflow
+          {t("workflows.new")}
         </button>
       </div>
       <div className="flex-1 overflow-y-auto px-6 py-4" onScroll={onScroll}>
-        {isLoading && <p className="text-sm text-faint">Loading…</p>}
-        {isError && <p className="text-sm text-red-ink">Can’t reach the server.</p>}
+        {isLoading && <p className="text-sm text-faint">{t("common.loading")}</p>}
+        {isError && (
+          <p className="text-sm text-red-ink">{t("common.unreachableShort")}</p>
+        )}
         {workflows && workflows.length === 0 && (
           <section className="section" data-testid="workflows-empty">
-            <h2 className="legend">Workflow roster</h2>
+            <h2 className="legend">{t("workflows.rosterTitle")}</h2>
             <p className="mt-3 max-w-prose text-sm leading-relaxed text-dim">
-              A workflow runs several agents in order, each one deciding where
-              the next goes. Every step shares one workspace, so what one writes
-              the next one reads. Runs appear in the rail alongside your
-              sessions. Press{" "}
-              <span className="text-legend">New workflow</span> to define one.
+              <Trans
+                i18nKey="workflows.rosterBlurb"
+                components={{ key: <span className="text-legend" /> }}
+              />
             </p>
           </section>
         )}
@@ -49,19 +52,22 @@ export function WorkflowsPage() {
               key={w.name}
               to={`/workflows/${encodeURIComponent(w.name)}`}
               name={w.name}
-              meta={`${w.steps.length} step${w.steps.length === 1 ? "" : "s"} · starts at ${w.start}`}
+              meta={t("workflows.rowMeta", {
+                count: w.steps.length,
+                start: w.start,
+              })}
               description={w.description}
               aside={relativeTime(Number(w.updatedAt) * 1000)}
               testId="workflow-row"
               nameAttr={{ "data-workflow-name": w.name }}
-              deleteLabel={`Delete ${w.name}`}
+              deleteLabel={t("common.deleteNamed", { name: w.name })}
               deleteTestId="delete-workflow"
               onDelete={async () => {
                 // Runs are sessions in their own right and survive this, each
                 // carrying the graph it started with.
                 if (
                   await askConfirm(
-                    `Delete workflow "${w.name}"? Its runs stay in the session rail.`,
+                    t("workflows.confirmDelete", { name: w.name }),
                   )
                 ) {
                   del.mutate(w.name);

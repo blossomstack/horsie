@@ -61,7 +61,8 @@ describe("AgentsPage", () => {
     expect(rows[0].textContent).toContain("reviewer");
     expect(rows[0].textContent).toContain("sonnet");
     expect(rows[0].textContent).toContain("reviewer description");
-    expect(rows[0].textContent).toContain("1 skills");
+    // English pluralises now that the count runs through the catalogue.
+    expect(rows[0].textContent).toContain("1 skill");
     expect(rows[1].textContent).toContain("haiku");
   });
 

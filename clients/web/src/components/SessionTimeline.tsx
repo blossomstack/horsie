@@ -1,6 +1,8 @@
 import { ChevronDown, ChevronRight, MessageSquareText } from "lucide-react";
 import type { Bar, BarKind, Lane, Timeline } from "../lib/timeline";
+import { i18n } from "../i18n";
 import { cn } from "../lib/cn";
+import { useTranslation } from "react-i18next";
 
 /** A session's shape, drawn along one axis.
  *
@@ -83,6 +85,7 @@ export function SessionTimeline({
   /** Whichever entry the panel is showing. */
   selectedEntry?: string;
 }) {
+  const { t } = useTranslation();
   // An empty axis, rather than a first lane with no bars on it. Two things
   // break that older reading: a workflow run's root lane is the run, which has
   // no transcript of its own and so never has bars, and folding the root hides
@@ -95,8 +98,7 @@ export function SessionTimeline({
     return (
       <div className="flex h-full items-center justify-center px-6" data-testid="timeline-empty">
         <p className="max-w-sm text-center text-sm leading-relaxed text-dim">
-          Nothing has happened in this session yet. The timeline draws itself as
-          the agent works.
+{t("timeline.empty")}
         </p>
       </div>
     );
@@ -184,7 +186,7 @@ export function SessionTimeline({
           <div className="mt-3 pt-2">
             {/* Shown rather than dropped: an agent nobody can find is worse
                 than one drawn outside the axis and said to be. */}
-            <p className="legend pb-1 pl-3">not on the timeline — nothing was recorded about when these ran</p>
+            <p className="legend pb-1 pl-3">{t("timeline.unplaced")}</p>
             {unplaced.map((lane) => (
               <LaneRow
                 key={lane.agentId}
@@ -468,8 +470,8 @@ function BarView({
  * was answering a different question than the one it asked. */
 function openLabel(lane: Lane): string {
   return lane.kind === "run"
-    ? `Open the ${lane.label} run`
-    : `Open ${lane.label}'s transcript`;
+    ? i18n.t("agentGraph.openRun", { label: lane.label })
+    : i18n.t("agentGraph.openTranscript", { label: lane.label });
 }
 
 function humanGap(ms: number): string {

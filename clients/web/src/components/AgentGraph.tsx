@@ -1,7 +1,9 @@
 import { MessageSquareText } from "lucide-react";
 import type { AgentKind, AgentTree, PlacedAgent } from "../lib/agentTree";
-import { KIND_LABEL } from "../lib/agentTree";
+import { i18n } from "../i18n";
+import { kindLabel } from "../lib/agentTree";
 import { cn } from "../lib/cn";
+import { useTranslation } from "react-i18next";
 
 /**
  * A session's agents, drawn as the tree they actually are.
@@ -77,7 +79,9 @@ const BADGE_CHAR_W = 6;
 
 /** What the jump key on a node opens, said in the words of what it opens. */
 function openLabel(kind: AgentKind, label: string): string {
-  return kind === "run" ? `Open the ${label} run` : `Open ${label}'s transcript`;
+  return kind === "run"
+    ? i18n.t("agentGraph.openRun", { label })
+    : i18n.t("agentGraph.openTranscript", { label });
 }
 
 /**
@@ -142,6 +146,7 @@ export function AgentGraph({
   /** Leave the graph for one agent's transcript. The jump key only. */
   onOpenAgent: (agentId: string) => void;
 }) {
+  const { t } = useTranslation();
   if (tree.nodes.length === 0) {
     return (
       <div
@@ -149,8 +154,7 @@ export function AgentGraph({
         data-testid="agent-graph-empty"
       >
         <p className="max-w-sm text-center text-sm leading-relaxed text-dim">
-          No agents have been recorded for this session yet. The graph draws
-          itself as they start.
+{t("agentGraph.empty")}
         </p>
       </div>
     );
@@ -259,7 +263,7 @@ export function AgentGraph({
         // and it licenses assistive tech to prune everything inside — which
         // here is every node and every fold control.
         role="group"
-        aria-label="Agent graph"
+        aria-label={t("agentGraph.ariaLabel")}
         // Drawn at its natural size and centred while it fits, rather than
         // stretched to the pane: an SVG given a width in CSS scales its
         // contents to match, so a two-node session would have been blown up to
@@ -352,8 +356,12 @@ export function AgentGraph({
                     version lives. It names the kind as well, because that is
                     the thing a shape alone could never say out loud. */}
                 <title>
-                  {`${n.label} — ${KIND_LABEL[n.kind]}, ${n.detail}`}
-                  {isCurrent ? " · the run you are reading" : ""}
+                  {t("agentGraph.nodeTitle", {
+                    label: n.label,
+                    kind: kindLabel(n.kind),
+                    detail: n.detail,
+                  })}
+                  {isCurrent ? t("agentGraph.currentRun") : ""}
                 </title>
                 {/* One card, always.
                     A sub session used to get a second card offset behind the
@@ -409,7 +417,7 @@ export function AgentGraph({
                 <text x={12} y={NODE_H - 12} className="fill-dim text-[10px]">
                   {clip(
                     [
-                      ordinals.get(n.id) ?? KIND_LABEL[n.kind],
+                      ordinals.get(n.id) ?? kindLabel(n.kind),
                       n.status.replace(/_/g, " "),
                       n.agentType,
                     ]
@@ -512,8 +520,11 @@ export function AgentGraph({
                 >
                   <title>
                     {n.collapsed
-                      ? `Show what ${n.label} spawned — ${n.descendants} hidden`
-                      : `Hide what ${n.label} spawned`}
+                      ? t("agentGraph.showSpawned", {
+                          label: n.label,
+                          count: n.descendants,
+                        })
+                      : t("agentGraph.hideSpawned", { label: n.label })}
                   </title>
                   <circle
                     cx={NODE_W}

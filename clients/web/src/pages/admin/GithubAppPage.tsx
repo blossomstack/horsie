@@ -13,6 +13,7 @@ import {
   TextAreaField,
   TextField,
 } from "../settings/fields";
+import { Trans, useTranslation } from "react-i18next";
 
 /**
  * The GitHub App's credentials.
@@ -28,6 +29,7 @@ import {
  * living under /admin.
  */
 export function GithubAppPage() {
+  const { t } = useTranslation();
   const { data: status } = useGithubStatus();
   const { data: cfg } = useGithubAppConfig();
   const save = useSaveGithubAppConfig();
@@ -59,14 +61,14 @@ export function GithubAppPage() {
   // been discarded.
   const appIdError =
     appId.trim() !== "" && !/^\d+$/.test(appId.trim())
-      ? "The App ID is the number on the app's page on GitHub."
+      ? t("githubApp.appIdError")
       : null;
   const callbackBaseError =
     callbackBase.trim() !== "" && !/^https?:\/\/[^\s]+$/.test(callbackBase.trim())
-      ? "An absolute URL, e.g. https://horsie.example.com."
+      ? t("githubApp.callbackError")
       : null;
   const clientIdError =
-    clientId.trim() === "" ? "The client id is what identifies the app." : null;
+    clientId.trim() === "" ? t("githubApp.clientIdError") : null;
   const invalid = appIdError ?? callbackBaseError ?? clientIdError;
 
   const submit = async () => {
@@ -89,7 +91,7 @@ export function GithubAppPage() {
       setDirty(false);
       setSaved(true);
     } catch (e) {
-      setError(e instanceof ApiRequestError ? e.message : "Failed to save.");
+      setError(e instanceof ApiRequestError ? e.message : t("githubApp.saveFailed"));
     }
   };
 
@@ -100,8 +102,8 @@ export function GithubAppPage() {
 
   return (
     <SettingsPage
-        title="GitHub App"
-        desc="Registration details for the GitHub App this server acts as. Set once; users then connect their own accounts from Settings → Integrations."
+        title={t("adminNav.githubApp")}
+        desc={t("githubApp.desc")}
         dirty={dirty}
         saved={saved}
         saving={save.isPending}
@@ -117,12 +119,12 @@ export function GithubAppPage() {
         }}
     >
         <Section
-          title="Credentials"
-          desc="From the app's page on GitHub. The secret and private key are write-only — the server reports only whether each one is set."
+          title={t("githubApp.credentials")}
+          desc={t("githubApp.credentialsDesc")}
         >
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <TextField
-              label="Client ID"
+              label={t("githubApp.clientId")}
               value={clientId}
               onChange={(v) => {
                 setClientId(v);
@@ -132,7 +134,7 @@ export function GithubAppPage() {
               testId="github-client-id"
             />
             <TextField
-              label="Client secret"
+              label={t("githubApp.clientSecret")}
               type="password"
               value={clientSecret}
               onChange={(v) => {
@@ -140,18 +142,20 @@ export function GithubAppPage() {
                 touch();
               }}
               placeholder={
-                cfg?.hasClientSecret ? "•••• stored — blank keeps it" : "Not set"
+                cfg?.hasClientSecret
+                  ? t("githubApp.storedBlankKeeps")
+                  : t("githubApp.notSet")
               }
             />
             <TextField
-              label="App ID"
+              label={t("githubApp.appId")}
               value={appId}
               onChange={(v) => {
                 setAppId(v);
                 touch();
               }}
               invalid={appIdError}
-              hint="The number on the app's page on GitHub."
+              hint={t("githubApp.appIdHint")}
               testId="github-app-id"
             />
             {/* A textarea, not an <input type="password">. Chrome collapses
@@ -164,7 +168,7 @@ export function GithubAppPage() {
                 it is pasted once, and seeing that it pasted whole is worth
                 more than the dots — and the save now parses it either way. */}
             <TextAreaField
-              label="Private key (PEM or base64)"
+              label={t("githubApp.privateKey")}
               value={privateKey}
               rows={4}
               onChange={(v) => {
@@ -172,9 +176,11 @@ export function GithubAppPage() {
                 touch();
               }}
               placeholder={
-                cfg?.hasPrivateKey ? "•••• stored — blank keeps it" : "Not set"
+                cfg?.hasPrivateKey
+                  ? t("githubApp.storedBlankKeeps")
+                  : t("githubApp.notSet")
               }
-              hint="Paste the whole PEM, BEGIN and END lines included."
+              hint={t("githubApp.privateKeyHint")}
               testId="github-private-key"
             />
           </div>
@@ -191,33 +197,35 @@ export function GithubAppPage() {
               aria-hidden
             />
             {status?.appConfigured ? (
-              <>
-                App configured.{" "}
-                <Link
-                  to="/settings/integrations"
-                  className="text-live-ink underline underline-offset-2"
-                >
-                  Connect an account
-                </Link>
-              </>
+              <Trans
+                i18nKey="githubApp.configured"
+                components={{
+                  lnk: (
+                    <Link
+                      to="/settings/integrations"
+                      className="text-live-ink underline underline-offset-2"
+                    />
+                  ),
+                }}
+              />
             ) : (
-              "Not configured yet — sessions cannot clone repositories until it is."
+              t("githubApp.notConfigured")
             )}
           </p>
         </Section>
 
         <Section
-          title="Callback"
-          desc="Where GitHub sends users back after they authorize. horsie derives this from the request, honouring X-Forwarded-Proto, so a correctly configured reverse proxy needs nothing here. Set it when horsie cannot see its own public address — a proxy that does not forward the scheme, or a path prefix."
+          title={t("githubApp.callback")}
+          desc={t("githubApp.callbackDesc")}
         >
           <TextField
-            label="Callback base URL"
+            label={t("githubApp.callbackBase")}
             value={callbackBase}
             onChange={(v) => {
               setCallbackBase(v);
               touch();
             }}
-            placeholder="https://horsie.example.com"
+            placeholder={t("githubApp.callbackPlaceholder")}
             invalid={callbackBaseError}
             testId="github-callback-base"
           />
