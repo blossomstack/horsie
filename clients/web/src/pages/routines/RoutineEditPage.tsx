@@ -21,20 +21,25 @@ import {
   timezoneOptions,
   toLocalInputValue,
 } from "../../lib/schedule";
+import { useTranslation } from "react-i18next";
+import { localeTag } from "../../lib/format";
 
 /** Create (`/routines/new`) and edit (`/routines/:name/edit`) share one form,
  * mounted only once the routine has loaded — its fields seed from `initial`
  * with `useState`, which cannot pick up a value that arrives later. */
 export function RoutineEditPage() {
+  const { t } = useTranslation();
   const { name } = useParams<{ name: string }>();
   const { data: existing, isLoading, isError } = useRoutine(name);
 
   if (name && isLoading) {
-    return <p className="px-6 py-4 text-sm text-faint">Loading…</p>;
+    return <p className="px-6 py-4 text-sm text-faint">{t("common.loading")}</p>;
   }
   if (name && (isError || !existing)) {
     return (
-      <p className="px-6 py-4 text-sm text-red-ink">No such routine: {name}.</p>
+      <p className="px-6 py-4 text-sm text-red-ink">
+        {t("routines.noSuch", { name })}
+      </p>
     );
   }
   return <RoutineForm key={name ?? "new"} initial={existing} />;
@@ -56,22 +61,25 @@ const WEEKDAY_ORDER: Weekday[] = [
   Weekday.Sun,
 ];
 
-const FULL_WEEKDAY_NAMES: Record<Weekday, string> = {
-  [Weekday.Mon]: "Monday",
-  [Weekday.Tue]: "Tuesday",
-  [Weekday.Wed]: "Wednesday",
-  [Weekday.Thu]: "Thursday",
-  [Weekday.Fri]: "Friday",
-  [Weekday.Sat]: "Saturday",
-  [Weekday.Sun]: "Sunday",
-};
+/** Weekday and month names come from `Intl`, which already has all nineteen
+ * of them per language \u2014 a catalogue copy would be nineteen more strings to
+ * keep in step with a translation the platform already ships. */
+const fullWeekdayName = (day: Weekday): string =>
+  new Date(Date.UTC(2024, 0, 1 + WEEKDAY_ORDER.indexOf(day))).toLocaleDateString(
+    localeTag(),
+    { weekday: "long", timeZone: "UTC" },
+  );
 
-const MONTH_NAMES = [
-  "January", "February", "March", "April", "May", "June",
-  "July", "August", "September", "October", "November", "December",
-];
+const monthNames = (): string[] =>
+  Array.from({ length: 12 }, (_, i) =>
+    new Date(Date.UTC(2000, i, 1)).toLocaleDateString(localeTag(), {
+      month: "long",
+      timeZone: "UTC",
+    }),
+  );
 
 function RoutineForm({ initial }: { initial?: RoutineView }) {
+  const { t } = useTranslation();
   const editing = !!initial;
   const create = useCreateRoutine();
   const update = useUpdateRoutine();
@@ -229,7 +237,7 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
       navigate(`/routines/${encodeURIComponent(body.name)}`);
     } catch (e) {
       setError(
-        e instanceof ApiRequestError ? e.message : "Failed to save routine.",
+        e instanceof ApiRequestError ? e.message : t("routineEdit.saveFailed"),
       );
     }
   };
@@ -239,14 +247,16 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
       <div className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
         <RailToggle />
         <h1 className="page-title min-w-0 flex-1 truncate">
-          {editing ? `Edit ${initial.name}` : "New routine"}
+          {editing
+            ? t("agentEdit.editTitle", { name: initial.name })
+            : t("routines.new")}
         </h1>
         <button
           className="key key-blank"
           onClick={() => navigate("/routines")}
           data-testid="cancel-routine-button"
         >
-          Cancel
+          {t("common.cancel")}
         </button>
         <button
           className="key key-go"
@@ -254,18 +264,16 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
           onClick={handleSave}
           data-testid="save-routine-button"
         >
-          {busy ? "Saving…" : "Save"}
+          {busy ? t("common.saving") : t("common.save")}
         </button>
       </div>
       <div className="flex-1 overflow-y-auto px-6 py-4">
         <div className="mx-auto w-full max-w-3xl space-y-4">
           <label className="block">
-            <RowLabel>
-              Name
-            </RowLabel>
+<RowLabel>{t("memoryPage.name")}</RowLabel>
             <input
               className="field w-full font-mono"
-              placeholder="nightly-triage"
+              placeholder={t("routineEdit.namePlaceholder")}
               value={routineName}
               disabled={editing}
               onChange={(e) => setRoutineName(e.target.value)}
@@ -274,12 +282,10 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
           </label>
 
           <label className="block">
-            <RowLabel>
-              Description
-            </RowLabel>
+<RowLabel>{t("memoryPage.description")}</RowLabel>
             <input
               className="field w-full"
-              placeholder="What this routine is for"
+              placeholder={t("routineEdit.descriptionPlaceholder")}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               data-testid="routine-description-input"
@@ -287,16 +293,14 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
           </label>
 
           <label className="block">
-            <RowLabel>
-              Agent
-            </RowLabel>
+<RowLabel>{t("routines.agent")}</RowLabel>
             <select
               className="field w-full"
               value={agent}
               onChange={(e) => setAgent(e.target.value)}
               data-testid="routine-agent-select"
             >
-              <option value="">Choose an agent…</option>
+              <option value="">{t("routineEdit.chooseAgent")}</option>
               {(agents ?? []).map((a) => (
                 <option key={a.name} value={a.name}>
                   {a.name} · {a.model}
@@ -304,8 +308,7 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
               ))}
             </select>
             <span className="mt-1 block text-[0.6875rem] text-faint">
-              The routine runs with this agent’s model, skills and memory. Edit
-              those on the Agents page.
+{t("routineEdit.agentHint")}
             </span>
           </label>
 
@@ -322,18 +325,15 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
               {environmentPicker.body}
             </PopoverMenu>
             <span className="mt-1 block text-[0.6875rem] text-faint">
-              Where every run happens. A run whose environment has gone — an
-              offline runtime, a deleted environment — fails and says so here.
+{t("routineEdit.environmentHint")}
             </span>
           </div>
 
           <label className="block">
-            <RowLabel>
-              Prompt
-            </RowLabel>
+<RowLabel>{t("routines.prompt")}</RowLabel>
             <textarea
               className="field h-40 w-full resize-y font-mono text-sm"
-              placeholder="Everything the run gets told. It cannot ask you a question, so say what to do when a choice comes up."
+              placeholder={t("routineEdit.promptPlaceholder")}
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               data-testid="routine-prompt-input"
@@ -341,7 +341,7 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
           </label>
 
           <fieldset className="space-y-2">
-            <legend className="section-title mb-1.5">Trigger</legend>
+            <legend className="section-title mb-1.5">{t("routineEdit.trigger")}</legend>
             <div className="flex flex-wrap items-center gap-3">
               <select
                 className="field"
@@ -349,18 +349,18 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
                 onChange={(e) => setKind(e.target.value as ScheduleKind)}
                 data-testid="routine-schedule-kind"
               >
-                <option value="Manual">Only when I run it</option>
-                <option value="Every">Repeatedly</option>
-                <option value="Once">Once, at a time</option>
-                <option value="Daily">Daily, at a time</option>
-                <option value="Weekly">Weekly, on chosen days</option>
-                <option value="Monthly">Monthly, on a day</option>
-                <option value="Yearly">Yearly, on a date</option>
+                <option value="Manual">{t("routineEdit.kindManual")}</option>
+                <option value="Every">{t("routineEdit.kindEvery")}</option>
+                <option value="Once">{t("routineEdit.kindOnce")}</option>
+                <option value="Daily">{t("routineEdit.kindDaily")}</option>
+                <option value="Weekly">{t("routineEdit.kindWeekly")}</option>
+                <option value="Monthly">{t("routineEdit.kindMonthly")}</option>
+                <option value="Yearly">{t("routineEdit.kindYearly")}</option>
               </select>
 
               {kind === "Every" && (
                 <label className="flex items-center gap-2 text-sm text-dim">
-                  every
+                  {t("routineEdit.everyLabel")}
                   <input
                     className="field w-24"
                     type="number"
@@ -372,7 +372,7 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
                     }
                     data-testid="routine-interval-minutes"
                   />
-                  minutes
+                  {t("routineEdit.minutes")}
                 </label>
               )}
 
@@ -389,7 +389,7 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
               {["Daily", "Weekly", "Monthly", "Yearly"].includes(kind) && (
                 <>
                   <label className="flex items-center gap-2 text-sm text-dim">
-                    at
+                    {t("routineEdit.atLabel")}
                     <input
                       className="field"
                       type="time"
@@ -401,8 +401,8 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
                   <div className="flex flex-wrap items-center gap-2 text-xs text-dim">
                     <span>
                       {timezone === localTimezone
-                        ? "Browser timezone"
-                        : "Custom timezone"}
+                        ? t("routineEdit.browserTimezone")
+                        : t("routineEdit.customTimezone")}
                       <span className="ml-1 font-mono text-faint">
                         · {timezone}
                       </span>
@@ -417,7 +417,7 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
                         setTimezoneEditorOpen((open) => !open)
                       }
                     >
-                      {timezoneEditorOpen ? "Done" : "Change"}
+                      {timezoneEditorOpen ? t("routineEdit.done") : t("routineEdit.change")}
                     </button>
                   </div>
                   {timezoneEditorOpen && (
@@ -426,7 +426,7 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
                       className="mt-2 w-full min-w-0"
                     >
                       <label className="flex min-w-0 flex-col items-start gap-1 text-xs text-dim">
-                        <span>Timezone</span>
+                        <span>{t("routineEdit.timezone")}</span>
                         <select
                           className="field field-mono min-w-0 w-full"
                           value={timezone}
@@ -448,7 +448,7 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
                       <div
                         className="flex flex-wrap items-center gap-1.5"
                         role="group"
-                        aria-label="Days of week"
+                        aria-label={t("routineEdit.daysOfWeek")}
                         data-testid="routine-weekdays"
                       >
                         {WEEKDAY_ORDER.map((d) => (
@@ -456,7 +456,7 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
                             key={d}
                             type="button"
                             className="chip chip-toggle min-h-10 min-w-10 justify-center"
-                            aria-label={FULL_WEEKDAY_NAMES[d]}
+                            aria-label={fullWeekdayName(d)}
                             aria-pressed={weekdays.has(d)}
                             onClick={() =>
                               setWeekdays((prev) => {
@@ -480,14 +480,14 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
                         }
                         data-testid="routine-weekdays-weekdays"
                       >
-                        Weekdays
+                        {t("routineEdit.weekdays")}
                       </button>
                     </div>
                   )}
 
                   {kind === "Monthly" && (
                     <label className="flex items-center gap-2 text-sm text-dim">
-                      on the
+                      {t("routineEdit.onTheLabel")}
                       <input
                         className="field w-20"
                         type="number"
@@ -497,20 +497,20 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
                         onChange={(e) => setDayOfMonth(e.target.value)}
                         data-testid="routine-day-of-month"
                       />
-                      day
+                      {t("routineEdit.dayLabel")}
                     </label>
                   )}
 
                   {kind === "Yearly" && (
                     <label className="flex items-center gap-2 text-sm text-dim">
-                      on
+                      {t("routineEdit.onLabel")}
                       <select
                         className="field"
                         value={month}
                         onChange={(e) => setMonth(Number(e.target.value))}
                         data-testid="routine-month"
                       >
-                        {MONTH_NAMES.map((m, i) => (
+                        {monthNames().map((m, i) => (
                           <option key={m} value={i + 1}>
                             {m}
                           </option>
@@ -529,14 +529,16 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
                   )}
 
                   {kind === "Weekly" && weekdays.size === 0 && (
-                    <p className="text-xs text-red-ink">Pick at least one day.</p>
+                    <p className="text-xs text-red-ink">{t("routineEdit.pickADay")}</p>
                   )}
                 </>
               )}
             </div>
             {kind === "Every" && intervalSecs < MIN_INTERVAL_SECS && (
               <p className="text-xs text-red-ink">
-                The shortest interval is {MIN_INTERVAL_SECS / 60} minute.
+                {t("routineEdit.shortestInterval", {
+                  count: MIN_INTERVAL_SECS / 60,
+                })}
               </p>
             )}
             {kind !== "Manual" && (
@@ -547,13 +549,11 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
                   onChange={(e) => setEnabled(e.target.checked)}
                   data-testid="routine-enabled-toggle"
                 />
-                Timer active
+                {t("routineEdit.timerActive")}
               </label>
             )}
             <p className="text-[0.6875rem] text-faint">
-              The run button and the API work either way — pausing only stops
-              the timer. Runs are not prevented from overlapping, so leave the
-              interval room to finish.
+{t("routineEdit.timerHint")}
             </p>
           </fieldset>
 

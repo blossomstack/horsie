@@ -11,12 +11,14 @@ import {
 import { compactNumber } from "../../lib/format";
 import { ListRow, RowAction, RowLabel, Section, SettingsPage } from "../settings/fields";
 import { askConfirm } from "../../lib/confirm";
+import { Trans, useTranslation } from "react-i18next";
 
 export function ModelCardsPage() {
+  const { t } = useTranslation();
   return (
     <SettingsPage
-        title="Model cards"
-        desc="Well-known models and their token limits. Settings → Models autocompletes model ids from these and prefills empty limit fields; editing a card never changes an already-configured model."
+        title={t("adminNav.modelCards")}
+        desc={t("modelCards.desc")}
     >
         <ModelCardsSection />
       </SettingsPage>
@@ -33,6 +35,7 @@ export function ModelCardsPage() {
  * form opens on request.
  */
 function ModelCardsSection() {
+  const { t } = useTranslation();
   const { data: cards, isLoading, isError } = useAdminModelCards();
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
@@ -50,18 +53,20 @@ function ModelCardsSection() {
 
   return (
     <Section
-      title="Catalog"
-      desc="One entry per well-known model."
+      title={t("modelCards.catalog")}
+      desc={t("modelCards.catalogDesc")}
       onAdd={() => {
         setAdding(true);
         setEditing(null);
       }}
-      addLabel="Add card"
+      addLabel={t("modelCards.addCard")}
       addTestId="add-model-card"
-      empty={cards?.length === 0 && !adding ? "No model cards." : null}
+      empty={cards?.length === 0 && !adding ? t("modelCards.empty") : null}
     >
-      {isLoading && <p className="text-sm text-faint">Loading…</p>}
-      {isError && <p className="text-sm text-red-ink">Couldn’t load model cards.</p>}
+      {isLoading && <p className="text-sm text-faint">{t("common.loading")}</p>}
+      {isError && (
+        <p className="text-sm text-red-ink">{t("modelCards.loadFailed")}</p>
+      )}
 
       {(cards?.length ?? 0) > 8 && (
         <input
@@ -71,8 +76,8 @@ function ModelCardsSection() {
           onKeyDown={(e) => {
             if (e.key === "Escape") setFilter("");
           }}
-          placeholder="Filter by model id or name…"
-          aria-label="Filter model cards"
+          placeholder={t("modelCards.filterPlaceholder")}
+          aria-label={t("modelCards.filterLabel")}
           data-testid="model-card-filter"
         />
       )}
@@ -105,12 +110,16 @@ function ModelCardsSection() {
               <span className="hidden shrink-0 items-center gap-2 sm:flex">
                 {c.contextWindow != null && (
                   <span className="legend">
-                    {compactNumber(c.contextWindow)} ctx
+                    {t("modelCards.ctx", {
+                      value: compactNumber(c.contextWindow),
+                    })}
                   </span>
                 )}
                 {c.maxTokens != null && (
                   <span className="legend">
-                    {compactNumber(c.maxTokens)} out
+                    {t("modelCards.out", {
+                      value: compactNumber(c.maxTokens),
+                    })}
                   </span>
                 )}
               </span>
@@ -119,7 +128,7 @@ function ModelCardsSection() {
               <>
                 <RowAction
                   icon={<Info size={14} />}
-                  label={`Details for ${c.name}`}
+                  label={t("modelCards.detailsFor", { name: c.name })}
                   pressed={expanded === c.modelId}
                   onClick={() =>
                     setExpanded(expanded === c.modelId ? null : c.modelId)
@@ -128,7 +137,7 @@ function ModelCardsSection() {
                 />
                 <RowAction
                   icon={<Pencil size={14} />}
-                  label={`Edit ${c.name}`}
+                  label={t("runtimesPage.edit", { name: c.name })}
                   onClick={() => {
                     setEditing(c.modelId);
                     setAdding(false);
@@ -150,20 +159,27 @@ function ModelCardsSection() {
 /** The read-only view behind the info key: everything the card carries that
  * the row has no room for. */
 function CardDetails({ card }: { card: ModelCard }) {
+  const { t } = useTranslation();
   const rows: [string, string][] = [
-    ["Model id", card.modelId],
-    ["Context window", card.contextWindow != null ? card.contextWindow.toLocaleString() : "—"],
-    ["Max tokens", card.maxTokens != null ? card.maxTokens.toLocaleString() : "—"],
-    ["Base URL", card.baseUrl || "—"],
-    ["Thinking dialect", card.thinkingDialect || "—"],
+    [t("modelCards.modelId"), card.modelId],
     [
-      "Thinking efforts",
+      t("modelCards.contextWindow"),
+      card.contextWindow != null ? card.contextWindow.toLocaleString() : "—",
+    ],
+    [
+      t("modelCards.maxTokens"),
+      card.maxTokens != null ? card.maxTokens.toLocaleString() : "—",
+    ],
+    [t("modelCards.baseUrl"), card.baseUrl || "—"],
+    [t("modelCards.thinkingDialect"), card.thinkingDialect || "—"],
+    [
+      t("modelCards.thinkingEfforts"),
       card.thinkingEfforts?.length ? card.thinkingEfforts.join(", ") : "—",
     ],
-    ["Default effort", card.defaultThinkingEffort || "—"],
+    [t("modelCards.defaultEffort"), card.defaultThinkingEffort || "—"],
     [
-      "Pinned tool choice disables thinking",
-      card.forcedToolsDisableThinking ? "Yes" : "No",
+      t("modelCards.forcedTools"),
+      card.forcedToolsDisableThinking ? t("common.yes") : t("common.no"),
     ],
   ];
   return (
@@ -179,17 +195,18 @@ function CardDetails({ card }: { card: ModelCard }) {
 }
 
 function DeleteCardAction({ card }: { card: ModelCard }) {
+  const { t } = useTranslation();
   const remove = useDeleteModelCard();
   return (
     <RowAction
       icon={<Trash2 size={14} />}
-      label={`Delete ${card.name}`}
+      label={t("common.deleteNamed", { name: card.name })}
       danger
       disabled={remove.isPending}
       onClick={async () => {
         if (
           !(await askConfirm(
-            `Delete model card "${card.modelId}"? Models already configured keep their current values.`,
+            t("modelCards.confirmDelete", { name: card.modelId }),
           ))
         )
           return;
@@ -239,6 +256,7 @@ function ModelCardEditor({
 }) {
   const create = useCreateModelCard();
   const update = useUpdateModelCard();
+  const { t } = useTranslation();
   const isNew = !card;
 
   const [modelId, setModelId] = useState(card?.modelId ?? "");
@@ -301,13 +319,13 @@ function ModelCardEditor({
   const save = async () => {
     setError(null);
     if (isNew && !modelId.trim()) return setError("Model id is required.");
-    if (!name.trim()) return setError("Name is required.");
+    if (!name.trim()) return setError(t("modelCards.nameRequired"));
     for (const [label, v] of [
-      ["Context window", contextWindow],
-      ["Max tokens", maxTokens],
+      [t("modelCards.contextWindow"), contextWindow],
+      [t("modelCards.maxTokens"), maxTokens],
     ] as const) {
       if (v.trim() !== "" && (!Number.isInteger(Number(v)) || Number(v) <= 0))
-        return setError(`${label} must be a positive whole number.`);
+        return setError(t("modelCards.mustBePositive", { label }));
     }
     try {
       if (isNew) {
@@ -357,7 +375,7 @@ function ModelCardEditor({
     >
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <label className="block">
-          <RowLabel>Model id</RowLabel>
+          <RowLabel>{t("modelCards.modelId")}</RowLabel>
           <input
             className="field font-mono"
             value={modelId}
@@ -365,12 +383,12 @@ function ModelCardEditor({
               setModelId(e.target.value);
               touch();
             }}
-            placeholder="claude-sonnet-4-6"
+            placeholder={t("modelCards.modelIdPlaceholder")}
             disabled={!isNew}
           />
         </label>
         <label className="block">
-          <RowLabel>Name</RowLabel>
+          <RowLabel>{t("memoryPage.name")}</RowLabel>
           <input
             className="field"
             value={name}
@@ -378,11 +396,11 @@ function ModelCardEditor({
               setName(e.target.value);
               touch();
             }}
-            placeholder="Claude Sonnet 4.6"
+            placeholder={t("modelCards.namePlaceholder")}
           />
         </label>
         <label className="block">
-          <RowLabel>Context window (optional)</RowLabel>
+          <RowLabel>{t("modelCards.contextWindowOptional")}</RowLabel>
           <input
             className="field font-mono"
             value={contextWindow}
@@ -394,7 +412,7 @@ function ModelCardEditor({
           />
         </label>
         <label className="block">
-          <RowLabel>Max tokens (optional)</RowLabel>
+          <RowLabel>{t("modelCards.maxTokensOptional")}</RowLabel>
           <input
             className="field font-mono"
             value={maxTokens}
@@ -406,7 +424,7 @@ function ModelCardEditor({
           />
         </label>
         <label className="block">
-          <RowLabel>Base URL (optional)</RowLabel>
+          <RowLabel>{t("modelCards.baseUrlOptional")}</RowLabel>
           <input
             className="field font-mono"
             value={baseUrl}
@@ -414,7 +432,7 @@ function ModelCardEditor({
               setBaseUrl(e.target.value);
               touch();
             }}
-            placeholder="https://api.deepseek.com"
+            placeholder={t("modelCards.baseUrlPlaceholder")}
             data-testid="model-card-base-url"
           />
         </label>
@@ -430,11 +448,12 @@ function ModelCardEditor({
             data-testid="model-card-forced-tools"
           />
           <span>
-            Pinned tool choice disables thinking
+            {t("modelCards.forcedTools")}
             <span className="block text-xs text-dim">
-              For backends that reject a forced <code>tool_choice</code> while
-              thinking is on — DeepSeek answers 400 “Thinking mode does not
-              support this tool_choice”.
+              <Trans
+                i18nKey="modelCards.forcedToolsHint"
+                components={{ mono: <code /> }}
+              />
             </span>
           </span>
         </label>
@@ -445,7 +464,7 @@ function ModelCardEditor({
           bumping a max-token count permanently destroyed a model's thinking
           config with no way to put it back in the product. */}
         <fieldset className="col-span-1 sm:col-span-2">
-          <RowLabel>Thinking efforts (optional)</RowLabel>
+          <RowLabel>{t("modelCards.thinkingEffortsOptional")}</RowLabel>
           <div className="mt-1 flex flex-wrap gap-x-4 gap-y-2">
             {effortOptions.map((effort) => (
               <label
@@ -463,12 +482,11 @@ function ModelCardEditor({
             ))}
           </div>
           <span className="mt-1 block text-xs text-dim">
-            What this model accepts, ascending. Leave empty for a model with no
-            thinking control.
+{t("modelCards.thinkingEffortsHint")}
           </span>
         </fieldset>
         <label className="block">
-          <RowLabel>Default thinking effort (optional)</RowLabel>
+          <RowLabel>{t("modelCards.defaultEffortOptional")}</RowLabel>
           <select
             className="field font-mono"
             value={defaultThinkingEffort}
@@ -487,7 +505,7 @@ function ModelCardEditor({
           </select>
         </label>
         <label className="block">
-          <RowLabel>Thinking dialect (optional)</RowLabel>
+          <RowLabel>{t("modelCards.thinkingDialectOptional")}</RowLabel>
           <select
             className="field font-mono"
             value={thinkingDialect}
@@ -520,7 +538,7 @@ function ModelCardEditor({
           data-testid="model-card-cancel"
           disabled={pending}
         >
-          <X size={13} aria-hidden /> Cancel
+          <X size={13} aria-hidden /> {t("common.cancel")}
         </button>
         <button
           className="key key-go"
@@ -533,7 +551,7 @@ function ModelCardEditor({
           ) : (
             <Save size={14} />
           )}
-          {isNew ? "Add card" : "Save"}
+          {isNew ? t("modelCards.addCard") : t("common.save")}
         </button>
       </div>
     </div>

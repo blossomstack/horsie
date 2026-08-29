@@ -1,4 +1,5 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
+import { useTranslation } from "react-i18next";
 import {
   answerConfirm,
   confirmSnapshot,
@@ -14,6 +15,7 @@ import {
  * and Cancel takes focus, so a held Return does not delete anything.
  */
 export function ConfirmDialog() {
+  const { t } = useTranslation();
   const request = useSyncExternalStore(
     subscribeConfirm,
     confirmSnapshot,
@@ -43,7 +45,7 @@ export function ConfirmDialog() {
         className="panel w-full max-w-md p-4"
         role="alertdialog"
         aria-modal="true"
-        aria-label="Confirm"
+        aria-label={t("confirm.ariaLabel")}
         onClick={(e) => e.stopPropagation()}
         data-testid="confirm-dialog"
       >
@@ -56,7 +58,7 @@ export function ConfirmDialog() {
             onClick={() => answerConfirm(false)}
             data-testid="confirm-cancel"
           >
-            Cancel
+            {t("common.cancel")}
           </button>
           <button
             type="button"

@@ -1,8 +1,10 @@
 import { ChevronRight } from "lucide-react";
 import { useState } from "react";
 import { cn } from "../lib/cn";
+import { useTranslation } from "react-i18next";
 
 export function ThinkingBlock({ text }: { text: string }) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   return (
     <div data-testid="thinking-block">
@@ -20,7 +22,7 @@ export function ThinkingBlock({ text }: { text: string }) {
           )}
           aria-hidden
         />
-        <span className="legend">Thought for a moment</span>
+        <span className="legend">{t("thinking.label")}</span>
       </button>
       {open && (
         <pre

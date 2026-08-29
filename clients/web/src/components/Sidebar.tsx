@@ -9,6 +9,7 @@ import {
   Workflow,
 } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import { cn } from "../lib/cn";
 import { ProjectSwitcher } from "./ProjectSwitcher";
@@ -67,15 +68,17 @@ function FooterLink({
   to,
   icon,
   label,
+  testId,
 }: {
   to: string;
   icon: ReactNode;
   label: string;
+  testId: string;
 }) {
   return (
     <NavLink
       to={to}
-      data-testid={`${label.toLowerCase()}-link`}
+      data-testid={testId}
       title={label}
       aria-label={label}
       className={({ isActive }) =>
@@ -88,6 +91,7 @@ function FooterLink({
 }
 
 export function Sidebar() {
+  const { t } = useTranslation();
   const { data: sessions, isLoading, isError } = useSessionList();
   // Persisted for the same reason group order and collapse once were: an
   // arrangement that half survives a reload is worse than one that does not.
@@ -152,6 +156,7 @@ export function Sidebar() {
           >
             h
           </span>
+          {/* i18n-ignore: the product's name, not a word to translate. */}
           <span className="font-mono text-[0.8125rem] font-semibold tracking-[0.16em] text-legend">
             HORSIE
           </span>
@@ -168,7 +173,7 @@ export function Sidebar() {
             data-testid="rail-state"
           >
             <span className="lamp" aria-hidden />
-            <span className="legend text-current">Offline</span>
+            <span className="legend text-current">{t("rail.offline")}</span>
           </span>
         )}
       </div>
@@ -179,30 +184,30 @@ export function Sidebar() {
           to="/agents"
           testId="agents-link"
           icon={<Bot size={15} aria-hidden />}
-          label="Agents"
+          label={t("nav.agents")}
         />
         <PrimaryLink
           to="/environments"
           testId="environments-link"
           icon={<Container size={15} aria-hidden />}
-          label="Environments"
+          label={t("nav.environments")}
         />
         <PrimaryLink
           to="/routines"
           testId="routines-link"
           icon={<CalendarClock size={15} aria-hidden />}
-          label="Routines"
+          label={t("nav.routines")}
         />
         <PrimaryLink
           to="/workflows"
           testId="workflows-link"
           icon={<Workflow size={15} aria-hidden />}
-          label="Workflows"
+          label={t("nav.workflows")}
         />
       </div>
 
       <div className="flex items-center justify-between pb-1 pl-3.5 pr-2 pt-3">
-        <span className="legend">Sessions</span>
+        <span className="legend">{t("rail.sessions")}</span>
         <div className="flex items-center gap-0.5">
           {/* Nothing to filter by until a tag exists, and an empty panel
               behind a button is a control with no job. */}
@@ -219,8 +224,8 @@ export function Sidebar() {
               onClick={() => setPanelOpen((v) => !v)}
               aria-expanded={panelOpen}
               data-testid="tag-filter-button"
-              title="Filter by tag"
-              aria-label="Filter by tag"
+              title={t("rail.filterByTag")}
+              aria-label={t("rail.filterByTag")}
             >
               <ListFilter size={14} aria-hidden />
             </button>
@@ -229,8 +234,8 @@ export function Sidebar() {
             className="key-icon !h-6 !w-6"
             onClick={() => navigate("/")}
             data-testid="new-session-button"
-            title="Start a new session"
-            aria-label="Start a new session"
+            title={t("rail.newSession")}
+            aria-label={t("rail.newSession")}
           >
             <Plus size={14} aria-hidden />
           </button>
@@ -258,8 +263,8 @@ export function Sidebar() {
             onKeyDown={(e) => {
               if (e.key === "Escape") setFilterText("");
             }}
-            placeholder="Filter sessions…"
-            aria-label="Filter sessions"
+            placeholder={t("rail.filterPlaceholder")}
+            aria-label={t("rail.filterSessions")}
             data-testid="session-filter"
           />
         </div>
@@ -267,19 +272,22 @@ export function Sidebar() {
 
       <nav
         className="flex-1 space-y-px overflow-y-auto px-2 pb-2"
-        aria-label="Sessions"
+        aria-label={t("rail.sessions")}
       >
-        {isLoading && <div className="legend px-2.5 py-6">Loading…</div>}
+        {isLoading && (
+          <div className="legend px-2.5 py-6">{t("common.loading")}</div>
+        )}
         {isError && (
           <p className="px-2.5 py-6 text-[0.8125rem] leading-relaxed text-red-ink">
-            Can’t reach the server. Check that horsie-server is running, then
-            reload.
+{t("rail.unreachable")}
           </p>
         )}
         {!isLoading && !isError && sessions?.length === 0 && (
           <p className="px-2.5 py-8 text-[0.8125rem] leading-relaxed text-faint">
-            No sessions yet. Press <span className="text-legend">+</span> to
-            start one.
+            <Trans
+              i18nKey="rail.empty"
+              components={{ key: <span className="text-legend" /> }}
+            />
           </p>
         )}
         {/* Two filters narrow one list, so an empty result has to name the one
@@ -293,14 +301,14 @@ export function Sidebar() {
               className="px-2.5 py-8 text-[0.8125rem] leading-relaxed text-faint"
               data-testid="no-text-matches"
             >
-              No session matches “{filterText.trim()}”.
+              {t("rail.noTextMatches", { query: filterText.trim() })}
             </p>
           ) : (
             <p
               className="px-2.5 py-8 text-[0.8125rem] leading-relaxed text-faint"
               data-testid="no-tag-matches"
             >
-              No session matches these tags.
+              {t("rail.noTagMatches")}
             </p>
           ))}
         {!isLoading &&
@@ -320,13 +328,15 @@ export function Sidebar() {
         <ProjectSwitcher />
         <FooterLink
           to="/settings"
+          testId="settings-link"
           icon={<Settings size={14} aria-hidden />}
-          label="Settings"
+          label={t("nav.settings")}
         />
         <FooterLink
           to="/admin"
+          testId="admin-link"
           icon={<ShieldCheck size={14} aria-hidden />}
-          label="Admin"
+          label={t("nav.admin")}
         />
         <ThemeToggle />
       </div>

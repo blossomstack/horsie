@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import type { AgentDocument, Usage, UsageView } from "../api/types";
+import { i18n } from "../i18n";
 import { compactNumber } from "../lib/format";
 import { cn } from "../lib/cn";
+import { useTranslation } from "react-i18next";
 
 function StatRow({
   label,
@@ -24,30 +26,31 @@ function StatRow({
 }
 
 function UsageBreakdown({ usage }: { usage: Usage | UsageView }) {
+  const { t } = useTranslation();
   return (
     <>
       <StatRow
-        label="Input"
+        label={t("usage.input")}
         value={compactNumber(usage.inputTokens)}
-        hint="Full prompt tokens: system prompt, tool definitions, and the session history so far. Cache reads/writes below are included in this total, not additional."
+        hint={t("usage.inputHint")}
       />
       <StatRow
-        label="Output"
+        label={t("usage.output")}
         value={compactNumber(usage.outputTokens)}
-        hint="Tokens the model generated back."
+        hint={t("usage.outputHint")}
       />
       {usage.cacheReadTokens != null && (
         <StatRow
-          label="Cache read"
+          label={t("usage.cacheRead")}
           value={compactNumber(usage.cacheReadTokens)}
-          hint="Served from the provider's prompt cache at a steep discount, instead of being reprocessed at full price."
+          hint={t("usage.cacheReadHint")}
         />
       )}
       {usage.cacheCreationTokens != null && (
         <StatRow
-          label="Cache write"
+          label={t("usage.cacheWrite")}
           value={compactNumber(usage.cacheCreationTokens)}
-          hint="Written to the provider's prompt cache this turn at a premium — pays off as cache reads on later turns that reuse it."
+          hint={t("usage.cacheWriteHint")}
         />
       )}
     </>
@@ -58,9 +61,10 @@ function UsageBreakdown({ usage }: { usage: Usage | UsageView }) {
  * once the window is filling, red when a compaction or a new session is close.
  * The thresholds are the operator's decision points, not decoration. */
 function band(pct: number): { color: string; word: string } {
-  if (pct >= 90) return { color: "var(--red)", word: "Nearly full" };
-  if (pct >= 70) return { color: "var(--live)", word: "Filling" };
-  return { color: "var(--lamp-ok)", word: "Room to spare" };
+  if (pct >= 90)
+    return { color: "var(--red)", word: i18n.t("gauge.nearlyFull") };
+  if (pct >= 70) return { color: "var(--live)", word: i18n.t("gauge.filling") };
+  return { color: "var(--lamp-ok)", word: i18n.t("gauge.roomToSpare") };
 }
 
 const R = 7.5;
@@ -95,6 +99,7 @@ export function ContextGauge({
    *  numbers in the panel, and this dial is the *transcript's*. */
   disabled?: boolean;
 }) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -140,13 +145,20 @@ export function ContextGauge({
         aria-expanded={open}
         aria-label={
           pct != null
-            ? `Context ${pct}% full — ${tone!.word}. Open token usage.`
-            : "Open token usage"
+            ? t("gauge.buttonLabel", { percent: pct, word: tone!.word })
+            : t("gauge.buttonLabelUnknown")
         }
         title={
           pct != null
-            ? `Context ${pct}% full — ${tone!.word}. ${compactNumber(agent.contextTokens)} of ${compactNumber(agent.contextWindow!)}. Click for the token breakdown.`
-            : `${compactNumber(totalTokens)} tokens spent. Context window unknown for this model. Click for the token breakdown.`
+            ? t("gauge.buttonTitle", {
+                percent: pct,
+                word: tone!.word,
+                used: compactNumber(agent.contextTokens),
+                window: compactNumber(agent.contextWindow!),
+              })
+            : t("gauge.buttonTitleUnknown", {
+                spent: compactNumber(totalTokens),
+              })
         }
         data-testid="context-stats-button"
         data-pct={pct ?? ""}
@@ -190,9 +202,9 @@ export function ContextGauge({
           className="panel absolute right-0 top-full z-20 mt-2 w-[19rem] p-3.5 shadow-[var(--float)]"
           data-testid="context-stats-panel"
         >
-          <div title="Tokens currently loaded in the main agent's context, out of its context window. Cache status doesn't shrink this — it only affects price and speed.">
+          <div title={t("gauge.windowHint")}>
             <div className="flex items-baseline justify-between gap-3">
-              <span className="legend">Context window</span>
+              <span className="legend">{t("gauge.contextWindow")}</span>
               <span className="readout text-xs">
                 {compactNumber(agent.contextTokens)}
                 {agent.contextWindow != null &&
@@ -208,7 +220,7 @@ export function ContextGauge({
                   aria-valuenow={pct}
                   aria-valuemin={0}
                   aria-valuemax={100}
-                  aria-label="Context window used"
+                  aria-label={t("gauge.used")}
                 >
                   <div
                     className="h-full transition-[width] duration-500"
@@ -223,7 +235,7 @@ export function ContextGauge({
                     data-testid="compaction-threshold"
                     className="absolute inset-y-0 w-px bg-[var(--legend-faint)]"
                     style={{ left: `${COMPACT_AT_PERCENT}%` }}
-                    title={`Compacts automatically around ${COMPACT_AT_PERCENT}% full`}
+                    title={t("gauge.compactsAt", { percent: COMPACT_AT_PERCENT })}
                     aria-hidden
                   />
                 </div>
@@ -239,7 +251,7 @@ export function ContextGauge({
 
           {agent.lastTurnUsage && (
             <div className="mt-3.5 pt-2.5">
-              <div className="legend mb-1 !text-dim">This turn</div>
+              <div className="legend mb-1 !text-dim">{t("gauge.thisTurn")}</div>
               <UsageBreakdown usage={agent.lastTurnUsage} />
             </div>
           )}
@@ -248,9 +260,9 @@ export function ContextGauge({
             <div className="mt-3.5 pt-2.5">
               <div
                 className="legend mb-1 !text-dim"
-                title="Everything this session has spent, across every agent it hosts. This is cost, not context fullness — the dial above is context."
+                title={t("gauge.sessionTotalHint")}
               >
-                Session total
+                {t("gauge.sessionTotal")}
               </div>
               <UsageBreakdown usage={sessionTotal} />
             </div>

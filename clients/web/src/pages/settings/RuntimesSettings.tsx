@@ -20,6 +20,7 @@ import {
   VendorForm,
   type VendorDraft,
 } from "./VendorForm";
+import { useTranslation } from "react-i18next";
 
 /**
  * Where sessions execute — one list.
@@ -38,6 +39,7 @@ import {
  * foot of the page was nowhere near the row that asked for it.
  */
 export function RuntimesSettings() {
+  const { t } = useTranslation();
   const { data: settings, isLoading, error } = useSettings();
   const {
     data: configs,
@@ -102,7 +104,7 @@ export function RuntimesSettings() {
       (configs ?? []).some((v) => v.name === draft.name.trim())
     ) {
       return setFormError(
-        `A cloud vendor named “${draft.name.trim()}” already exists. Edit it from the list, or pick another name.`,
+        t("runtimesPage.vendorExists", { name: draft.name.trim() }),
       );
     }
     try {
@@ -121,7 +123,7 @@ export function RuntimesSettings() {
   // notice — a row has no one field an error belongs under.
   const drop = async (name: string) => {
     const ok = await askConfirm(
-      `Delete cloud vendor “${name}”? Sessions that name it can no longer start.`,
+      t("runtimesPage.confirmDeleteVendor", { name }),
     );
     if (!ok) return;
     remove.mutate(name, {
@@ -140,7 +142,7 @@ export function RuntimesSettings() {
     return (
       <div className="flex items-center gap-2 p-6">
         <span className="lamp lamp-live text-live-ink" aria-hidden />
-        <span className="legend">Loading runtimes</span>
+        <span className="legend">{t("runtimesPage.loading")}</span>
       </div>
     );
   }
@@ -148,8 +150,7 @@ export function RuntimesSettings() {
     return (
       <div className="p-6">
         <p className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
-          Couldn’t load settings. Check that horsie-server is running, then
-          reload.
+{t("runtimesPage.loadFailed")}
         </p>
       </div>
     );
@@ -182,8 +183,8 @@ export function RuntimesSettings() {
 
   return (
     <SettingsPage
-        title="Runtimes"
-        desc="Where sessions execute. Agent processes connect to this server and are configured where they run; cloud vendors are configured here."
+        title={t("settingsNav.runtimes")}
+        desc={t("runtimesPage.desc")}
         saving={update.isPending}
         saved={update.isSuccess && !update.isPending}
     >
@@ -194,17 +195,17 @@ export function RuntimesSettings() {
         )}
 
         <Section
-          title="Vendors"
-          desc="Run horsie connect on a machine, or start a vendor process such as horsie-velos-runtime, and it appears here. A cloud vendor needs no process of your own — each sandbox dials back to its callback URL, so that URL must be reachable from outside this server. New sessions use the default when they don’t pick one."
+          title={t("runtimesPage.vendors")}
+          desc={t("runtimesPage.vendorsDesc")}
           empty={
             rows.length === 0 && !absentDefault && !adding
-              ? "No runtimes yet, so sessions cannot run a turn. Connect an agent, or add a cloud vendor below."
+              ? t("runtimesPage.empty")
               : null
           }
         >
           {configsFailed && (
             <ReadError
-              what="cloud vendors"
+              what={t("runtimesPage.cloudVendors")}
               error={configsError}
               testId="cloud-vendors-error"
             />
@@ -231,14 +232,14 @@ export function RuntimesSettings() {
                 meta={
                   <span className="flex shrink-0 items-center gap-2">
                     {checking === name ? (
-                      <span className="chip">Checking…</span>
+                      <span className="chip">{t("runtimesPage.checking")}</span>
                     ) : (
                       checks[name]?.ok && (
                         <span
                           className="chip text-lamp-ok"
                           data-testid={`cloud-vendor-ok-${name}`}
                         >
-                          Answering
+                          {t("runtimesPage.answering")}
                         </span>
                       )
                     )}
@@ -252,10 +253,10 @@ export function RuntimesSettings() {
                     ) : (
                       <>
                         <span className="lamp text-lamp-ok" aria-hidden />
-                        <span className="legend text-lamp-ok">Connected</span>
+                        <span className="legend text-lamp-ok">{t("runtimesPage.connected")}</span>
                       </>
                     )}
-                    {isDefault && <span className="chip">Default</span>}
+                    {isDefault && <span className="chip">{t("common.default")}</span>}
                   </span>
                 }
                 actions={
@@ -263,7 +264,7 @@ export function RuntimesSettings() {
                     {!isDefault && (
                       <RowAction
                         icon={<Star size={14} />}
-                        label={`Make ${name} the default`}
+                        label={t("runtimesPage.makeDefault", { name })}
                         onClick={() => void makeDefault(name)}
                         disabled={update.isPending}
                         testId={`vendor-make-default-${name}`}
@@ -276,14 +277,14 @@ export function RuntimesSettings() {
                           deleted, since. */}
                         <RowAction
                           icon={<Stethoscope size={14} />}
-                          label={`Check ${name}`}
+                          label={t("runtimesPage.check", { name })}
                           onClick={() => void check(name)}
                           disabled={checking !== null}
                           testId={`cloud-vendor-test-${name}`}
                         />
                         <RowAction
                           icon={<Pencil size={14} />}
-                          label={`Edit ${name}`}
+                          label={t("runtimesPage.edit", { name })}
                           pressed={!!editing}
                           onClick={() =>
                             editing
@@ -294,7 +295,7 @@ export function RuntimesSettings() {
                         />
                         <RowAction
                           icon={<Trash2 size={14} />}
-                          label={`Delete ${name}`}
+                          label={t("common.deleteNamed", { name })}
                           danger
                           disabled={remove.isPending}
                           onClick={() => void drop(name)}
@@ -331,18 +332,18 @@ export function RuntimesSettings() {
             <ListRow
               testId="vendor-row-absent-default"
               title={absentDefault}
-              subtitle="Set as the default, but its agent has not connected. Sessions defaulting to it fail to start until it dials in."
+              subtitle={t("runtimesPage.absentDefault")}
               meta={
                 <span className="flex shrink-0 items-center gap-2">
                   <span className="lamp lamp-off text-faint" aria-hidden />
-                  <span className="legend">Not connected</span>
-                  <span className="chip">Default</span>
+                  <span className="legend">{t("runtimesPage.notConnected")}</span>
+                  <span className="chip">{t("common.default")}</span>
                 </span>
               }
               actions={
                 <RowAction
                   icon={<X size={14} />}
-                  label="Clear the default"
+                  label={t("runtimesPage.clearDefault")}
                   onClick={() => void makeDefault(null)}
                   disabled={update.isPending}
                   testId="vendor-clear-default"
@@ -372,14 +373,14 @@ export function RuntimesSettings() {
                 onClick={() => openEditor(emptyVendorDraft("Fly"))}
                 data-testid="cloud-vendor-add-fly"
               >
-                Add Fly
+                {t("runtimesPage.addFly")}
               </button>
               <button
                 className="key"
                 onClick={() => openEditor(emptyVendorDraft("Velos"))}
                 data-testid="cloud-vendor-add-velos"
               >
-                Add velos
+                {t("runtimesPage.addVelos")}
               </button>
             </div>
           )}

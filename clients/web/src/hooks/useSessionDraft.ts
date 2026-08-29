@@ -28,6 +28,7 @@ import { useMcpServers } from "./useMcp";
 import { usePersistentState } from "./usePersistentState";
 import { usePlugins } from "./usePlugins";
 import { useSettings } from "./useSettings";
+import { i18n } from "../i18n";
 import { allTools, useTools } from "./useTools";
 import { useWorkflows } from "./useWorkflows";
 
@@ -259,13 +260,13 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
     // draft — telling someone to select a model from a menu that says there
     // are none is the one thing this must not do.
     if (settingsFailed)
-      return "Couldn’t load this server’s models and runtimes. Reload once the server is reachable.";
+      return i18n.t("newSession.loadFailed");
     // A run takes its model from each step's preset, so the model channel is
     // neither shown nor required while a workflow is selected.
     if (!selectedWorkflow && !selectedAgent && !draft.model.trim())
-      return "Select a model or agent to start.";
-    if (!chosen) return "Select an environment to start.";
-    if (needsGithub && !githubConnected) return "Connect GitHub to use these repos.";
+      return i18n.t("newSession.needModel");
+    if (!chosen) return i18n.t("newSession.needEnvironment");
+    if (needsGithub && !githubConnected) return i18n.t("newSession.needGithub");
     return null;
   }, [
     settingsFailed,

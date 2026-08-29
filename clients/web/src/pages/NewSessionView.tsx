@@ -10,8 +10,10 @@ import { useSessionDraft } from "../hooks/useSessionDraft";
 import { useEntryCatalog } from "../hooks/useEntryCatalog";
 import { useCreateSession } from "../hooks/useSessions";
 import { useRunWorkflow, useWorkflows } from "../hooks/useWorkflows";
+import { useTranslation } from "react-i18next";
 
 export function NewSessionView() {
+  const { t } = useTranslation();
   // The workflow page's `Run` link arrives with one preselected. A query
   // string rather than router state, so the link survives a reload.
   const [params] = useSearchParams();
@@ -118,14 +120,16 @@ export function NewSessionView() {
             data-testid="workflow-run-banner"
           >
             <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-              <span className="legend">Workflow run</span>
+              <span className="legend">{t("newSession.workflowRun")}</span>
               <span className="font-mono text-[0.8125rem] text-legend">
                 {draft.workflow}
               </span>
               {definition && (
                 <span className="text-xs text-faint">
-                  {definition.steps.length} step
-                  {definition.steps.length === 1 ? "" : "s"} · starts at{" "}
+                  {t("newSession.stepCount", {
+                    count: definition.steps.length,
+                  })}{" "}
+                  · {t("newSession.startsAt")}{" "}
                   <span className="text-dim">{definition.start}</span>
                 </span>
               )}

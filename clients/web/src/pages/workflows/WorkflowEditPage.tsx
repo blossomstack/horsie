@@ -24,19 +24,23 @@ import {
   moveItem,
   type Selection,
 } from "./stepList";
+import { useTranslation } from "react-i18next";
 
 /** Editing a workflow that does not exist used to render the editor anyway —
  * a form with Name and Save permanently disabled, which is a dead end rather
  * than a not-found. Same shape as `AgentEditPage`, which got this right. */
 export function WorkflowEditPage() {
+  const { t } = useTranslation();
   const { name } = useParams<{ name: string }>();
   const { isLoading, isError } = useWorkflow(name);
   if (name && isLoading) {
-    return <p className="px-6 py-4 text-sm text-faint">Loading…</p>;
+    return <p className="px-6 py-4 text-sm text-faint">{t("common.loading")}</p>;
   }
   if (name && isError) {
     return (
-      <p className="px-6 py-4 text-sm text-red-ink">No such workflow: {name}.</p>
+      <p className="px-6 py-4 text-sm text-red-ink">
+        {t("workflowEdit.noSuch", { name })}
+      </p>
     );
   }
   return <WorkflowEditor key={name ?? "new"} />;
@@ -152,6 +156,7 @@ function WorkflowEditor() {
   };
 
   const stepNames = steps.map((s) => s.name.trim()).filter(Boolean);
+  const { t } = useTranslation();
   const current =
     selected.kind === "step" ? steps.find((s) => s.id === selected.id) : undefined;
 
@@ -160,14 +165,14 @@ function WorkflowEditor() {
       <div className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
         <RailToggle />
         <h1 className="page-title min-w-0 flex-1 truncate">
-          {editing ? `Edit ${name}` : "New workflow"}
+          {editing ? t("agentEdit.editTitle", { name }) : t("workflows.new")}
         </h1>
         <button
           className="key key-blank key-sm"
           onClick={() => navigate("/workflows")}
           data-testid="cancel-workflow"
         >
-          Cancel
+          {t("common.cancel")}
         </button>
         <button
           className="key key-go key-sm"
@@ -175,7 +180,7 @@ function WorkflowEditor() {
           data-testid="save-workflow"
           disabled={!slug.trim() || stepNames.length === 0}
         >
-          Save
+          {t("common.save")}
         </button>
       </div>
 
@@ -185,14 +190,14 @@ function WorkflowEditor() {
             15rem column takes two thirds of a 390px viewport. */}
         <nav
           className="flex shrink-0 md:h-full md:w-60 md:flex-col md:"
-          aria-label="Workflow contents"
+          aria-label={t("workflowEdit.contents")}
           data-testid="workflow-sidebar"
         >
           <div className="flex min-h-0 flex-1 items-center gap-1 overflow-x-auto p-2 [mask-image:linear-gradient(to_right,black_calc(100%-2rem),transparent)] md:mask-none md:block md:gap-0 md:overflow-x-visible md:overflow-y-auto">
             <SidebarRow
               icon={<Sliders size={14} />}
-              label="Definition"
-              hint={slug.trim() || "unnamed"}
+              label={t("workflowEdit.definition")}
+              hint={slug.trim() || t("workflowEdit.unnamed")}
               active={selected.kind === "definition" && !visualizing}
               onClick={() => {
                 setSelected(DEFINITION);
@@ -201,7 +206,9 @@ function WorkflowEditor() {
               testId="definition-row"
             />
 
-            <p className="section-title hidden px-2 pb-1 md:mt-3 md:block">Steps</p>
+            <p className="section-title hidden px-2 pb-1 md:mt-3 md:block">
+              {t("run.steps")}
+            </p>
             <ul className="flex items-center gap-1 md:block md:space-y-0.5">
               {steps.map((s, i) => (
                 <li
@@ -240,7 +247,9 @@ function WorkflowEditor() {
                       e.preventDefault();
                       move(i, e.key === "ArrowUp" ? i - 1 : i + 1);
                     }}
-                    aria-label={`Reorder ${s.name || "step"} with the arrow keys`}
+                    aria-label={t("workflowEdit.reorder", {
+                      name: s.name || t("workflowEdit.stepFallback"),
+                    })}
                     data-testid="step-handle"
                   >
                     <GripVertical size={13} />
@@ -255,17 +264,19 @@ function WorkflowEditor() {
                         isSelected(selected, s.id) ? "text-legend" : "text-dim",
                       )}
                     >
-                      {s.name || "unnamed"}
+                      {s.name || t("workflowEdit.unnamed")}
                     </span>
                     {s.name.trim() !== "" && s.name.trim() === start.trim() && (
                       <span className="ml-1.5 text-[0.625rem] uppercase tracking-wide text-faint">
-                        start
+                        {t("workflowGraph.start")}
                       </span>
                     )}
                   </button>
                   <button
                     className="key key-danger key-sm md:opacity-0 md:group-hover:opacity-100 md:focus:opacity-100"
-                    aria-label={`Remove step ${s.name || i + 1}`}
+                    aria-label={t("workflowEdit.removeStep", {
+                      name: s.name || i + 1,
+                    })}
                     onClick={() => removeStep(i)}
                     data-testid="remove-step"
                   >
@@ -281,7 +292,7 @@ function WorkflowEditor() {
               data-testid="add-step"
             >
               <Plus size={14} />
-              Add step
+              {t("workflowEdit.addStep")}
             </button>
           </div>
 
@@ -299,7 +310,7 @@ function WorkflowEditor() {
               data-testid="visualize-workflow"
             >
               <GitBranch size={14} />
-              Visualize
+              {t("workflowEdit.visualize")}
             </button>
           </div>
         </nav>
@@ -313,8 +324,8 @@ function WorkflowEditor() {
 
           {visualizing ? (
             <section className="section" data-testid="workflow-visual">
-              <h2 className="legend">Graph</h2>
-              <p className="mt-1 text-xs text-faint">Choose a step to edit it.</p>
+              <h2 className="legend">{t("workflows.graph")}</h2>
+              <p className="mt-1 text-xs text-faint">{t("workflowEdit.chooseStep")}</p>
               <div className="mt-3 overflow-auto">
                 <WorkflowGraph
                   nodes={graph.nodes}
@@ -344,20 +355,20 @@ function WorkflowEditor() {
               className="section max-w-3xl space-y-3"
               data-testid="definition-form"
             >
-              <h2 className="legend">Definition</h2>
+              <h2 className="legend">{t("workflowEdit.definition")}</h2>
               <label className="block">
-                <span className="section-title">Name</span>
+                <span className="section-title">{t("memoryPage.name")}</span>
                 <input
                   className="field mt-1 w-full"
                   value={slug}
                   disabled={editing}
-                  placeholder="fix-bug"
+                  placeholder={t("workflowEdit.namePlaceholder")}
                   onChange={(e) => setSlug(e.target.value)}
                   data-testid="workflow-name"
                 />
               </label>
               <label className="block">
-                <span className="section-title">Description</span>
+                <span className="section-title">{t("memoryPage.description")}</span>
                 <input
                   className="field mt-1 w-full"
                   value={description}
@@ -366,24 +377,22 @@ function WorkflowEditor() {
                 />
               </label>
               <label className="block">
-                <span className="section-title">Step budget</span>
+                <span className="section-title">{t("workflowEdit.stepBudget")}</span>
                 <input
                   className="field mt-1 w-full"
                   type="number"
                   min={1}
                   value={maxSteps}
-                  placeholder="100 (default)"
+                  placeholder={t("workflowEdit.stepBudgetPlaceholder")}
                   onChange={(e) => setMaxSteps(e.target.value)}
                   data-testid="workflow-max-steps"
                 />
                 <span className="mt-1 block text-xs text-faint">
-                  Most steps one run may execute. This is what stops a loop whose
-                  condition never flips; raise it for a graph that legitimately
-                  loops far.
+{t("workflowEdit.stepBudgetHint")}
                 </span>
               </label>
               <label className="block">
-                <span className="section-title">Starts at</span>
+                <span className="section-title">{t("workflowEdit.startsAt")}</span>
                 <select
                   className="field mt-1 w-full"
                   value={start}
@@ -396,7 +405,9 @@ function WorkflowEditor() {
                       answer while the save sent another. */}
                   {!stepNames.includes(start) && (
                     <option value={start}>
-                      {start.trim() === "" ? "— choose a step —" : `${start} (no such step)`}
+                      {start.trim() === ""
+                        ? t("workflowEdit.chooseAStep")
+                        : t("workflowEdit.noSuchStep", { name: start })}
                     </option>
                   )}
                   {stepNames.map((n) => (

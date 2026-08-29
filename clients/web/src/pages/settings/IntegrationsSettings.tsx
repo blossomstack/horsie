@@ -19,6 +19,7 @@ import { useSettings } from "../../hooks/useSettings";
 import { askConfirm } from "../../lib/confirm";
 import { ReadError } from "../../components/ReadError";
 import { RowLabel, RowShell, TextField, SettingsPage } from "./fields";
+import { Trans, useTranslation } from "react-i18next";
 
 /** The remote GitHub MCP endpoint reused via the GitHub App connection. */
 const GITHUB_MCP_URL = "https://api.githubcopilot.com/mcp/";
@@ -30,18 +31,24 @@ const GITHUB_MCP_NAME = "github";
  * page has no Save button.
  */
 export function IntegrationsSettings() {
+  const { t } = useTranslation();
   const { data: settings, isLoading, isError } = useSettings();
   return (
     <SettingsPage
-        title="Integrations"
-        desc="GitHub, MCP servers, and this server's build info."
+        title={t("settingsNav.integrations")}
+        desc={t("integrations.desc")}
     >
           {isLoading && (
-            <div className="py-16 text-center text-sm text-faint">Loading…</div>
+            <div className="py-16 text-center text-sm text-faint">
+              {t("common.loading")}
+            </div>
           )}
           {isError && (
             <div className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
-              Couldn’t load settings. Is <code>horsie serve</code> running?
+              <Trans
+                i18nKey="modelsPage.loadFailed"
+                components={{ cmd: <code /> }}
+              />
             </div>
           )}
 
@@ -62,6 +69,7 @@ export function IntegrationsSettings() {
  * is the button everyone else came here to press.
  */
 function GithubSection() {
+  const { t } = useTranslation();
   const { data: status } = useGithubStatus();
   const disconnect = useGithubDisconnect();
   const [params, setParams] = useSearchParams();
@@ -85,9 +93,9 @@ function GithubSection() {
       <div className="mb-3 flex items-start gap-2">
         <GitBranch size={15} className="mt-0.5 text-faint" />
         <div>
-          <h2 className="section-title">GitHub</h2>
+          <h2 className="section-title">{t("integrations.github")}</h2>
           <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-faint">
-            Connect your GitHub account so sessions can clone your repositories.
+{t("integrations.githubDesc")}
           </p>
         </div>
       </div>
@@ -96,31 +104,36 @@ function GithubSection() {
         {status?.connected ? (
           <div className="flex items-center justify-between rounded-[var(--radius-control)] px-3 py-2 text-sm">
             <span>
-              Connected as <span className="font-mono">@{status.login}</span>
+              <Trans
+                i18nKey="integrations.connectedAs"
+                values={{ login: status.login }}
+                components={{ login: <span className="font-mono" /> }}
+              />
             </span>
             <button
               className="key key-flat text-red-ink"
               onClick={() => disconnect.mutate()}
             >
-              Disconnect
+              {t("integrations.disconnect")}
             </button>
           </div>
         ) : (
           <div className="flex items-center justify-between gap-3 screen px-3 py-2 text-sm text-dim">
             <span>
               {status?.appConfigured ? (
-                "App configured — connect your account."
+                t("integrations.appConfigured")
               ) : (
-                <>
-                  No GitHub App is registered on this server yet. Set one up in{" "}
-                  <Link
-                    to="/admin/github-app"
-                    className="text-live-ink underline underline-offset-2"
-                  >
-                    Admin → GitHub App
-                  </Link>
-                  .
-                </>
+                <Trans
+                  i18nKey="integrations.noApp"
+                  components={{
+                    lnk: (
+                      <Link
+                        to="/admin/github-app"
+                        className="text-live-ink underline underline-offset-2"
+                      />
+                    ),
+                  }}
+                />
               )}
             </span>
             <a
@@ -130,13 +143,13 @@ function GithubSection() {
               title={
                 status?.appConfigured
                   ? undefined
-                  : "Register the GitHub App in Admin first"
+                  : t("integrations.registerFirst")
               }
               onClick={(e) => {
                 if (!status?.appConfigured) e.preventDefault();
               }}
             >
-              Connect GitHub
+              {t("environment.connectGithub2")}
             </a>
           </div>
         )}
@@ -159,6 +172,7 @@ function GithubSection() {
  * Rendered inside the GitHub section once an account is connected.
  */
 function GithubMcpToggle() {
+  const { t } = useTranslation();
   const { data: servers } = useMcpServers();
   const upsert = useUpsertMcpServer();
   const del = useDeleteMcpServer();
@@ -191,7 +205,7 @@ function GithubMcpToggle() {
       const r = await test.mutateAsync(GITHUB_MCP_NAME);
       if (!r.ok && r.error) setError(r.error);
     } catch (e) {
-      setError(e instanceof ApiRequestError ? e.message : "Test failed.");
+      setError(e instanceof ApiRequestError ? e.message : t("integrations.testFailed"));
     }
   };
 
@@ -202,10 +216,11 @@ function GithubMcpToggle() {
     >
       <div className="flex items-center justify-between gap-2">
         <div>
-          <p className="text-sm font-medium text-legend">GitHub tools (MCP)</p>
+          <p className="text-sm font-medium text-legend">
+            {t("integrations.githubTools")}
+          </p>
           <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-faint">
-            Let sessions call the GitHub MCP server (create PRs, search issues…)
-            using this connection.
+{t("integrations.githubToolsDesc")}
           </p>
         </div>
         {gh ? (
@@ -213,11 +228,12 @@ function GithubMcpToggle() {
             className="key key-flat text-red-ink"
             onClick={() => del.mutate(GITHUB_MCP_NAME)}
           >
-            Disable
+            {t("integrations.disable")}
           </button>
         ) : (
           <button className="key" onClick={enable} disabled={busy}>
-            {busy ? <Loader2 size={14} className="animate-spin" /> : null} Enable
+            {busy ? <Loader2 size={14} className="animate-spin" /> : null}{" "}
+            {t("integrations.enable")}
           </button>
         )}
       </div>
@@ -225,10 +241,12 @@ function GithubMcpToggle() {
         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
           {gh.enabled ? (
             <span className="chip !py-0 text-[0.625rem] text-lamp-ok">
-              enabled · {gh.toolCount ?? 0} tools
+              {t("integrations.enabledTools", { count: gh.toolCount ?? 0 })}
             </span>
           ) : (
-            <span className="chip !py-0 text-[0.625rem] text-faint">not tested</span>
+            <span className="chip !py-0 text-[0.625rem] text-faint">
+              {t("integrations.notTested")}
+            </span>
           )}
           {gh.lastError && (
             <span className="truncate text-red-ink" title={gh.lastError}>
@@ -240,7 +258,7 @@ function GithubMcpToggle() {
             onClick={retest}
             disabled={busy}
           >
-            Test
+            {t("integrations.test")}
           </button>
         </div>
       )}
@@ -260,6 +278,7 @@ function GithubMcpToggle() {
  * GitHub section, so it is excluded here.
  */
 function McpSection() {
+  const { t } = useTranslation();
   const { data: servers, isError, error: loadError } = useMcpServers();
   const [adding, setAdding] = useState(false);
   const generic = (servers ?? []).filter((s) => s.auth.kind !== "GithubApp");
@@ -296,10 +315,13 @@ function McpSection() {
         <div className="flex items-start gap-2">
           <Boxes size={15} className="mt-0.5 text-faint" />
           <div>
-            <h2 className="section-title">MCP servers</h2>
+            <h2 className="section-title">{t("channel.mcpServers2")}</h2>
             <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-faint">
-              Remote Model Context Protocol servers. Sessions pick which to use;
-              their tools appear as <code>mcp__&lt;name&gt;__&lt;tool&gt;</code>.
+              <Trans
+                i18nKey="integrations.mcpDesc"
+                values={{ pattern: "mcp__<name>__<tool>" }}
+                components={{ mono: <code /> }}
+              />
             </p>
           </div>
         </div>
@@ -307,20 +329,20 @@ function McpSection() {
           className="key shrink-0 key-sm"
           onClick={() => setAdding(true)}
         >
-          <Plus size={14} /> Add server
+          <Plus size={14} /> {t("integrations.addServer")}
         </button>
       </div>
       <div className="space-y-2.5">
         {isError && (
           <ReadError
-            what="MCP servers"
+            what={t("channel.mcpServers")}
             error={loadError}
             testId="mcp-servers-error"
           />
         )}
         {!isError && generic.length === 0 && !adding && (
           <p className="screen px-3 py-4 text-center text-sm text-faint">
-            No MCP servers configured.
+{t("integrations.noServers")}
           </p>
         )}
         {adding && <McpServerRow onDone={() => setAdding(false)} />}
@@ -344,6 +366,7 @@ function McpServerRow({
   server?: McpServerView;
   onDone?: () => void;
 }) {
+  const { t } = useTranslation();
   const upsert = useUpsertMcpServer();
   const del = useDeleteMcpServer();
   const test = useTestMcpServer();
@@ -451,34 +474,34 @@ function McpServerRow({
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           {isNew ? (
             <TextField
-              label="Name"
+              label={t("memoryPage.name")}
               value={name}
               onChange={(v) => {
                 setName(v);
                 touch();
               }}
-              placeholder="linear"
-              hint="Letters, digits, '-' and '_'. It becomes part of every tool id: mcp__<name>__<tool>."
+              placeholder={t("integrations.namePlaceholder")}
+              hint={t("integrations.nameHint")}
             />
           ) : (
             <div>
-              <RowLabel>Name</RowLabel>
+              <RowLabel>{t("memoryPage.name")}</RowLabel>
               <div className="truncate py-1.5 font-mono text-sm text-legend">
                 {name}
               </div>
             </div>
           )}
           <TextField
-            label="URL"
+            label={t("integrations.url")}
             value={url}
             onChange={(v) => {
               setUrl(v);
               touch();
             }}
-            placeholder="https://mcp.example.com/"
+            placeholder={t("integrations.urlPlaceholder")}
           />
           <label className="block">
-            <RowLabel>Auth</RowLabel>
+            <RowLabel>{t("integrations.auth")}</RowLabel>
             <select
               className="field font-mono"
               value={authKind}
@@ -487,14 +510,14 @@ function McpServerRow({
                 touch();
               }}
             >
-              <option value="None">None (public)</option>
-              <option value="Bearer">Bearer token</option>
-              <option value="OAuth">OAuth 2.1</option>
+              <option value="None">{t("integrations.authNone")}</option>
+              <option value="Bearer">{t("integrations.authBearer")}</option>
+              <option value="OAuth">{t("integrations.authOAuth")}</option>
             </select>
           </label>
           {authKind === "Bearer" && (
             <TextField
-              label="Bearer token"
+              label={t("integrations.authBearer")}
               type="password"
               value={tokenInput}
               onChange={(v) => {
@@ -507,16 +530,16 @@ function McpServerRow({
           {authKind === "OAuth" && (
             <>
               <TextField
-                label="Client ID (optional)"
+                label={t("integrations.clientId")}
                 value={clientId}
                 onChange={(v) => {
                   setClientId(v);
                   touch();
                 }}
-                placeholder="blank = auto-register"
+                placeholder={t("integrations.autoRegister")}
               />
               <TextField
-                label="Client secret (optional)"
+                label={t("integrations.clientSecret")}
                 type="password"
                 value={clientSecret}
                 onChange={(v) => {
@@ -535,14 +558,18 @@ function McpServerRow({
           <div className="flex flex-wrap items-center gap-2 text-xs">
             {server.enabled ? (
               <span className="chip !py-0 text-[0.625rem] text-lamp-ok">
-                enabled · {server.toolCount ?? 0} tools
+                {t("integrations.enabledTools", {
+                  count: server.toolCount ?? 0,
+                })}
               </span>
             ) : (
-              <span className="chip !py-0 text-[0.625rem] text-faint">not tested</span>
+              <span className="chip !py-0 text-[0.625rem] text-faint">
+                {t("integrations.notTested")}
+              </span>
             )}
             {authKind === "OAuth" && connected && (
               <span className="chip !py-0 text-[0.625rem] text-lamp-ok">
-                authorized
+                {t("integrations.authorized")}
               </span>
             )}
             {server.lastError && (
@@ -573,7 +600,9 @@ function McpServerRow({
                   window.location.href = url;
                 } catch (e) {
                   setError(
-                    e instanceof ApiRequestError ? e.message : "Connect failed.",
+                    e instanceof ApiRequestError
+                      ? e.message
+                      : t("integrations.connectFailed"),
                   );
                 }
               }}
@@ -581,7 +610,7 @@ function McpServerRow({
               {connect.isPending ? (
                 <Loader2 size={14} className="animate-spin" />
               ) : null}
-              {connected ? "Reauthorize" : "Connect"}
+              {connected ? t("integrations.reauthorize") : t("modelsPage.connect")}
             </button>
           )}
           {!isNew && (
@@ -593,7 +622,7 @@ function McpServerRow({
               {test.isPending ? (
                 <Loader2 size={14} className="animate-spin" />
               ) : null}
-              Test
+              {t("integrations.test")}
             </button>
           )}
           <button
@@ -601,7 +630,7 @@ function McpServerRow({
             onClick={save}
             disabled={(!isNew && !dirty) || upsert.isPending}
           >
-            Save
+            {t("common.save")}
           </button>
         </div>
       </div>
@@ -610,20 +639,22 @@ function McpServerRow({
 }
 
 function ServerInfoCard({ view }: { view: SettingsView }) {
+  const { t } = useTranslation();
   const { info } = view;
+  const none = t("integrations.none");
   const rows: [string, string][] = [
-    ["Config file", info.configPath || "(none)"],
-    ["Database", info.database || "(none)"],
-    ["State dir", info.stateDir],
-    ["Data dir", info.dataDir],
-    ["Plugins dir", info.pluginsDir],
-    ["Version", info.version],
+    [t("integrations.configFile"), info.configPath || none],
+    [t("integrations.database"), info.database || none],
+    [t("integrations.stateDir"), info.stateDir],
+    [t("integrations.dataDir"), info.dataDir],
+    [t("integrations.pluginsDir"), info.pluginsDir],
+    [t("integrations.version"), info.version],
   ];
   return (
     <section className="section">
       <div className="flex items-center gap-2">
         <Server size={15} className="text-faint" />
-        <h2 className="section-title">Server</h2>
+        <h2 className="section-title">{t("integrations.server")}</h2>
       </div>
       <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
         {rows.map(([k, v]) => (

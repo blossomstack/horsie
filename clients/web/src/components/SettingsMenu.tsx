@@ -1,4 +1,5 @@
 import { Check, SlidersHorizontal } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { useEffect, useRef, useState } from "react";
 import { SETTINGS, useUiSettings } from "../hooks/useUiSettings";
 import { cn } from "../lib/cn";
@@ -6,6 +7,7 @@ import { cn } from "../lib/cn";
 /** Display switches for this browser — what the panel shows, not what the
  * session does. Kept separate from Settings for exactly that reason. */
 export function SettingsMenu({ disabled }: { disabled?: boolean } = {}) {
+  const { t } = useTranslation();
   const { values, toggle } = useUiSettings();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -32,8 +34,8 @@ export function SettingsMenu({ disabled }: { disabled?: boolean } = {}) {
         className="key-icon"
         disabled={disabled}
         onClick={() => setOpen((o) => !o)}
-        title="What this panel shows"
-        aria-label="Display options"
+        title={t("settingsMenu.title")}
+        aria-label={t("settingsMenu.ariaLabel")}
         aria-expanded={open}
         data-testid="settings-menu-button"
       >
@@ -44,7 +46,7 @@ export function SettingsMenu({ disabled }: { disabled?: boolean } = {}) {
           className="panel absolute right-0 top-full z-10 mt-2 w-64 p-1.5 shadow-[var(--float)]"
           data-testid="settings-menu"
         >
-          <p className="legend px-2 pb-1 pt-1">Display</p>
+          <p className="legend px-2 pb-1 pt-1">{t("settingsMenu.heading")}</p>
           {SETTINGS.map((def) => (
             <button
               key={def.key}
@@ -69,10 +71,10 @@ export function SettingsMenu({ disabled }: { disabled?: boolean } = {}) {
               </span>
               <span className="min-w-0">
                 <span className="block text-[0.8125rem] text-legend">
-                  {def.label}
+                  {t(`ui.${def.key}.label`)}
                 </span>
                 <span className="mt-0.5 block text-xs leading-snug text-faint">
-                  {def.description}
+                  {t(`ui.${def.key}.description`)}
                 </span>
               </span>
             </button>

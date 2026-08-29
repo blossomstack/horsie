@@ -1,0 +1,1256 @@
+import type en from "./en";
+
+/**
+ * 繁體中文（台灣用語）.
+ *
+ * Not a character-level conversion of `zh-Hans`: the two differ in vocabulary,
+ * not only in glyphs — 設定/设置, 預設/默认, 快取/缓存, 專案/项目, 伺服器/服务器,
+ * 權杖/令牌, 儲存庫/仓库. A converter would produce Traditional characters
+ * carrying mainland word choices, which reads as a machine translation to
+ * every reader it is for.
+ */
+const zhHant: typeof en = {
+  common: {
+    save: "儲存",
+    saving: "儲存中…",
+    saved: "已儲存",
+    cancel: "取消",
+    close: "關閉",
+    delete: "刪除",
+    remove: "移除",
+    edit: "編輯",
+    add: "新增",
+    create: "建立",
+    back: "返回",
+    retry: "重試",
+    copy: "複製",
+    copied: "已複製",
+    loading: "載入中…",
+    none: "無",
+    default: "預設",
+    optional: "選填",
+    enabled: "已啟用",
+    disabled: "已停用",
+    unknown: "未知",
+    failed: "失敗",
+    running: "執行中",
+    yes: "是",
+    no: "否",
+    search: "搜尋",
+    dismiss: "關閉提示",
+    return: "返回",
+    open: "開啟",
+    run: "執行",
+    more: "展開",
+    less: "收合",
+    writeFailed: "寫入失敗。",
+    deleteNamed: "刪除 {{name}}",
+    unreachableShort: "無法連線至伺服器。",
+  },
+
+  time: {
+    justNow: "剛剛",
+    inAMoment: "即將",
+    ago: "{{value}}前",
+    in: "{{value}}後",
+    millisecondsShort: "{{value}} 毫秒",
+    secondsShort: "{{value}} 秒",
+    minutesShort: "{{value}} 分",
+    hoursShort: "{{value}} 小時",
+    daysShort: "{{value}} 天",
+    hoursMinutesShort: "{{hours}} 小時 {{minutes}} 分",
+    minutesSecondsShort: "{{minutes}} 分 {{seconds}} 秒",
+  },
+
+  format: {
+    thousands: "{{value}} 千",
+    millions: "{{value}} 百萬",
+  },
+
+  status: {
+    provisioning: {
+      label: "佈建中",
+      hint: "正在建置本工作階段的執行環境 —— 你送出的內容會在它就緒後立即執行。",
+    },
+    idle: { label: "閒置", hint: "已就緒，等待你的下一則訊息。" },
+    running: {
+      label: "執行中",
+      hint: "智慧代理正在工作 —— 你送出的內容會在下一輪得到回應。",
+    },
+    awaitingInput: {
+      label: "等待輸入",
+      hint: "智慧代理向你提出了一個問題。",
+    },
+    finished: {
+      label: "已完成",
+      hint: "本次執行已完成。重試某個步驟即可繼續推進。",
+    },
+    failed: {
+      label: "已失敗",
+      hint: "上一輪失敗了 —— 送出一則訊息即可重試。",
+    },
+    unrecoverable: {
+      label: "無法復原",
+      hint: "本工作階段的執行環境已永久遺失。請建立新的工作階段。",
+    },
+  },
+
+  progression: {
+    startingRuntime: "正在啟動執行環境…",
+    runtimeFailed: "執行環境失敗",
+    scanningWorkspace: "正在掃描工作區…",
+    connectingTools: "正在連接工具…",
+  },
+
+  session: {
+    untitled: "新工作階段",
+    noSuch: "工作階段不存在",
+    loadFailed: "無法載入此工作階段",
+    sessionId: "工作階段 ID",
+    goneHint: "它已被刪除，或從未存在過。你在此輸入的內容無法送達。",
+    readFailed: "讀取失敗。",
+    yourSessionsList: "<lnk>你的工作階段</lnk>中列出了現存的項目。",
+    thisRun: "此次執行",
+    confirmDeleteRun: "刪除「{{name}}」？此操作無法復原。",
+    confirmDelete: "刪除此工作階段？此操作無法復原。",
+    view: "檢視",
+    reconnecting: "正在重新連線",
+    reconnectingHint:
+      "已中斷即時推送。執行仍在伺服器上繼續；重新連線後會補播期間遺漏的內容。",
+    loadingTranscript: "正在載入對話紀錄",
+    loadingEarlier: "正在載入較早的訊息",
+    scrollUp: "向上捲動查看較早的訊息",
+    terminal: "此工作階段已無法執行：{{reason}}",
+    workflowStepHint: "這是一個工作流程步驟。它依據自身定義執行，而非依據訊息。",
+  },
+
+  ui: {
+    showThinking: {
+      label: "顯示思考過程",
+      description: "在對話紀錄中呈現模型的推理步驟。",
+    },
+  },
+
+  nav: {
+    agents: "智慧代理",
+    environments: "環境",
+    routines: "例行工作",
+    workflows: "工作流程",
+    settings: "設定",
+    admin: "管理",
+  },
+
+  rail: {
+    offline: "離線",
+    sessions: "工作階段",
+    showSessions: "顯示工作階段清單",
+    filterByTag: "依標籤篩選",
+    newSession: "建立新的工作階段",
+    filterPlaceholder: "篩選工作階段…",
+    filterSessions: "篩選工作階段",
+    unreachable: "無法連線至伺服器。請確認 horsie-server 正在執行，然後重新載入。",
+    empty: "還沒有工作階段。按 <key>+</key> 建立一個。",
+    noTextMatches: "沒有工作階段符合「{{query}}」。",
+    noTagMatches: "沒有工作階段符合這些標籤。",
+  },
+
+  statusBadge: {
+    title: "{{label}} —— {{hint}}",
+    ariaLabel: "狀態：{{label}}",
+  },
+
+  themeToggle: {
+    toLight: "切換至淺色",
+    toDark: "切換至深色",
+    ariaLabel: "切換淺色與深色",
+  },
+
+  confirm: {
+    ariaLabel: "確認",
+  },
+
+  mutationErrors: {
+    failed: "失敗",
+  },
+
+  readError: {
+    body: "無法載入{{what}}。{{detail}}",
+    unreachable: "無法連線 horsie 伺服器 —— 請確認它正在執行，然後重新載入。",
+    reload: "請重新載入後再試。",
+  },
+
+  compaction: {
+    compacted: "已壓縮",
+    compactedByHand: "已手動壓縮",
+    entries_one: "{{count}} 筆紀錄",
+    entries_other: "{{count}} 筆紀錄",
+    tokensFreed: "釋出了 {{value}} 個 token",
+    hideDetail: "隱藏已帶入的內容",
+    showDetail: "顯示摘要與帶入的狀態",
+    summaryHeading: "先前工作的摘要",
+    carriedHeading: "原樣帶入的內容",
+    nothingToCompact: "無須壓縮",
+    tokensKept: "保留了 {{retain}} 中的 {{used}} 個 token",
+    noWindow: "此模型未宣告上下文視窗，因此沒有可壓縮的額度。",
+    nothingToFold:
+      "本工作階段約有 {{used}} 個 token，而一次壓縮會原樣保留最近的 {{retain}} 個 —— 因此之前沒有可摺疊的內容。硬要壓縮只會拿真實訊息換一份摘要，去騰出並不緊缺的空間。",
+  },
+
+  composer: {
+    ariaLabel: "傳訊息給智慧代理",
+    idlePlaceholder: "傳訊息給智慧代理…",
+    answerPlaceholder: "回答智慧代理…",
+    queuePlaceholder: "為下一輪排入一則訊息…",
+    stop: "停止本輪",
+    stopTitle: "停止本輪 —— 已排入佇列的訊息會保留",
+    send: "傳送訊息",
+    sendTitle: "傳送 —— Enter 傳送，Shift+Enter 換行",
+  },
+
+  turnActions: {
+    copyMarkdown: "複製為 Markdown",
+    copyPlain: "複製為純文字",
+    markdownCopied: "已複製 Markdown",
+    textCopied: "已複製文字",
+  },
+
+  spine: {
+    jumpStart: "跳至工作階段開頭",
+    jumpEnd: "跳至工作階段結尾",
+    scroll: "捲動對話紀錄",
+    sessionEnded: "第 {{index}} 段工作階段在此結束",
+    sessionEndedSummarised_one:
+      "第 {{index}} 段工作階段在此結束 —— 已摘要 {{count}} 筆紀錄",
+    sessionEndedSummarised_other:
+      "第 {{index}} 段工作階段在此結束 —— 已摘要 {{count}} 筆紀錄",
+    jumpToCompaction: "跳至第 {{index}} 個壓縮點，共 {{total}} 個",
+  },
+
+  agentGraph: {
+    openRun: "開啟 {{label}} 這次執行",
+    openTranscript: "開啟 {{label}} 的對話紀錄",
+    showSpawned: "顯示 {{label}} 衍生出的內容 —— 已隱藏 {{count}} 個",
+    hideSpawned: "隱藏 {{label}} 衍生出的內容",
+    empty: "此工作階段尚未記錄任何智慧代理。它們啟動後，圖會自動繪製。",
+    ariaLabel: "智慧代理關係圖",
+    nodeTitle: "{{label}} —— {{kind}}，{{detail}}",
+    currentRun: " · 你正在閱讀的這次執行",
+  },
+
+  entryMenu: {
+    ariaLabel: "指令、技能與智慧代理",
+  },
+
+  timeline: {
+    thinkingBlocks_one: "思考 · {{count}} 段",
+    thinkingBlocks_other: "思考 · {{count}} 段",
+    thisSession: "本工作階段",
+    thisAgent: "此智慧代理",
+    sessionCompacted: "工作階段已壓縮",
+    empty: "此工作階段尚無任何進展。智慧代理開始工作後，時間軸會自動繪製。",
+    unplaced: "不在時間軸上 —— 沒有紀錄它們的執行時間",
+  },
+
+  subagent: {
+    label: "子代理",
+  },
+
+  askUser: {
+    notAnswered: "未作回答 —— {{answer}}",
+  },
+
+  tagFilter: {
+    clear: "清除",
+  },
+
+  taskList: {
+    legend: "計畫",
+    progress: "已完成 {{done}}/{{total}}",
+    hide: "隱藏計畫",
+    show: "顯示計畫",
+    hideWithCount: "隱藏計畫 —— 已完成 {{done}}/{{total}}",
+    showWithCount: "顯示計畫 —— 已完成 {{done}}/{{total}}",
+    toggle: "切換智慧代理的計畫",
+    toggleWithCount: "切換智慧代理的計畫 —— 共 {{total}} 項，已完成 {{done}} 項",
+    empty: "還沒有計畫。當工作大到需要分步時，智慧代理會在這裡寫下計畫。",
+  },
+
+  thinking: {
+    label: "思考了片刻",
+  },
+
+  projects: {
+    newProject: "新增專案…",
+  },
+
+  projectsPage: {
+    what: "專案",
+    readErrorDesc: "此帳戶的專案。",
+    desc: "每項工作一個專案。專案之間不共用任何內容。",
+    sectionDesc:
+      "此側邊欄中的其他一切都隸屬於某個專案：模型、執行環境、技能、記憶空間、整合、智慧代理與工作階段。新專案從空白開始，憑證也不例外。",
+    empty: "還沒有專案。",
+    defaultHint: "永遠存在，且無法刪除",
+    cannotDelete: "預設專案無法刪除",
+    saveName: "儲存名稱",
+    newProject: "新增專案",
+    newProjectDesc: "它從空白開始 —— 建立後再為它加入模型與執行環境。",
+    namePlaceholder: "這個專案是做什麼的？",
+    confirmDelete:
+      "刪除專案「{{name}}」？它的工作階段、智慧代理、設定與記憶都會一併刪除，其執行環境也會被銷毀。此操作無法復原。",
+  },
+
+  toolCall: {
+    input: "輸入",
+    output: "輸出",
+    error: "錯誤",
+    returnedNothing: "沒有回傳內容",
+    pluginHooks: "外掛掛鉤",
+    blockedBy: "被 {{plugin}} 阻擋",
+  },
+
+  transcript: {
+    working: "智慧代理正在工作",
+    queued: "尚未送出 —— 將隨下一輪一起送出",
+  },
+
+  workGroup: {
+    working: "工作中",
+    thoughtOnly: "思考了片刻",
+    plain: {
+      tools_one: "呼叫了 {{tools}} 個工具",
+      tools_other: "呼叫了 {{tools}} 個工具",
+      subagents_one: "{{subagents}} 個子代理已完成",
+      subagents_other: "{{subagents}} 個子代理已完成",
+      both: "呼叫了 {{tools}} 個工具，{{subagents}} 個子代理已完成",
+    },
+    thought: {
+      tools_one: "思考後呼叫了 {{tools}} 個工具",
+      tools_other: "思考後呼叫了 {{tools}} 個工具",
+      subagents_one: "思考後 {{subagents}} 個子代理已完成",
+      subagents_other: "思考後 {{subagents}} 個子代理已完成",
+      both: "思考後呼叫了 {{tools}} 個工具，{{subagents}} 個子代理已完成",
+    },
+  },
+
+  workflowGraph: {
+    empty: "新增一個步驟即可看到流程圖。",
+    ariaLabel: "工作流程圖",
+    start: "起點",
+  },
+
+  sessionRow: {
+    renameSession: "重新命名工作階段",
+    actions: "工作階段操作",
+    newTag: "新標籤",
+    newTagPlaceholder: "新標籤…",
+    rename: "重新命名",
+  },
+
+  usage: {
+    input: "輸入",
+    inputHint:
+      "完整的提示 token：系統提示、工具定義，以及到目前為止的工作階段歷史。下方的快取讀寫已計入此總數，並非額外。",
+    output: "輸出",
+    outputHint: "模型產生回傳的 token。",
+    cacheRead: "快取讀取",
+    cacheReadHint: "由供應商的提示快取以極低價格提供，而非按全價重新處理。",
+    cacheWrite: "快取寫入",
+    cacheWriteHint:
+      "本輪以溢價寫入供應商的提示快取 —— 在後續重用它的輪次中以快取讀取的形式回本。",
+  },
+
+  gauge: {
+    buttonLabel: "上下文已佔用 {{percent}}% —— {{word}}。開啟用量明細。",
+    buttonLabelUnknown: "開啟用量明細",
+    buttonTitle:
+      "上下文已佔用 {{percent}}% —— {{word}}。{{window}} 中的 {{used}}。點擊查看 token 明細。",
+    buttonTitleUnknown:
+      "已花費 {{spent}} 個 token。此模型的上下文視窗未知。點擊查看 token 明細。",
+    nearlyFull: "接近佔滿",
+    filling: "正在填滿",
+    roomToSpare: "餘裕充足",
+    contextWindow: "上下文視窗",
+    windowHint:
+      "主智慧代理上下文中目前載入的 token 數，以及其上下文視窗上限。快取狀態不會減少這個數字 —— 它只影響價格與速度。",
+    used: "已使用的上下文視窗",
+    compactsAt: "佔用約 {{percent}}% 時自動壓縮",
+    thisTurn: "本輪",
+    sessionTotal: "工作階段總計",
+    sessionTotalHint:
+      "本工作階段在其承載的所有智慧代理上的全部花費。這是成本，而非上下文佔用 —— 上方的錶盤才是上下文。",
+  },
+
+  entryPanel: {
+    legend: "項目",
+    close: "隱藏項目面板",
+    timing: "時間",
+    at: "發生於",
+    took: "耗時",
+    tookHint: "產生這則訊息的供應商呼叫耗時。",
+    message: "訊息",
+    noText: "此項目本身沒有文字 —— 它就是它所觸發的那些工作。",
+    thinking: "思考",
+    toolCalls: "工具呼叫",
+    running: "執行中",
+    readInTranscript: "在對話紀錄中檢視",
+  },
+
+  agentPanel: {
+    agent: "智慧代理",
+    run: "執行",
+    transcript: "對話紀錄",
+    close: "隱藏智慧代理面板",
+    contextUsed: "已使用的上下文",
+    timing: "時間",
+    branched: "分支於",
+    opened: "建立於",
+    spawned: "衍生於",
+    lastActivity: "最近活動",
+    ended: "結束於",
+    runningFor: "已執行",
+    runningForHint: "以目前時刻為準：此智慧代理尚未停止。",
+    took: "耗時",
+    tookHint: "從開始到得出此結果之間的時長。",
+    context: "上下文",
+    inContext: "上下文中",
+    inContextHint: "此智慧代理的模型未設定視窗大小，因此無法給出佔比。",
+    asOfLastTurn: "截至此智慧代理最近一輪結束時。",
+    tokens: "Token",
+    inputHint:
+      "此智慧代理各輪次的完整提示 token。快取讀寫已計入此總數，並非額外。",
+    outputHint: "此智慧代理產生回傳的 token。",
+    cacheReadHint: "由供應商的提示快取以折扣價提供。",
+    cacheWriteHint: "以溢價寫入供應商的提示快取。",
+    withSubtree: "含子樹",
+    withSubtreeHint:
+      "此智慧代理加上它底下的一切：它衍生的子代理、由它分支出的子工作階段，以及它呼叫的任何工作流程的各個步驟。",
+    brief: "簡報",
+    task: "任務",
+    result: "結果",
+    deleteAgent: "刪除此智慧代理",
+    deleteSubSession: "刪除此子工作階段",
+    deleteSubagent: "刪除此子代理的執行及其底下的一切",
+  },
+
+  hook: {
+    allowed: "已放行",
+    ran: "已執行",
+    noReason: "未提供原因",
+    couldNotRun: "無法執行 —— {{reason}}",
+    rewroteInput: "改寫了輸入",
+    rewroteOutput: "改寫了輸出",
+    stoppedHorsie: "已終止 horsie —— {{why}}（{{outcome}}）",
+    deniedCall: "拒絕了這次呼叫",
+    askedApproval: "請求核准 —— 已放行",
+    addedResultContext: "為結果補上了上下文",
+    objectedAlreadyRan: "提出異議 —— 但呼叫已經執行",
+    addedContext: "補上了上下文",
+    objected: "提出異議",
+    addedSessionContext: "補上了工作階段上下文",
+    addedPromptContext: "為提示補上了上下文",
+    rejectedPrompt: "拒絕了此提示",
+    leftNote: "為下一輪留下了備註",
+    keptTurnGoing: "讓本輪繼續 —— {{reason}}",
+    hitContinuationLimit: "達到續跑上限 —— {{reason}}",
+    stoppedCompaction: "終止了壓縮 —— {{reason}}",
+  },
+
+  agentKind: {
+    main: "主工作階段",
+    subagent: "子代理",
+    step: "工作流程步驟",
+    sub_session: "子工作階段",
+    run: "工作流程執行",
+    mainAgent: "主智慧代理",
+  },
+
+  schedule: {
+    manually: "手動觸發",
+    every: "每 {{interval}}",
+    once: "一次，於 {{when}}",
+    daily: "每天 {{time}}（{{timezone}}）",
+    weekly: "每 {{days}} 的 {{time}}（{{timezone}}）",
+    monthly: "每月 {{day}} 的 {{time}}（{{timezone}}）",
+    yearly: "每年 {{month}}{{day}} 的 {{time}}（{{timezone}}）",
+    ordinalOne: "{{n}} 日",
+    ordinalTwo: "{{n}} 日",
+    ordinalFew: "{{n}} 日",
+    ordinalOther: "{{n}} 日",
+  },
+
+  newSession: {
+    workflowRun: "工作流程執行",
+    stepCount_one: "{{count}} 個步驟",
+    stepCount_other: "{{count}} 個步驟",
+    startsAt: "起始於",
+    loadFailed: "無法載入此伺服器的模型與執行環境。伺服器可連線後請重新載入。",
+    needModel: "請先選擇一個模型或智慧代理再開始。",
+    needEnvironment: "請先選擇一個環境再開始。",
+    needGithub: "請連接 GitHub 以使用這些儲存庫。",
+  },
+
+  tools: {
+    read: "讀取",
+    write: "寫入",
+    selectAll: "全選",
+    selectAllIn: "全選 {{group}} 類工具",
+    filterAll: "全部",
+    filterRead: "讀取",
+    filterWrite: "寫入",
+  },
+
+  channel: {
+    tools: "工具",
+    toolCatalogue: "工具目錄",
+    environment: "環境",
+    workflow: "工作流程",
+    model: "模型",
+    models: "模型",
+    skills: "技能",
+    skillBundles: "技能包",
+    installSkills: "在設定中安裝技能包",
+    mcp: "MCP",
+    mcpServers: "MCP 伺服器",
+    mcpServers2: "MCP 伺服器",
+    addMcp: "在設定中新增 MCP 伺服器",
+    memory: "記憶",
+    memorySpaces: "記憶空間",
+    createMemory: "請先建立一個記憶空間",
+    thinking: "思考",
+    select: "選擇",
+    selectedCount: "已選 {{count}} 項",
+    noModels: "尚未設定模型 —— 請在設定中新增一個",
+    defaultEffort: "預設（{{effort}}）",
+    defaultLower: "預設",
+    defaultToolSet: "除控制層之外的所有內建工具 —— 本伺服器的預設集合。",
+    modelMissing: "{{model}} —— 已遺失",
+    modelGoneHint:
+      "此模型已不在設定中，因此本工作階段的下一輪會失敗。請在「設定 → 模型」中還原該別名，或建立新的工作階段。",
+  },
+
+  modelChannel: {
+    models: "模型",
+    agents: "智慧代理",
+  },
+
+  workflowChannel: {
+    oneAgent: "單一智慧代理",
+    define: "先定義一個工作流程才能執行",
+  },
+
+  environment: {
+    predefined: "預先定義",
+    runtimes: "執行環境",
+    runtimesLower: "執行環境",
+    repos: "儲存庫",
+    reposLower: "儲存庫",
+    repoCount_one: "{{count}} 個儲存庫",
+    repoCount_other: "{{count}} 個儲存庫",
+    defaultVendor: "預設",
+    noRuntime:
+      "尚未連接任何執行環境，因此工作階段還無法執行任何一輪。請在存放程式碼的機器上執行 <cmd>horsie connect</cmd>。",
+    connectGithub: "在設定中連接 GitHub 以選擇儲存庫",
+    connectGithub2: "連接 GitHub",
+    noRepos: "此 App 安裝看不到任何儲存庫。",
+  },
+
+  notFound: {
+    title: "找不到頁面",
+    desc: "此位址下沒有任何頁面。",
+    requestedPath: "請求的路徑",
+    help: "請檢查位址是否有誤，或從<lnk>你的工作階段</lnk>接續先前的工作。左側側邊欄可以到達其他所有地方。",
+  },
+
+  layout: {
+    skipToContent: "跳至主要內容",
+    closeSessions: "關閉工作階段清單",
+  },
+
+  login: {
+    signIn: "登入",
+    signingIn: "正在登入…",
+    password: "密碼",
+    passwordHint:
+      "此伺服器需要密碼。首次啟動時，horsie 會在其狀態目錄中產生一組密碼並寫入 <file>initial-admin-password</file>。",
+    failed: "無法登入。請確認伺服器仍在執行，然後再試一次。",
+  },
+
+  settingsHeader: {
+    saving: "儲存中",
+    unsaved: "未儲存",
+    discard: "捨棄變更",
+  },
+
+  agents: {
+    new: "新增智慧代理",
+    loading: "正在載入智慧代理",
+    rosterTitle: "智慧代理清單",
+    rosterBlurb:
+      "智慧代理是一份儲存下來的工作階段設定 —— 執行環境、模型、儲存庫、技能、記憶 —— 這樣重複的執行就不必每次重新組裝。按<key>新增智慧代理</key>定義一個，然後在任一台機器上呼叫它：",
+    skillCount_one: "{{count}} 個技能",
+    skillCount_other: "{{count}} 個技能",
+    memoryCount_one: "{{count}} 個記憶",
+    memoryCount_other: "{{count}} 個記憶",
+    mcpCount: "{{count}} 個 MCP",
+    confirmDelete: "刪除智慧代理「{{name}}」？",
+  },
+
+  environments: {
+    confirmDelete: "刪除環境「{{name}}」？",
+    new: "新增環境",
+    loading: "正在載入環境",
+    rosterTitle: "環境清單",
+    rosterBlurb:
+      "環境是一份儲存下來的「執行環境 + 儲存庫」組合 —— 決定工作在哪裡執行、在那裡簽出什麼。按<key>新增環境</key>定義一個。",
+  },
+
+  routines: {
+    confirmDelete: "刪除例行工作「{{name}}」及它建立的所有工作階段？",
+    new: "新增例行工作",
+    noSuch: "例行工作不存在：{{name}}。",
+    runFailed: "執行失敗。",
+    paused: "已暫停",
+    starting: "正在啟動…",
+    runNow: "立即執行",
+    agent: "智慧代理",
+    noRuntime: "無執行環境",
+    runs: "執行紀錄",
+    runsRead: "此例行工作的執行紀錄",
+    next: "下次",
+    notScheduled: "未排程",
+    prompt: "提示詞",
+    lastTriggerFailed: "上次觸發失敗：{{error}}",
+    noRuns:
+      "還沒有執行紀錄。執行紀錄出現在這裡而不是側邊欄，且每次執行只依據提示詞工作 —— 它無法向你提問。",
+    rosterTitle: "例行工作清單",
+    rosterBlurb:
+      "例行工作讓一個智慧代理針對固定提示詞執行 —— 可以定時、透過 API，或在你按下執行時觸發。它的工作階段位於它自己的頁面，而不是側邊欄。按<key>新增例行工作</key>定義一個。",
+  },
+
+  workflows: {
+    rowMeta_one: "{{count}} 個步驟 · 起始於 {{start}}",
+    rowMeta_other: "{{count}} 個步驟 · 起始於 {{start}}",
+    confirmDelete: "刪除工作流程「{{name}}」？它的執行紀錄會繼續留在工作階段側邊欄中。",
+    new: "新增工作流程",
+    noSuch: "工作流程不存在。",
+    graph: "流程圖",
+    graphBlurb:
+      "每個步驟共用同一個執行環境與同一個工作區。<step>{{start}}</step> 會收到本次執行的初始輸入。",
+    runsRead: "此工作流程的執行紀錄",
+    noRuns: "還沒有執行紀錄。",
+    rosterTitle: "工作流程清單",
+    rosterBlurb:
+      "工作流程讓多個智慧代理依序執行，每一個都決定下一個往哪裡去。所有步驟共用一個工作區，因此前一個寫下的內容後一個就讀得到。執行紀錄會與你的工作階段一同出現在側邊欄。按<key>新增工作流程</key>定義一個。",
+  },
+
+  settingsNav: {
+    projects: "專案",
+    models: "模型",
+    runtimes: "執行環境",
+    skills: "技能",
+    memory: "記憶",
+    integrations: "整合",
+    appearance: "外觀",
+    account: "帳戶",
+  },
+
+  adminNav: {
+    modelCards: "模型卡",
+    githubApp: "GitHub App",
+  },
+
+  device: {
+    title: "授權一次命令列登入",
+    desc: "請核對此代碼與終端機中顯示的一致。核准後，那台機器將以你的身分存取此伺服器。",
+    approved: "已核准。你的終端機應會在幾秒內繼續 —— 可以關閉此頁面了。",
+    denied: "已拒絕。該次登入嘗試被駁回。",
+    codePlaceholder: "XXXX-XXXX",
+    approve: "核准",
+    deny: "拒絕",
+  },
+
+  chatgpt: {
+    signedIn: "已登入",
+    signOut: "登出",
+    notSignedIn: "未登入",
+    signIn: "使用 ChatGPT 登入",
+    starting: "正在啟動…",
+    openAndEnter: "開啟 <here>{{url}}</here> 並輸入此代碼：",
+    waiting:
+      "正在等待核准…你可以在任何裝置上完成。用量會計入此 ChatGPT 方案的 Codex 額度。",
+  },
+
+  skills: {
+    hooks: "掛鉤",
+    defaultForNew: "新工作階段預設啟用",
+    update: "更新",
+    deleteBundle: "刪除技能包",
+    confirmDeleteBundle: "刪除技能包「{{name}}」？",
+    removeMarketplace: "移除市集",
+    confirmRemoveMarketplace: "移除市集「{{name}}」？從中安裝的技能包會繼續保留。",
+    filterPlugins: "篩選外掛…",
+    filterPluginsLabel: "篩選外掛",
+  },
+
+  authored: {
+    historyOf: "{{name}} 的歷史",
+    confirmDeleteSkill: "刪除技能「{{name}}」？它的歷史會保留，因此仍可還原。",
+    confirmDeletePlugin:
+      "刪除「{{name}}」？這會移除其中的每個技能，以及它在技能包庫中的項目。",
+    title: "在此創作",
+    desc: "技能存放在本伺服器資料庫中的外掛。智慧代理透過創作工具寫入它們；你可以在這裡閱讀、還原與移除。",
+    loadingHistory: "正在載入歷史…",
+    historyFailed: "無法讀取此技能的歷史。",
+    deleted: "已刪除",
+    restore: "還原",
+    newPlugin: "新增外掛",
+    newPluginPlaceholder: "field-notes",
+    empty: "還沒有創作內容。選取創作工具的工作階段可以在這裡寫入技能。",
+  },
+
+  run: {
+    loading: "正在載入執行…",
+    tokens: "{{value}} 個 token",
+    interrupt: "中斷",
+    retry: "重試",
+    retryStep: "重試 {{step}}",
+    confirmRetry: "重試 {{step}}？它會在上一次嘗試留下的工作區狀態上重新執行。",
+    waitingOnQuestion: "<step>{{step}}</step> 正在等待回答一個問題。",
+    answerIt: "去回答",
+    wasInterrupted:
+      "<step>{{step}}</step> 已被中斷。在你重試之前不會有任何執行 —— 工作區不會回復，因此它會從上一次嘗試留下的狀態繼續。",
+    steps: "步驟",
+    stepsHint: "選擇一個步驟查看它的嘗試紀錄，或開啟它閱讀它實際做了什麼。",
+    neverReached: "本次執行從未到達此步驟。",
+    attempt: "第 {{n}} 次嘗試",
+    stepRunning: "目前有步驟正在執行。",
+    retryHint: "重新執行此步驟。工作區不會回復。",
+  },
+
+  skillsPage: {
+    desc: "可共用的技能包，從 git 儲存庫安裝 —— 可依工作階段選用。",
+    installTitle: "安裝技能包",
+    installDesc:
+      "可以是一個技能包，也可以是一個技能市集 —— horsie 會自行判斷。這可能需要幾秒。",
+    gitUrl: "Git 位址",
+    gitUrlPlaceholder: "https://github.com/owner/skills-bundle",
+    ref: "分支或標籤（選填）",
+    refPlaceholder: "main",
+    install: "安裝",
+    marketplaces: "市集",
+    marketplacesWhat: "市集",
+    marketplacesDesc: "你新增過的目錄。移除其中一個不會影響已從中安裝的技能包。",
+    installedTitle: "已安裝的技能包",
+    installedDesc: "開啟某個技能包的開關，即可讓新工作階段預設選取它。",
+    empty: "尚未安裝任何技能包。",
+  },
+
+  memoryPage: {
+    desc: "智慧代理儲存並回讀的持久筆記 —— 歸入可依工作階段選用的空間。",
+    spaces: "記憶空間",
+    spacesDesc: "空間是記憶的命名空間。工作階段可以選擇自己能讀寫哪些空間。",
+    newSpace: "新增空間",
+    newSpacePlaceholder: "ops",
+    createSpaceFailed: "建立空間失敗。",
+    noSpaces: "還沒有記憶空間。請在上方建立一個。",
+    memories: "記憶",
+    memoriesIn: "{{space}} 中的記憶",
+    memoriesWhat: "記憶",
+    memoriesDesc: "這些由智慧代理自己寫入。凡是有誤或不再有用的，都可以編輯或刪除。",
+    createSpaceFirst: "請先建立一個記憶空間。",
+    addMemory: "新增記憶",
+    noMemories: "此空間中還沒有記憶。",
+    memoryCount_one: "{{count}} 筆記憶",
+    memoryCount_other: "{{count}} 筆記憶",
+    holdsNoMemories: "它不含任何記憶。",
+    alsoDeletes_one: "這也會刪除其中的 {{count}} 筆記憶。",
+    alsoDeletes_other: "這也會刪除其中的 {{count}} 筆記憶。",
+    confirmDeleteSpace: "刪除記憶空間「{{name}}」？{{tail}}",
+    confirmDeleteMemory: "刪除記憶「{{name}}」？",
+    deleteSpace: "刪除空間",
+    deleteMemory: "刪除記憶",
+    name: "名稱",
+    namePlaceholder: "deploy-order",
+    description: "描述",
+    descriptionPlaceholder: "velos 必須先於伺服器啟動",
+    content: "內容",
+    contentPlaceholder: "Markdown。引用另一筆記憶寫作 [[space/name]]。",
+    saveMemory: "儲存記憶",
+    saveMemoryFailed: "儲存記憶失敗。",
+    saveChanges: "儲存變更",
+    updateMemoryFailed: "更新記憶失敗。",
+  },
+
+  account: {
+    desc: "此伺服器的登入方式。",
+    tokens: "機器權杖",
+    tokensWhat: "機器權杖",
+    tokensDesc:
+      "供無人看管執行的執行環境供應方程序使用。在你自己的機器上，<cmd>horsie auth login</cmd> 就夠了 —— 只有在無人核准的場合才需要權杖。機器權杖只能連接執行環境，其他什麼都做不了：它不能讀取工作階段、變更設定，也不能再建立權杖。",
+    tokenLabelPlaceholder: "這組權杖給哪一台機器用？",
+    copyNow: "請立即複製 —— 它不會再次顯示。",
+    noTokens: "還沒有機器權杖。",
+    inUse: "使用中",
+    neverUsed: "從未使用",
+    revoke: "撤銷",
+    confirmRevoke: "撤銷機器權杖「{{label}}」？仍在使用它的一切都將無法連線。",
+    disabled:
+      "此部署未啟用身分驗證，因此沒有需要管理的帳戶。任何能連上此伺服器的人都擁有完整權限。",
+    mustChange:
+      "此伺服器仍在使用首次啟動時產生的密碼。請在下方變更 —— 這也會從狀態目錄中刪除 <file>initial-admin-password</file> 檔案。",
+    external: "此伺服器的登入由別處管理，因此這裡沒有可變更的密碼。",
+    currentPassword: "目前密碼",
+    newPassword: "新密碼（至少 8 個字元）",
+    passwordChanged: "密碼已變更。其他瀏覽器已被登出。",
+    changePassword: "變更密碼",
+  },
+
+  runtimesPage: {
+    vendorExists:
+      "已存在名為「{{name}}」的雲端供應商。請從清單中編輯它，或另取一個名稱。",
+    absentDefault:
+      "已設為預設，但它的智慧代理尚未連線。在它接入之前，以它為預設的工作階段都會啟動失敗。",
+    loading: "正在載入執行環境",
+    loadFailed: "無法載入設定。請確認 horsie-server 正在執行，然後重新載入。",
+    desc: "工作階段在哪裡執行。智慧代理程序會連線至此伺服器，並在其所在處完成設定；雲端供應商則在這裡設定。",
+    vendors: "供應商",
+    vendorsDesc:
+      "在某台機器上執行 horsie connect，或啟動 horsie-velos-runtime 之類的供應方程序，它就會出現在這裡。雲端供應商不需要你自己的程序 —— 每個沙箱都會回撥它的回呼位址，因此該位址必須能從此伺服器之外連線。新工作階段在未指定時會使用預設項。",
+    empty:
+      "還沒有執行環境，因此工作階段無法執行任何一輪。請連接一個智慧代理，或在下方新增雲端供應商。",
+    cloudVendors: "雲端供應商",
+    checking: "檢查中…",
+    answering: "有回應",
+    connected: "已連線",
+    notConnected: "未連線",
+    makeDefault: "將 {{name}} 設為預設",
+    check: "檢查 {{name}}",
+    edit: "編輯 {{name}}",
+    clearDefault: "清除預設項",
+    addFly: "新增 Fly",
+    addVelos: "新增 velos",
+    confirmDeleteVendor: "刪除雲端供應商「{{name}}」？指定它的工作階段將無法再啟動。",
+  },
+
+  vendorForm: {
+    name: "名稱",
+    flyAppPlaceholder: "horsie-runtimes",
+    velosUrlPlaceholder: "http://velos.example:8080",
+    regionPlaceholder: "iad",
+    imagePlaceholder: "ghcr.io/you/horsie-runtime:latest",
+    workspaceRootPlaceholder: "/workspaces",
+    flyApp: "Fly 應用程式",
+    flyAppHint:
+      "必須已經存在 —— 請用 `fly apps create` 建立。horsie 只會在其中建立機器。",
+    velosUrl: "velos 伺服器位址",
+    apiToken: "API 權杖",
+    leaveBlank: "留空表示保持不變",
+    flyTokenPlaceholder: "fly api 權杖",
+    velosTokenPlaceholder: "選填 —— velos 可能不需驗證即可執行",
+    region: "區域",
+    image: "執行環境映像檔",
+    callbackUrl: "回呼位址",
+    workspaceRoot: "工作區根目錄",
+    memoryMb: "記憶體（MB）",
+    cpus: "CPU 核心數",
+    volumeSizeGb: "磁碟區大小（GB）",
+    volumesHint: "為每個執行環境配置一個磁碟區，這樣停止後仍能保留其工作區",
+    velosNoVolumes:
+      "velos 沒有磁碟區：停止工作階段會刪除其容器，下一則訊息會排入一個全新的容器並重新執行佈建流程。",
+  },
+
+  githubApp: {
+    desc: "此伺服器所扮演的 GitHub App 的註冊資訊。設定一次即可；使用者隨後可在「設定 → 整合」中連接自己的帳戶。",
+    credentials: "憑證",
+    credentialsDesc:
+      "來自該應用程式在 GitHub 上的頁面。密鑰與私鑰只寫不讀 —— 伺服器只會回報它們是否已設定。",
+    clientId: "Client ID",
+    clientIdError: "Client ID 是用來識別該應用程式的。",
+    clientSecret: "Client Secret",
+    appId: "App ID",
+    appIdHint: "該應用程式在 GitHub 頁面上顯示的數字。",
+    appIdError: "App ID 是該應用程式在 GitHub 頁面上顯示的數字。",
+    privateKey: "私鑰（PEM 或 base64）",
+    privateKeyHint: "請貼上完整的 PEM，包含 BEGIN 與 END 行。",
+    storedBlankKeeps: "•••• 已儲存 —— 留空則保持不變",
+    notSet: "未設定",
+    saveFailed: "儲存失敗。",
+    configured: "應用程式已設定。<lnk>連接一個帳戶</lnk>",
+    notConfigured: "尚未設定 —— 在設定好之前，工作階段無法複製任何儲存庫。",
+    callback: "回呼",
+    callbackDesc:
+      "GitHub 在使用者授權後將其送回的位址。horsie 會依據請求推導它，並遵循 X-Forwarded-Proto，因此設定正確的反向代理不需在此填寫。只有當 horsie 無法得知自己的公開位址時才需要設定 —— 例如代理不轉送協定，或存在路徑前綴。",
+    callbackBase: "回呼基礎位址",
+    callbackPlaceholder: "https://horsie.example.com",
+    callbackError: "需要一個絕對位址，例如 https://horsie.example.com。",
+  },
+
+  agentEdit: {
+    noSuch: "智慧代理不存在：{{name}}。",
+    editTitle: "編輯 {{name}}",
+    needName: "請先為該智慧代理取一個名稱再儲存。",
+    needModel: "請先選擇一個模型再儲存此智慧代理。",
+    saveFailed: "儲存智慧代理失敗。",
+    namePlaceholder: "reviewer",
+    descriptionPlaceholder: "這個智慧代理是做什麼的",
+    descriptionHint: "用於清單顯示。智慧代理本身看不到它。",
+    instructions: "指示",
+    instructionsPlaceholder: "該智慧代理應如何工作 —— 會加入它的系統提示",
+    instructionsHint: "每一輪都會送給模型，位於工作區自帶的指示檔案之後。",
+    configuration: "設定",
+    configurationHint: "由此預設集啟動的每個工作階段所使用的設定。",
+    tuning: "調校",
+    tunable: "允許調校智慧代理改進此預設集",
+    tunableHint:
+      "排程的智慧代理可以讀取由此預設集產生的工作階段紀錄並改寫它 —— 包括指示、技能、工具與記憶。除非你開啟，否則不會啟用。",
+  },
+
+  modelCards: {
+    nameRequired: "名稱為必填欄位。",
+    mustBePositive: "{{label}}必須是正整數。",
+    desc: "常見模型及其 token 上限。「設定 → 模型」會據此自動完成模型 ID 並預先填入空白的上限欄位；編輯模型卡永遠不會更動已設定好的模型。",
+    catalog: "目錄",
+    catalogDesc: "每個常見模型一筆紀錄。",
+    empty: "還沒有模型卡。",
+    loadFailed: "無法載入模型卡。",
+    filterPlaceholder: "依模型 ID 或名稱篩選…",
+    filterLabel: "篩選模型卡",
+    ctx: "{{value}} 上下文",
+    out: "{{value}} 輸出",
+    detailsFor: "{{name}} 的詳細資料",
+    modelId: "模型 ID",
+    modelIdPlaceholder: "claude-sonnet-4-6",
+    namePlaceholder: "Claude Sonnet 4.6",
+    contextWindow: "上下文視窗",
+    contextWindowOptional: "上下文視窗（選填）",
+    maxTokens: "最大 token 數",
+    maxTokensOptional: "最大 token 數（選填）",
+    baseUrl: "基礎位址",
+    baseUrlOptional: "基礎位址（選填）",
+    baseUrlPlaceholder: "https://api.deepseek.com",
+    thinkingDialect: "思考協定方言",
+    thinkingDialectOptional: "思考協定方言（選填）",
+    thinkingEfforts: "思考強度",
+    thinkingEffortsOptional: "思考強度（選填）",
+    thinkingEffortsHint: "此模型接受的取值，由低到高。不支援思考控制的模型請留空。",
+    defaultEffort: "預設強度",
+    defaultEffortOptional: "預設思考強度（選填）",
+    forcedTools: "固定工具選擇時停用思考",
+    forcedToolsHint:
+      "適用於在開啟思考時拒絕強制 <mono>tool_choice</mono> 的後端 —— DeepSeek 會回傳 400「Thinking mode does not support this tool_choice」。",
+    addCard: "新增模型卡",
+    confirmDelete: "刪除模型卡「{{name}}」？已設定的模型會保留目前的取值。",
+  },
+
+  environmentEdit: {
+    noSuch: "環境不存在：{{name}}。",
+    needName: "請先為該環境取一個名稱再儲存。",
+    needVendor: "請選擇此環境執行所在的執行環境供應商。",
+    saveFailed: "儲存環境失敗。",
+    namePlaceholder: "staging",
+    descriptionPlaceholder: "這個環境是做什麼的",
+    vendor: "執行環境供應商",
+    selectVendor: "選擇一個執行環境供應商",
+    vendorNotConnected: "{{name}} —— 未連線",
+    vendorHint:
+      "只有能自行佈建工作區的供應商才能執行環境，因此本機執行環境不會列出。",
+    noProvisioningVendor:
+      "已連線的供應商中沒有一個能自行佈建工作區，因此目前無法執行任何環境。請在<lnk>設定 › 執行環境</lnk>中新增一個。",
+    envVars: "環境變數",
+    envVarsHint: "僅限純文字 —— 請勿在此放置機密。",
+    envVarName: "NAME",
+    envVarValue: "value",
+    removeEnvVar: "移除環境變數",
+    addEnvVar: "新增環境變數",
+    provision: "佈建步驟",
+    provisionHint:
+      "一個由 {name, uses, with} 步驟組成的 JSON 陣列。目前還沒有任何東西會執行它們。",
+    provisionInvalid: "佈建步驟必須是由 {name, uses, with} 組成的 JSON 陣列。",
+    reposFromGithub:
+      "儲存庫來自你的 GitHub App 安裝。<lnk>連接 GitHub</lnk> 即可選擇。",
+    loadingRepos: "正在載入儲存庫…",
+    noReposVisible: "此 App 安裝看不到任何儲存庫。<lnk>檢查它的存取權限</lnk>。",
+    filterRepos: "篩選儲存庫",
+    notInInstallation: "不在此安裝範圍內",
+    ref: "分支或標籤",
+    gitRefFor: "{{name}} 的 Git 參考",
+    noRepoMatches: "沒有儲存庫符合「{{query}}」。",
+  },
+
+  routineEdit: {
+    saveFailed: "儲存例行工作失敗。",
+    namePlaceholder: "nightly-triage",
+    descriptionPlaceholder: "這個例行工作是做什麼的",
+    chooseAgent: "選擇一個智慧代理…",
+    agentHint:
+      "例行工作會使用該智慧代理的模型、技能與記憶。這些請在「智慧代理」頁面編輯。",
+    environmentHint:
+      "每次執行發生的地方。若某次執行的環境已不存在 —— 執行環境離線、環境被刪除 —— 該次執行會失敗並在此說明。",
+    promptPlaceholder:
+      "執行時會收到的全部說明。它無法向你提問，因此請寫明遇到取捨時該怎麼做。",
+    trigger: "觸發方式",
+    kindManual: "僅在我手動執行時",
+    kindEvery: "依間隔重複",
+    kindOnce: "一次，在指定時刻",
+    kindDaily: "每天，在指定時刻",
+    kindWeekly: "每週，在選定的日子",
+    kindMonthly: "每月，在指定日",
+    kindYearly: "每年，在指定日期",
+    everyLabel: "每",
+    minutes: "分鐘",
+    atLabel: "於",
+    onLabel: "在",
+    onTheLabel: "在每月",
+    dayLabel: "日",
+    browserTimezone: "瀏覽器時區",
+    customTimezone: "自訂時區",
+    timezone: "時區",
+    done: "完成",
+    change: "變更",
+    daysOfWeek: "星期",
+    weekdays: "週一至週五",
+    pickADay: "請至少選擇一天。",
+    shortestInterval_one: "最短間隔為 {{count}} 分鐘。",
+    shortestInterval_other: "最短間隔為 {{count}} 分鐘。",
+    timerActive: "啟用定時",
+    timerHint:
+      "無論是否啟用定時，執行按鈕與 API 都可用 —— 暫停只會停掉定時器。執行之間不會互相阻擋重疊，因此請留出足夠的間隔讓它跑完。",
+  },
+
+  stepForm: {
+    namePlaceholder: "步驟名稱",
+    missingAgent:
+      "名為 <name>{{agent}}</name> 的智慧代理已不存在，因此工作流程執行時該步驟會失敗。請另選一個，或重新建立它。",
+    promptPlaceholder: "此步驟應做什麼。它的輸入會附加在下方。",
+    outcomes: "結果",
+    outcomesHint:
+      "此步驟可能的結束方式。步驟會選定其中之一，而這也是流程轉移唯一讀取的東西。每一項都需要描述 —— 模型正是靠它來做選擇。",
+    outcomePlaceholder: "success",
+    outcomeDescPlaceholder: "它代表什麼",
+    removeOutcome: "移除結果 {{name}}",
+    addOutcome: "新增結果",
+    fields: "結果欄位",
+    fieldNamePlaceholder: "severity",
+    fieldDescPlaceholder: "它存放什麼",
+    typeString: "字串",
+    typeNumber: "數字",
+    typeBoolean: "布林值",
+    typeStringList: "字串清單",
+    required: "必填",
+    removeField: "移除欄位 {{name}}",
+    addField: "新增欄位",
+    canAsk: "可以向人提問",
+    canAskHint:
+      "為此步驟提供 ask_user 工具。沒有它，步驟就無法提問，只能自行決定。",
+    goesTo: "轉移至",
+    goesToHint:
+      "依序嘗試，第一個符合的生效。未指定結果的那一列即為後備。若都不符合，執行結束。",
+    opAlways: "總是",
+    opIn: "結果屬於",
+    opNotIn: "結果不屬於",
+    chooseStep: "選擇一個步驟…",
+    removeTransition: "移除轉移 {{n}}",
+    addTransition: "新增轉移",
+    limits: "上限",
+    maxIterations: "最大輪數",
+    unlimited: "不限",
+    retries: "重試次數",
+    limitsHint:
+      "此步驟在失敗前最多可進行多少輪，以及其中的暫時性供應商錯誤最多重試幾次。兩項留空即使用預設值。",
+  },
+
+  workflowEdit: {
+    reorder: "用方向鍵調整 {{name}} 的順序",
+    removeStep: "移除步驟 {{name}}",
+    stepFallback: "步驟",
+    noSuch: "工作流程不存在：{{name}}。",
+    contents: "工作流程內容",
+    definition: "定義",
+    unnamed: "未命名",
+    addStep: "新增步驟",
+    visualize: "檢視圖示",
+    chooseStep: "選擇一個步驟進行編輯。",
+    namePlaceholder: "fix-bug",
+    stepBudget: "步驟預算",
+    stepBudgetPlaceholder: "100（預設）",
+    stepBudgetHint:
+      "一次執行最多可執行的步驟數。它用來終止那些條件永遠不翻轉的迴圈；若某個圖確實需要多次繞行，請調高它。",
+    startsAt: "起始步驟",
+    chooseAStep: "—— 請選擇一個步驟 ——",
+    noSuchStep: "{{name}}（此步驟不存在）",
+  },
+
+  modelsPage: {
+    addProvider: "新增供應商",
+    addModel: "新增模型",
+    saveProvider: "儲存供應商",
+    saveModel: "儲存模型",
+    noProviders: "還沒有供應商。",
+    noModelsFor: "還沒有模型經由 {{provider}} 路由。",
+    title: "模型與供應商",
+    desc: "API 端點，以及工作階段可選用的模型別名。每個供應商與每個模型各自獨立儲存 —— 開啟一個、編輯它、按它自己的「儲存」。",
+    loadFailed: "無法載入設定。<cmd>horsie serve</cmd> 正在執行嗎？",
+    providers: "供應商",
+    providersDesc: "API 端點。選擇其中一個即可查看經由它路由的模型。",
+    kind: {
+      anthropic: "Anthropic",
+      openai: "OpenAI 相容",
+      "openai-responses": "OpenAI Responses",
+      chatgpt: "ChatGPT 方案",
+    },
+    kindLabel: "類型",
+    keySet: "已設定金鑰",
+    noKey: "無金鑰",
+    signedInHint: "已登入某個 ChatGPT 方案。",
+    notSignedInHint: "未登入 —— 請先連接此供應商，再為它新增模型。",
+    keyStoredHint: "此供應商已儲存 API 金鑰。",
+    noKeyHint: "未儲存 API 金鑰 —— 請先新增一組，再為它新增模型。",
+    selectProviderFirst: "請先選擇一個供應商。",
+    connectFirst: "請先將「{{name}}」連接到 ChatGPT 方案。",
+    addKeyFirst: "請先為「{{name}}」新增 API 金鑰。",
+    needProviderName: "每個供應商都需要名稱。",
+    providerExists: "已存在名為「{{name}}」的供應商。",
+    confirmDeleteProvider: "刪除供應商「{{name}}」？",
+    confirmDeleteProviderWithModels_one:
+      "刪除供應商「{{name}}」及其模型（{{aliases}}）？",
+    confirmDeleteProviderWithModels_other:
+      "刪除供應商「{{name}}」及其 {{count}} 個模型（{{aliases}}）？",
+    needAlias: "每個模型都需要別名。",
+    aliasExists: "已存在別名為「{{alias}}」的模型。",
+    mustBeNumber: "「{{alias}}」的{{label}}必須是數字。",
+    confirmDeleteModel: "刪除模型「{{alias}}」？",
+    modelCount_one: "{{count}} 個模型",
+    modelCount_other: "{{count}} 個模型",
+    chatgptSignInFor: "{{name}} 的 ChatGPT 登入",
+    connect: "連接",
+    modelsFor: "模型 · {{provider}}",
+    modelsDesc: "工作階段可選用的別名。每個別名都指向此供應商上的一個模型 ID。",
+    providerNamePlaceholder: "anthropic",
+    baseUrlHint:
+      "只填主機 —— horsie 會自行補上 API 路徑。應填 {{example}}，而不是 {{example}}/v1。",
+    inlineKey: "內嵌金鑰",
+    willBeCleared: "儲存時將被清除",
+    notSetLower: "未設定",
+    clearKey: "儲存時清除已儲存的金鑰",
+    chatgptHint: "ChatGPT 方案透過登入授權，而非金鑰。請在清單中它所在的那一列連接。",
+    chatgptHintNew:
+      "ChatGPT 方案透過登入授權，而非金鑰。儲存之後，請在清單中它所在的那一列連接。",
+    keepSignatures: "保留思考簽章",
+    keepSignaturesHint:
+      "api.anthropic.com 必需，它會在重播時驗證這些簽章。對於 Anthropic 相容端點請關閉 —— 每個思考區塊的簽章有好幾 KB，而且沒有任何東西會讀它們。",
+    alias: "別名",
+    aliasPlaceholder: "sonnet",
+    provider: "供應商",
+    thinkingEfforts: "此模型提供的思考強度",
+    wireDialect: "傳輸協定方言",
+    forcedToolsHint:
+      "DeepSeek 必需，它在開啟思考時會拒絕強制的工具選擇。必須呼叫交接工具的子代理將在不思考的情況下執行。",
+  },
+
+  integrations: {
+    desc: "GitHub、MCP 伺服器，以及此伺服器的建置資訊。",
+    github: "GitHub",
+    githubDesc: "連接你的 GitHub 帳戶，讓工作階段可以複製你的儲存庫。",
+    connectedAs: "已連接為 <login>@{{login}}</login>",
+    disconnect: "中斷連接",
+    appConfigured: "應用程式已設定 —— 連接你的帳戶。",
+    noApp:
+      "此伺服器尚未註冊 GitHub App。請在<lnk>管理 → GitHub App</lnk>中設定一個。",
+    registerFirst: "請先在「管理」中註冊 GitHub App",
+    githubTools: "GitHub 工具（MCP）",
+    githubToolsDesc:
+      "讓工作階段透過此連接呼叫 GitHub MCP 伺服器（建立 PR、搜尋 issue 等）。",
+    enable: "啟用",
+    disable: "停用",
+    test: "測試",
+    testFailed: "測試失敗。",
+    enabledTools_one: "已啟用 · {{count}} 個工具",
+    enabledTools_other: "已啟用 · {{count}} 個工具",
+    notTested: "未測試",
+    mcpDesc:
+      "遠端 Model Context Protocol 伺服器。工作階段可選擇使用哪些；它們的工具會以 <mono>{{pattern}}</mono> 的形式出現。",
+    addServer: "新增伺服器",
+    noServers: "尚未設定 MCP 伺服器。",
+    namePlaceholder: "linear",
+    nameHint:
+      "字母、數字、「-」與「_」。它會成為每個工具 ID 的一部分：mcp__<name>__<tool>。",
+    url: "位址",
+    urlPlaceholder: "https://mcp.example.com/",
+    auth: "驗證",
+    authNone: "無（公開）",
+    authBearer: "Bearer 權杖",
+    authOAuth: "OAuth 2.1",
+    clientId: "Client ID（選填）",
+    clientSecret: "Client Secret（選填）",
+    autoRegister: "留空 = 自動註冊",
+    authorized: "已授權",
+    connectFailed: "連接失敗。",
+    reauthorize: "重新授權",
+    server: "伺服器",
+    none: "（無）",
+    configFile: "設定檔",
+    database: "資料庫",
+    stateDir: "狀態目錄",
+    dataDir: "資料目錄",
+    pluginsDir: "外掛目錄",
+    version: "版本",
+  },
+
+  settingsMenu: {
+    title: "此面板顯示什麼",
+    ariaLabel: "顯示選項",
+    heading: "顯示",
+  },
+
+  appearance: {
+    title: "外觀",
+    desc: "此瀏覽器如何呈現 horsie。設定儲存在本機而非伺服器，因此你用的每個瀏覽器可以各不相同。",
+    themeTitle: "主題",
+    themeDesc:
+      "版面相同，質感不同。每個主題都提供淺色與深色，且兩者都經過 WCAG AA 實測。",
+    themeGroup: "主題",
+    modeTitle: "淺色或深色",
+    modeDesc: "「跟隨系統」會採用你的作業系統設定，並在此分頁開啟期間持續跟隨。",
+    modeGroup: "模式",
+    modeLight: "淺色",
+    modeDark: "深色",
+    modeSystem: "跟隨系統",
+    textSizeTitle: "文字大小",
+    textSizeDesc:
+      "會縮放介面中的每一處尺寸，讓間距隨字級一起變化，而不是讓字撐破它的位置。",
+    textSizeGroup: "文字大小",
+    transcriptTitle: "對話紀錄",
+    transcriptDesc:
+      "工作階段檢視顯示什麼。這些是顯示開關，而不是工作階段設定 —— 它們完全不會改變智慧代理的執行方式。",
+    languageTitle: "語言",
+    languageDesc: "此介面所使用的語言。「跟隨系統」會採用你的瀏覽器設定並持續跟隨。",
+    languageGroup: "語言",
+    languageSystem: "跟隨系統",
+    languageSystemNote: "跟隨瀏覽器",
+    skin: {
+      paper: {
+        name: "紙感",
+        blurb:
+          "由內到外的暖調 —— 淺色下是骨白，深色下是暖炭黑，只有那一個提交操作用朱紅。",
+      },
+      signal: {
+        name: "訊號",
+        blurb: "與之相反的冷調 —— 藍黑底色配單一的萊姆綠強調色。版面相同，色溫不同。",
+      },
+    },
+    textSize: {
+      compact: {
+        name: "緊湊",
+        blurb: "最密的排法 —— 螢幕上能放下最多的對話紀錄。",
+      },
+      default: { name: "預設", blurb: "隨產品發布的預設密度。" },
+      large: {
+        name: "寬鬆",
+        blurb: "更大的字級與間距，同一畫面內容較少。",
+      },
+    },
+  },
+};
+
+export default zhHant;

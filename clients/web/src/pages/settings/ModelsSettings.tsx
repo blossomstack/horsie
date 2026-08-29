@@ -27,6 +27,8 @@ import {
   SettingsPage,
   TextField,
 } from "./fields";
+import { Trans, useTranslation } from "react-i18next";
+import { i18n } from "../../i18n";
 import { askConfirm } from "../../lib/confirm";
 
 type ProviderKind = "anthropic" | "openai" | "openai-responses" | "chatgpt";
@@ -38,12 +40,13 @@ const PROVIDER_KINDS: ProviderKind[] = [
   "chatgpt",
 ];
 
-const KIND_LABELS: Record<ProviderKind, string> = {
-  anthropic: "Anthropic",
-  openai: "OpenAI-compatible",
-  "openai-responses": "OpenAI Responses",
-  chatgpt: "ChatGPT plan",
-};
+const kindLabel = (kind: string): string =>
+  kind === "anthropic" ||
+  kind === "openai" ||
+  kind === "openai-responses" ||
+  kind === "chatgpt"
+    ? i18n.t(`modelsPage.kind.${kind}`)
+    : kind;
 
 const KIND_PLACEHOLDERS: Record<ProviderKind, string> = {
   anthropic: "https://api.anthropic.com",
@@ -71,26 +74,32 @@ const DIALECTS = [
 /** What a provider's credential lamp says, given its kind. A ChatGPT plan is
  * authorized by signing in, so "No key" would be both wrong and unactionable. */
 const credentialWords = (kind: string, has: boolean): string =>
-  kind === "chatgpt" ? (has ? "Connected" : "Not connected") : has ? "Key set" : "No key";
+  kind === "chatgpt"
+    ? has
+      ? i18n.t("runtimesPage.connected")
+      : i18n.t("runtimesPage.notConnected")
+    : has
+      ? i18n.t("modelsPage.keySet")
+      : i18n.t("modelsPage.noKey");
 
 const credentialHint = (kind: string, has: boolean): string =>
   kind === "chatgpt"
     ? has
-      ? "Signed in to a ChatGPT plan."
-      : "Not signed in — connect this provider before adding models to it."
+      ? i18n.t("modelsPage.signedInHint")
+      : i18n.t("modelsPage.notSignedInHint")
     : has
-      ? "An API key is stored for this provider."
-      : "No API key stored — add one before adding models to it.";
+      ? i18n.t("modelsPage.keyStoredHint")
+      : i18n.t("modelsPage.noKeyHint");
 
 /** Why Add model is unavailable, or null when it is available. The server
  * refuses to build a provider without its credential, so a model added here
  * would fail the settings write anyway; saying so up front beats a rejection. */
 const blockedReason = (p: ProviderView | undefined): string | null => {
-  if (!p) return "Select a provider first.";
+  if (!p) return i18n.t("modelsPage.selectProviderFirst");
   if (p.hasCredential) return null;
   return p.kind === "chatgpt"
-    ? `Connect “${p.name}” to a ChatGPT plan first.`
-    : `Add an API key to “${p.name}” first.`;
+    ? i18n.t("modelsPage.connectFirst", { name: p.name })
+    : i18n.t("modelsPage.addKeyFirst", { name: p.name });
 };
 
 type ProviderDraft = {
@@ -201,6 +210,7 @@ const toModelInput = (m: ModelDraft): ModelInput => ({
  * a provider a model still routes to.
  */
 export function ModelsSettings() {
+  const { t } = useTranslation();
   const { data: settings, isLoading, isError } = useSettings();
   const putProvider = usePutProvider();
   const removeProvider = useDeleteProvider();
@@ -240,9 +250,9 @@ export function ModelsSettings() {
   const saveProvider = async (draft: ProviderDraft, original: string | null) => {
     setLocalError(null);
     const name = draft.name.trim();
-    if (!name) return setLocalError("Every provider needs a name.");
+    if (!name) return setLocalError(t("modelsPage.needProviderName"));
     if (providers.some((p) => p.name === name && p.name !== original))
-      return setLocalError(`A provider named “${name}” already exists.`);
+      return setLocalError(t("modelsPage.providerExists", { name }));
 
     // A rename carries its models with it, or they point at a provider that no
     // longer exists and every session using them fails to start.
@@ -282,8 +292,12 @@ export function ModelsSettings() {
     // which aliases stop existing, since those are what a session names.
     const doomed = models.filter((m) => m.provider === name).map((m) => m.alias);
     const message = doomed.length
-      ? `Delete provider “${name}” and ${doomed.length === 1 ? "its model" : `its ${doomed.length} models`} (${doomed.join(", ")})?`
-      : `Delete provider “${name}”?`;
+      ? t("modelsPage.confirmDeleteProviderWithModels", {
+          name,
+          count: doomed.length,
+          aliases: doomed.join(", "),
+        })
+      : t("modelsPage.confirmDeleteProvider", { name });
     if (!(await askConfirm(message))) return;
     try {
       await removeProvider.mutateAsync(name);
@@ -295,15 +309,15 @@ export function ModelsSettings() {
   const saveModel = async (draft: ModelDraft, original: string | null) => {
     setLocalError(null);
     const alias = draft.alias.trim();
-    if (!alias) return setLocalError("Every model needs an alias.");
+    if (!alias) return setLocalError(t("modelsPage.needAlias"));
     if (models.some((m) => m.alias === alias && m.alias !== original))
-      return setLocalError(`A model aliased “${alias}” already exists.`);
+      return setLocalError(t("modelsPage.aliasExists", { alias }));
     for (const [label, v] of [
-      ["Max tokens", draft.maxTokens],
-      ["Context window", draft.contextWindow],
+      [t("modelCards.maxTokens"), draft.maxTokens],
+      [t("modelCards.contextWindow"), draft.contextWindow],
     ] as const) {
       if (v.trim() && !/^\d+$/.test(v.trim()))
-        return setLocalError(`${label} for “${alias}” must be a number.`);
+        return setLocalError(t("modelsPage.mustBeNumber", { label, alias }));
     }
 
     try {
@@ -321,7 +335,7 @@ export function ModelsSettings() {
 
   const deleteModel = async (alias: string) => {
     setLocalError(null);
-    if (!(await askConfirm(`Delete model “${alias}”?`))) return;
+    if (!(await askConfirm(t("modelsPage.confirmDeleteModel", { alias })))) return;
     try {
       await removeModel.mutateAsync(alias);
     } catch (e) {
@@ -338,17 +352,19 @@ export function ModelsSettings() {
 
   return (
     <SettingsPage
-        title="Models & providers"
-        desc="API endpoints and the model aliases sessions pick from. Each provider and each model saves on its own — open one, edit it, press its Save."
+        title={t("modelsPage.title")}
+        desc={t("modelsPage.desc")}
         saving={busy}
         saved={wroteOk}
     >
         {isLoading && (
-          <div className="py-16 text-center text-sm text-faint">Loading…</div>
+          <div className="py-16 text-center text-sm text-faint">
+            {t("common.loading")}
+          </div>
         )}
         {isError && (
           <div className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
-            Couldn’t load settings. Is <code>horsie serve</code> running?
+            <Trans i18nKey="modelsPage.loadFailed" components={{ cmd: <code /> }} />
           </div>
         )}
 
@@ -364,15 +380,17 @@ export function ModelsSettings() {
         {settings && (
           <>
             <Section
-              title="Providers"
-              desc="API endpoints. Select one to see the models routed through it."
+              title={t("modelsPage.providers")}
+              desc={t("modelsPage.providersDesc")}
               onAdd={() => {
                 setAddingProvider(true);
                 setEditingProvider(null);
               }}
-              addLabel="Add provider"
+              addLabel={t("modelsPage.addProvider")}
               empty={
-                providers.length === 0 && !addingProvider ? "No providers yet." : null
+                providers.length === 0 && !addingProvider
+                  ? t("modelsPage.noProviders")
+                  : null
               }
             >
               {addingProvider && (
@@ -428,12 +446,12 @@ export function ModelsSettings() {
                         </span>
                         <span
                           className="chip hidden lg:inline-flex"
-                          title={KIND_LABELS[p.kind as ProviderKind] ?? p.kind}
+                          title={kindLabel(p.kind)}
                         >
-                          {KIND_LABELS[p.kind as ProviderKind] ?? p.kind}
+                          {kindLabel(p.kind)}
                         </span>
                         <span className="legend hidden sm:inline">
-                          {count} {count === 1 ? "model" : "models"}
+                          {t("modelsPage.modelCount", { count })}
                         </span>
                       </span>
                     }
@@ -443,7 +461,7 @@ export function ModelsSettings() {
                           (p.hasCredential ? (
                             <RowAction
                               icon={<Plug size={14} />}
-                              label={`ChatGPT sign-in for ${p.name}`}
+                              label={t("modelsPage.chatgptSignInFor", { name: p.name })}
                               pressed={signingIn === p.name}
                               onClick={() =>
                                 setSigningIn(signingIn === p.name ? null : p.name)
@@ -461,12 +479,12 @@ export function ModelsSettings() {
                               }
                               data-testid={`provider-connect-${p.name}`}
                             >
-                              <Plug size={13} aria-hidden /> Connect
+                              <Plug size={13} aria-hidden /> {t("modelsPage.connect")}
                             </button>
                           ))}
                         <RowAction
                           icon={<Pencil size={14} />}
-                          label={`Edit ${p.name}`}
+                          label={t("runtimesPage.edit", { name: p.name })}
                           onClick={() => {
                             setEditingProvider(p.name);
                             setAddingProvider(false);
@@ -475,7 +493,7 @@ export function ModelsSettings() {
                         />
                         <RowAction
                           icon={<Trash2 size={14} />}
-                          label={`Delete ${p.name}`}
+                          label={t("common.deleteNamed", { name: p.name })}
                           danger
                           // Every write sends the whole collection, rebuilt
                           // from this render's data. Two deletes issued before
@@ -502,13 +520,13 @@ export function ModelsSettings() {
 
             {selected && (
               <Section
-                title={`Models · ${selected}`}
-                desc="Aliases sessions pick from. Each routes to a model id on this provider."
+                title={t("modelsPage.modelsFor", { provider: selected })}
+                desc={t("modelsPage.modelsDesc")}
                 onAdd={() => {
                   setAddingModel(true);
                   setEditingModel(null);
                 }}
-                addLabel="Add model"
+                addLabel={t("modelsPage.addModel")}
                 addDisabled={addModelBlocked !== null}
                 addTitle={addModelBlocked ?? undefined}
                 empty={
@@ -516,7 +534,8 @@ export function ModelsSettings() {
                     ? // The reason goes here as well as in the tooltip: a
                       // disabled button with a hover-only explanation is a dead
                       // end on touch and for a keyboard.
-                      (addModelBlocked ?? `No models route through ${selected} yet.`)
+                      (addModelBlocked ??
+                        t("modelsPage.noModelsFor", { provider: selected }))
                     : null
                 }
               >
@@ -548,14 +567,14 @@ export function ModelsSettings() {
                       subtitle={m.modelId}
                       meta={
                         m.thinkingEfforts && m.thinkingEfforts.length > 0 ? (
-                          <span className="chip shrink-0">thinking</span>
+                          <span className="chip shrink-0">{t("channel.thinking")}</span>
                         ) : undefined
                       }
                       actions={
                         <>
                           <RowAction
                             icon={<Pencil size={14} />}
-                            label={`Edit ${m.alias}`}
+                            label={t("runtimesPage.edit", { name: m.alias })}
                             onClick={() => {
                               setEditingModel(m.alias);
                               setAddingModel(false);
@@ -564,7 +583,7 @@ export function ModelsSettings() {
                           />
                           <RowAction
                             icon={<Trash2 size={14} />}
-                            label={`Delete ${m.alias}`}
+                            label={t("common.deleteNamed", { name: m.alias })}
                             danger
                             disabled={busy}
                             onClick={() => deleteModel(m.alias)}
@@ -606,6 +625,7 @@ function Editor({
   saveLabel: string;
   testId: string;
 }) {
+  const { t } = useTranslation();
   return (
     <div
       className="rounded-[var(--radius-control)] bg-raised p-3 shadow-[inset_0_0_0_1px_var(--rule-strong)]"
@@ -619,10 +639,10 @@ function Editor({
           disabled={busy}
           data-testid="editor-save"
         >
-          {busy ? "Saving…" : saveLabel}
+          {busy ? t("common.saving") : saveLabel}
         </button>
         <button className="key key-flat" onClick={onCancel} data-testid="editor-cancel">
-          <X size={13} aria-hidden /> Cancel
+          <X size={13} aria-hidden /> {t("common.cancel")}
         </button>
       </div>
     </div>
@@ -640,6 +660,7 @@ function ProviderEditor({
   onCancel: () => void;
   busy: boolean;
 }) {
+  const { t } = useTranslation();
   const [draft, setDraft] = useState(initial);
   const set = (patch: Partial<ProviderDraft>) => setDraft((d) => ({ ...d, ...patch }));
   return (
@@ -647,18 +668,18 @@ function ProviderEditor({
       onSave={() => onSave(draft)}
       onCancel={onCancel}
       busy={busy}
-      saveLabel="Save provider"
+      saveLabel={t("modelsPage.saveProvider")}
       testId="provider-editor"
     >
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <TextField
-          label="Name"
+          label={t("memoryPage.name")}
           value={draft.name}
           onChange={(v) => set({ name: v })}
-          placeholder="anthropic"
+          placeholder={t("modelsPage.providerNamePlaceholder")}
         />
         <label className="block">
-          <RowLabel>Kind</RowLabel>
+          <RowLabel>{t("modelsPage.kindLabel")}</RowLabel>
           <select
             className="field font-mono"
             value={draft.kind}
@@ -666,13 +687,13 @@ function ProviderEditor({
           >
             {PROVIDER_KINDS.map((k) => (
               <option key={k} value={k}>
-                {KIND_LABELS[k]}
+                {kindLabel(k)}
               </option>
             ))}
           </select>
         </label>
         <TextField
-          label="Base URL (optional)"
+          label={t("modelCards.baseUrlOptional")}
           value={draft.baseUrl}
           onChange={(v) => set({ baseUrl: v })}
           placeholder={KIND_PLACEHOLDERS[draft.kind]}
@@ -680,21 +701,23 @@ function ProviderEditor({
           // pasting the value a vendor's docs give you — which usually ends in
           // /v1 — produces /v1/v1/chat/completions. It surfaced only as a
           // session that would not start, with nothing pointing back here.
-          hint={`Host only — horsie appends the API path. ${KIND_PLACEHOLDERS[draft.kind]}, not ${KIND_PLACEHOLDERS[draft.kind]}/v1.`}
+          hint={t("modelsPage.baseUrlHint", {
+            example: KIND_PLACEHOLDERS[draft.kind],
+          })}
         />
         {usesApiKey(draft.kind) && (
           <div>
             <TextField
-              label="Inline key"
+              label={t("modelsPage.inlineKey")}
               type="password"
               value={draft.apiKeyInput}
               onChange={(v) => set({ apiKeyInput: v, clearApiKey: false })}
               placeholder={
                 draft.clearApiKey
-                  ? "will be cleared on save"
+                  ? t("modelsPage.willBeCleared")
                   : draft.hasCredential
-                    ? "•••• stored — blank keeps it"
-                    : "not set"
+                    ? t("githubApp.storedBlankKeeps")
+                    : t("modelsPage.notSetLower")
               }
             />
             {draft.hasCredential && (
@@ -707,15 +730,16 @@ function ProviderEditor({
                   }
                   data-testid="provider-clear-key"
                 />
-                Clear the stored key on save
+                {t("modelsPage.clearKey")}
               </label>
             )}
           </div>
         )}
         {draft.kind === "chatgpt" && (
           <p className="col-span-1 text-xs text-dim sm:col-span-2">
-            A ChatGPT plan is authorized by signing in, not by a key. Connect it
-            from its row in the list{initial.name ? "" : " once this is saved"}.
+            {initial.name
+              ? t("modelsPage.chatgptHint")
+              : t("modelsPage.chatgptHintNew")}
           </p>
         )}
         {draft.kind === "anthropic" && (
@@ -727,11 +751,9 @@ function ProviderEditor({
               onChange={(e) => set({ keepThinkingSignature: e.target.checked })}
             />
             <span>
-              Keep thinking signatures
+              {t("modelsPage.keepSignatures")}
               <span className="block text-xs text-dim">
-                Required for api.anthropic.com, which validates them on replay.
-                Leave off for Anthropic-compatible endpoints — the blobs are
-                several KB per thinking block and nothing reads them.
+                {t("modelsPage.keepSignaturesHint")}
               </span>
             </span>
           </label>
@@ -752,6 +774,7 @@ function ModelIdField({
   draft: ModelDraft;
   set: (patch: Partial<ModelDraft>) => void;
 }) {
+  const { t } = useTranslation();
   const [focused, setFocused] = useState(false);
   const [debounced, setDebounced] = useState(draft.modelId);
   useEffect(() => {
@@ -796,7 +819,7 @@ function ModelIdField({
 
   return (
     <label className="relative block">
-      <RowLabel>Model id</RowLabel>
+      <RowLabel>{t("modelCards.modelId")}</RowLabel>
       <input
         className="field font-mono"
         value={draft.modelId}
@@ -804,7 +827,7 @@ function ModelIdField({
         onFocus={() => setFocused(true)}
         // Delay so an onMouseDown on a suggestion fires before the list hides.
         onBlur={() => setTimeout(() => setFocused(false), 150)}
-        placeholder="claude-sonnet-4-6"
+        placeholder={t("modelCards.modelIdPlaceholder")}
         data-testid="model-id-input"
       />
       {show && (
@@ -853,6 +876,7 @@ function ModelEditor({
   onCancel: () => void;
   busy: boolean;
 }) {
+  const { t } = useTranslation();
   const [draft, setDraft] = useState(initial);
   const set = (patch: Partial<ModelDraft>) => setDraft((d) => ({ ...d, ...patch }));
   const options =
@@ -864,18 +888,18 @@ function ModelEditor({
       onSave={() => onSave(draft)}
       onCancel={onCancel}
       busy={busy}
-      saveLabel="Save model"
+      saveLabel={t("modelsPage.saveModel")}
       testId="model-editor"
     >
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <TextField
-          label="Alias"
+          label={t("modelsPage.alias")}
           value={draft.alias}
           onChange={(v) => set({ alias: v })}
-          placeholder="sonnet"
+          placeholder={t("modelsPage.aliasPlaceholder")}
         />
         <label className="block">
-          <RowLabel>Provider</RowLabel>
+          <RowLabel>{t("modelsPage.provider")}</RowLabel>
           <select
             className="field font-mono"
             value={draft.provider}
@@ -891,19 +915,19 @@ function ModelEditor({
         </label>
         <ModelIdField draft={draft} set={set} />
         <TextField
-          label="Max tokens (optional)"
+          label={t("modelCards.maxTokensOptional")}
           value={draft.maxTokens}
           onChange={(v) => set({ maxTokens: v })}
           placeholder="8192"
         />
         <TextField
-          label="Context window (optional)"
+          label={t("modelCards.contextWindowOptional")}
           value={draft.contextWindow}
           onChange={(v) => set({ contextWindow: v })}
           placeholder="200000"
         />
         <div className="col-span-1 pt-3 sm:col-span-2">
-          <RowLabel>Thinking efforts this model offers</RowLabel>
+          <RowLabel>{t("modelsPage.thinkingEfforts")}</RowLabel>
           <div className="flex flex-wrap gap-3">
             {EFFORTS.map((e) => (
               <label key={e} className="flex items-center gap-1 text-sm">
@@ -930,7 +954,7 @@ function ModelEditor({
           </div>
           <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
             <label className="block">
-              <RowLabel>Default effort</RowLabel>
+              <RowLabel>{t("modelCards.defaultEffort")}</RowLabel>
               <select
                 className="field font-mono"
                 value={draft.thinkingEffort}
@@ -945,7 +969,7 @@ function ModelEditor({
               </select>
             </label>
             <label className="block">
-              <RowLabel>Wire dialect</RowLabel>
+              <RowLabel>{t("modelsPage.wireDialect")}</RowLabel>
               <select
                 className="field font-mono"
                 value={draft.thinkingDialect}
@@ -968,11 +992,9 @@ function ModelEditor({
               data-testid="model-forced-tools"
             />
             <span>
-              Pinned tool choice disables thinking
+              {t("modelCards.forcedTools")}
               <span className="block text-xs text-dim">
-                Required for DeepSeek, which rejects a forced tool choice while
-                thinking is on. Sub-agents that must call a handoff tool will
-                run without thinking.
+                {t("modelsPage.forcedToolsHint")}
               </span>
             </span>
           </label>

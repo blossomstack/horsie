@@ -4,6 +4,7 @@ import { SECTION_TITLE } from "./AgentInfoPanel";
 import { absoluteTime, clockTime, humanDuration } from "../lib/format";
 import Markdown from "./Markdown";
 import { SidePanel } from "./SidePanel";
+import { useTranslation } from "react-i18next";
 
 /** Label on the left, figure on the right — the row `AgentInfoPanel` uses, so
  *  the two panels that answer for the same picture read the same way. */
@@ -56,32 +57,37 @@ export function EntryInfoPanel({
   // at the end of that call. A bar's length is a duration and a bar cannot say
   // what it is, so the panel beside it says it.
   const at = message.createdAtMs ?? 0;
+  const { t } = useTranslation();
   const began = message.startedAtMs ?? at;
   const took = at > began ? at - began : null;
   return (
     <SidePanel
-      legend="Entry"
+      legend={t("entryPanel.legend")}
       readout={
         <span className="readout text-[0.6875rem]" data-testid="entry-panel-readout">
           {role.toLowerCase()}
         </span>
       }
       onClose={onClose}
-      closeLabel="Hide the entry panel"
+      closeLabel={t("entryPanel.close")}
       testId="entry-panel"
       closeTestId="entry-panel-collapse"
     >
       <div className="min-h-0 flex-1 overflow-y-auto">
         {at > 0 && (
           <section className="px-3 py-2.5">
-            <h3 className={SECTION_TITLE}>Timing</h3>
+            <h3 className={SECTION_TITLE}>{t("entryPanel.timing")}</h3>
             <div className="mt-1.5">
-              <TimeRow label="At" value={clockTime(at)} hint={absoluteTime(at)} />
+              <TimeRow
+                label={t("entryPanel.at")}
+                value={clockTime(at)}
+                hint={absoluteTime(at)}
+              />
               {took != null && (
                 <TimeRow
-                  label="Took"
+                  label={t("entryPanel.took")}
                   value={humanDuration(took)}
-                  hint="How long the provider call that produced this message took."
+                  hint={t("entryPanel.tookHint")}
                   testId="entry-panel-took"
                 />
               )}
@@ -90,20 +96,20 @@ export function EntryInfoPanel({
         )}
         {message.text ? (
           <section className="px-3 py-2.5">
-            <h3 className={SECTION_TITLE}>Message</h3>
+            <h3 className={SECTION_TITLE}>{t("entryPanel.message")}</h3>
             <div className="mt-1.5 text-[0.8125rem] leading-snug" data-testid="entry-panel-text">
               <Markdown text={message.text} />
             </div>
           </section>
         ) : (
           <p className="px-3 py-6 text-center text-xs leading-relaxed text-faint">
-            This entry carries no text of its own — it is the work it set off.
+            {t("entryPanel.noText")}
           </p>
         )}
 
         {message.thinking.length > 0 && (
           <section className="border-t px-3 py-2.5">
-            <h3 className={SECTION_TITLE}>Thinking</h3>
+            <h3 className={SECTION_TITLE}>{t("entryPanel.thinking")}</h3>
             <p
               className="mt-1.5 text-[0.8125rem] leading-snug break-words whitespace-pre-wrap text-dim"
               data-testid="entry-panel-thinking"
@@ -115,7 +121,7 @@ export function EntryInfoPanel({
 
         {message.toolCalls.length > 0 && (
           <section className="border-t px-3 py-2.5">
-            <h3 className={SECTION_TITLE}>Tool calls</h3>
+            <h3 className={SECTION_TITLE}>{t("entryPanel.toolCalls")}</h3>
             <ul className="mt-1.5 space-y-1">
               {message.toolCalls.map((call) => (
                 <li
@@ -125,7 +131,7 @@ export function EntryInfoPanel({
                 >
                   <span className="readout truncate text-xs">{call.name}</span>
                   {call.running ? (
-                    <span className="legend">running</span>
+                    <span className="legend">{t("entryPanel.running")}</span>
                   ) : (
                     // Issued at the end of the call that asked for it, which is
                     // the only interval there is: a tool *result* carries no
@@ -152,7 +158,7 @@ export function EntryInfoPanel({
           data-testid="entry-panel-open"
         >
           <MessageSquareText size={13} aria-hidden />
-          Read in transcript
+          {t("entryPanel.readInTranscript")}
         </button>
       </div>
     </SidePanel>

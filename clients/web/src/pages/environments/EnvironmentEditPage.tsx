@@ -18,6 +18,7 @@ import {
 import { useGithubRepos, useGithubStatus } from "../../hooks/useGithub";
 import { useSettings } from "../../hooks/useSettings";
 import { RowLabel } from "../settings/fields";
+import { Trans, useTranslation } from "react-i18next";
 
 /** Repos are stored as clone URLs but chosen as `owner/name`, the same way a
  * session draft does it. One prefix owns both directions. */
@@ -30,16 +31,17 @@ const repoLabel = (url: string) =>
  * form, mounted only once the environment has loaded: the rows seed from
  * `initial` with `useState`, which cannot pick up a value that arrives later. */
 export function EnvironmentEditPage() {
+  const { t } = useTranslation();
   const { name } = useParams<{ name: string }>();
   const { data: existing, isLoading, isError } = useEnvironment(name);
 
   if (name && isLoading) {
-    return <p className="px-6 py-4 text-sm text-faint">Loading…</p>;
+    return <p className="px-6 py-4 text-sm text-faint">{t("common.loading")}</p>;
   }
   if (name && (isError || !existing)) {
     return (
       <p className="px-6 py-4 text-sm text-red-ink">
-        No such environment: {name}.
+{t("environmentEdit.noSuch", { name })}
       </p>
     );
   }
@@ -47,6 +49,7 @@ export function EnvironmentEditPage() {
 }
 
 function EnvironmentForm({ initial }: { initial?: EnvironmentView }) {
+  const { t } = useTranslation();
   const editing = !!initial;
   const create = useCreateEnvironment();
   const update = useUpdateEnvironment();
@@ -86,9 +89,9 @@ function EnvironmentForm({ initial }: { initial?: EnvironmentView }) {
 
   const blockedReason =
     envName.trim() === ""
-      ? "Give the environment a name to save it."
+      ? t("environmentEdit.needName")
       : vendor.trim() === ""
-        ? "Choose the runtime vendor this environment runs on."
+        ? t("environmentEdit.needVendor")
         : null;
   const canSave = !busy && blockedReason === null;
 
@@ -102,7 +105,7 @@ function EnvironmentForm({ initial }: { initial?: EnvironmentView }) {
         if (!Array.isArray(parsed)) throw new Error("not an array");
         provision = parsed as ProvisionStep[];
       } catch {
-        setError("Provision steps must be a JSON array of {name, uses, with}.");
+        setError(t("environmentEdit.provisionInvalid"));
         return;
       }
     }
@@ -120,7 +123,9 @@ function EnvironmentForm({ initial }: { initial?: EnvironmentView }) {
       navigate("/environments");
     } catch (e) {
       setError(
-        e instanceof ApiRequestError ? e.message : "Failed to save environment.",
+        e instanceof ApiRequestError
+          ? e.message
+          : t("environmentEdit.saveFailed"),
       );
     }
   };
@@ -130,14 +135,16 @@ function EnvironmentForm({ initial }: { initial?: EnvironmentView }) {
       <header className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 bg-panel px-4 sm:px-6">
         <RailToggle />
         <h1 className="page-title min-w-0 flex-1 truncate">
-          {editing ? `Edit ${initial.name}` : "New environment"}
+          {editing
+            ? t("agentEdit.editTitle", { name: initial.name })
+            : t("environments.new")}
         </h1>
         <button
           className="key key-blank"
           onClick={() => navigate("/environments")}
           data-testid="cancel-environment-button"
         >
-          Cancel
+          {t("common.cancel")}
         </button>
         <button
           className="key key-go"
@@ -154,10 +161,10 @@ function EnvironmentForm({ initial }: { initial?: EnvironmentView }) {
           <section className="section space-y-4">
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <label className="block">
-                <RowLabel>Name</RowLabel>
+                <RowLabel>{t("memoryPage.name")}</RowLabel>
                 <input
                   className="field field-mono"
-                  placeholder="staging"
+                  placeholder={t("environmentEdit.namePlaceholder")}
                   value={envName}
                   disabled={editing}
                   onChange={(e) => setEnvName(e.target.value)}
@@ -165,10 +172,10 @@ function EnvironmentForm({ initial }: { initial?: EnvironmentView }) {
                 />
               </label>
               <label className="block">
-                <RowLabel>Description</RowLabel>
+                <RowLabel>{t("memoryPage.description")}</RowLabel>
                 <input
                   className="field"
-                  placeholder="What this environment is for"
+                  placeholder={t("environmentEdit.descriptionPlaceholder")}
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
                   data-testid="environment-description-input"
@@ -176,7 +183,7 @@ function EnvironmentForm({ initial }: { initial?: EnvironmentView }) {
               </label>
             </div>
             <label className="block">
-              <RowLabel>Runtime vendor</RowLabel>
+              <RowLabel>{t("environmentEdit.vendor")}</RowLabel>
               <select
                 className="field font-mono"
                 value={vendor}
@@ -184,28 +191,30 @@ function EnvironmentForm({ initial }: { initial?: EnvironmentView }) {
                 onChange={(e) => setVendor(e.target.value)}
                 data-testid="environment-vendor-input"
               >
-                <option value="">Select a runtime vendor</option>
+                <option value="">{t("environmentEdit.selectVendor")}</option>
                 {vendorOptions.map((v) => (
                   <option key={v} value={v}>
-                    {connected.includes(v) ? v : `${v} — not connected`}
+                    {connected.includes(v)
+                      ? v
+                      : t("environmentEdit.vendorNotConnected", { name: v })}
                   </option>
                 ))}
               </select>
               <p className="mt-1 text-xs leading-relaxed text-faint">
                 {vendorOptions.length === 0 ? (
-                  <>
-                    No connected vendor provisions its own workspace, so nothing
-                    can run an environment yet. Add one under{" "}
-                    <Link
-                      to="/settings/runtimes"
-                      className="text-legend underline underline-offset-2"
-                    >
-                      Settings › Runtimes
-                    </Link>
-                    .
-                  </>
+                  <Trans
+                    i18nKey="environmentEdit.noProvisioningVendor"
+                    components={{
+                      lnk: (
+                        <Link
+                          to="/settings/runtimes"
+                          className="text-legend underline underline-offset-2"
+                        />
+                      ),
+                    }}
+                  />
                 ) : (
-                  "Only vendors that provision their own workspace can run an environment, so local runtimes are not listed."
+                  t("environmentEdit.vendorHint")
                 )}
               </p>
             </label>
@@ -214,15 +223,15 @@ function EnvironmentForm({ initial }: { initial?: EnvironmentView }) {
           <RepoPicker repos={repos} setRepos={setRepos} />
 
           <section className="section space-y-3">
-            <h2 className="section-title">Env vars</h2>
+            <h2 className="section-title">{t("environmentEdit.envVars")}</h2>
             <p className="text-xs text-faint">
-              Plain text only — no secrets here.
+{t("environmentEdit.envVarsHint")}
             </p>
             {envVars.map((v, i) => (
               <div key={i} className="flex items-center gap-2">
                 <input
                   className="field field-mono w-56"
-                  placeholder="NAME"
+                  placeholder={t("environmentEdit.envVarName")}
                   value={v.name}
                   onChange={(e) =>
                     setEnvVars(
@@ -235,7 +244,7 @@ function EnvironmentForm({ initial }: { initial?: EnvironmentView }) {
                 />
                 <input
                   className="field field-mono flex-1"
-                  placeholder="value"
+                  placeholder={t("environmentEdit.envVarValue")}
                   value={v.value}
                   onChange={(e) =>
                     setEnvVars(
@@ -248,7 +257,7 @@ function EnvironmentForm({ initial }: { initial?: EnvironmentView }) {
                 />
                 <button
                   className="key-icon !h-7 !w-7 hover:!bg-red-quiet hover:!text-red-ink"
-                  title="Remove env var"
+                  title={t("environmentEdit.removeEnvVar")}
                   data-testid={`env-remove-${i}`}
                   onClick={() => setEnvVars(envVars.filter((_, j) => j !== i))}
                 >
@@ -262,15 +271,14 @@ function EnvironmentForm({ initial }: { initial?: EnvironmentView }) {
               data-testid="env-add"
             >
               <Plus size={13} aria-hidden />
-              Add env var
+              {t("environmentEdit.addEnvVar")}
             </button>
           </section>
 
           <section className="section space-y-3">
-            <h2 className="section-title">Provision steps</h2>
+            <h2 className="section-title">{t("environmentEdit.provision")}</h2>
             <p className="text-xs text-faint">
-              A JSON array of {"{name, uses, with}"} steps. Nothing runs them
-              yet.
+{t("environmentEdit.provisionHint")}
             </p>
             <textarea
               className="field field-mono min-h-28 w-full"
@@ -320,6 +328,7 @@ function RepoPicker({
   repos: RepoConfig[];
   setRepos: (next: RepoConfig[]) => void;
 }) {
+  const { t } = useTranslation();
   const { data: status } = useGithubStatus();
   const connected = !!status?.connected;
   const {
@@ -363,9 +372,9 @@ function RepoPicker({
   return (
     <section className="section space-y-3">
       <div className="flex items-baseline justify-between gap-4">
-        <h2 className="section-title">Repos</h2>
+        <h2 className="section-title">{t("environment.repos")}</h2>
         <span className="legend" data-testid="repo-selected-count">
-          {repos.length} selected
+{t("channel.selectedCount", { count: repos.length })}
         </span>
       </div>
       <p className="text-xs leading-relaxed text-faint">
@@ -377,7 +386,11 @@ function RepoPicker({
           render below, so a failed listing does not take away the only control
           that can untick one. */}
       {connected && isError && (
-        <ReadError what="repos" error={loadError} testId="repo-list-error" />
+        <ReadError
+          what={t("environment.reposLower")}
+          error={loadError}
+          testId="repo-list-error"
+        />
       )}
 
       {!connected ? (
@@ -385,39 +398,45 @@ function RepoPicker({
           className="screen px-3 py-5 text-center text-sm leading-relaxed text-faint"
           data-testid="repo-github-prompt"
         >
-          Repos come from your GitHub App installation.{" "}
-          <Link
-            to="/settings/integrations"
-            className="text-legend underline underline-offset-2"
-          >
-            Connect GitHub
-          </Link>{" "}
-          to pick them.
+          <Trans
+            i18nKey="environmentEdit.reposFromGithub"
+            components={{
+              lnk: (
+                <Link
+                  to="/settings/integrations"
+                  className="text-legend underline underline-offset-2"
+                />
+              ),
+            }}
+          />
         </p>
       ) : isLoading && rows.length === 0 ? (
         <p className="screen px-3 py-5 text-center text-sm text-faint">
-          Loading repos…
+{t("environmentEdit.loadingRepos")}
         </p>
       ) : rows.length === 0 ? (
         // A failed listing has already said so above; "no repos are visible to
         // the app installation" would name the wrong cause.
         isError ? null : (
           <p className="screen px-3 py-5 text-center text-sm leading-relaxed text-faint">
-            No repos are visible to the app installation.{" "}
-            <Link
-              to="/settings/integrations"
-              className="text-legend underline underline-offset-2"
-            >
-              Check its access
-            </Link>
-            .
+            <Trans
+              i18nKey="environmentEdit.noReposVisible"
+              components={{
+                lnk: (
+                  <Link
+                    to="/settings/integrations"
+                    className="text-legend underline underline-offset-2"
+                  />
+                ),
+              }}
+            />
           </p>
         )
       ) : (
         <>
           <input
             className="field field-mono"
-            placeholder="Filter repos"
+            placeholder={t("environmentEdit.filterRepos")}
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
             data-testid="repo-filter"
@@ -441,7 +460,9 @@ function RepoPicker({
                       {r.fullName}
                     </span>
                     {r.missing && (
-                      <span className="chip shrink-0">not in installation</span>
+                      <span className="chip shrink-0">
+                        {t("environmentEdit.notInInstallation")}
+                      </span>
                     )}
                   </label>
                   {checked && (
@@ -450,11 +471,11 @@ function RepoPicker({
                     // list reads as ragged rather than as one column.
                     <input
                       className="field field-mono w-32 shrink-0 !py-1"
-                      placeholder="ref"
+                      placeholder={t("environmentEdit.ref")}
                       value={chosen.get(r.url) ?? ""}
                       onChange={(e) => setRef(r.url, e.target.value)}
                       data-testid={`repo-ref-${r.fullName}`}
-                      aria-label={`Git ref for ${r.fullName}`}
+                      aria-label={t("environmentEdit.gitRefFor", { name: r.fullName })}
                     />
                   )}
                 </div>
@@ -462,7 +483,7 @@ function RepoPicker({
             })}
             {visible.length === 0 && (
               <p className="px-1.5 py-3 text-sm text-faint">
-                No repo matches “{filter.trim()}”.
+{t("environmentEdit.noRepoMatches", { query: filter.trim() })}
               </p>
             )}
           </div>

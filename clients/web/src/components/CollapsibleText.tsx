@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 import { cn } from "../lib/cn";
 
 /** Where a message stops being something you read and starts being something
@@ -23,6 +24,7 @@ export function CollapsibleText({
   maxHeight?: number;
   className?: string;
 }) {
+  const { t } = useTranslation();
   const body = useRef<HTMLDivElement>(null);
   const [overflows, setOverflows] = useState(false);
   const [open, setOpen] = useState(false);
@@ -75,7 +77,7 @@ export function CollapsibleText({
           aria-expanded={open}
           onClick={() => setOpen((v) => !v)}
         >
-          {open ? "Less" : "More"}
+          {open ? t("common.less") : t("common.more")}
         </button>
       )}
     </div>

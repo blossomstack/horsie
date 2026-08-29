@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { ApiRequestError } from "../api/client";
 import { cn } from "../lib/cn";
 
@@ -21,21 +22,23 @@ export function ReadError({
   testId,
   className,
 }: {
-  /** What could not be loaded, as it would appear mid-sentence: "skill bundles". */
+  /** What could not be loaded, already translated, as it would appear
+   * mid-sentence: "skill bundles". */
   what: string;
   /** The query's own error, for the server's account of it. */
   error?: unknown;
   testId?: string;
   className?: string;
 }) {
+  const { t } = useTranslation();
   // Status 0 is the client's own "fetch threw" — its message already opens with
   // "Could not reach…", which reads as a stutter after "Couldn't load…".
   const detail =
     error instanceof ApiRequestError
       ? error.status === 0
-        ? "The horsie server is unreachable — check that it is running, then reload."
+        ? t("readError.unreachable")
         : error.message
-      : "Reload to try again.";
+      : t("readError.reload");
   return (
     <p
       role="status"
@@ -45,7 +48,7 @@ export function ReadError({
         className,
       )}
     >
-      Couldn’t load {what}. {detail}
+      {t("readError.body", { what, detail })}
     </p>
   );
 }

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiRequestError, api, type ChatGptStartedLogin } from "../../api/client";
+import { Trans, useTranslation } from "react-i18next";
 
 /** Sign a `kind: "chatgpt"` provider into a ChatGPT plan.
  *
@@ -24,6 +25,7 @@ export function ChatGptSignIn({
    * showing the state from before. */
   onChanged?: () => void;
 }) {
+  const { t } = useTranslation();
   const [accountId, setAccountId] = useState<string | null>(null);
   const [login, setLogin] = useState<ChatGptStartedLogin | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -124,7 +126,7 @@ export function ChatGptSignIn({
             data-testid="chatgpt-signed-in"
           >
             <span className="lamp" aria-hidden />
-            <span className="legend text-current">Signed in</span>
+            <span className="legend text-current">{t("chatgpt.signedIn")}</span>
             {accountId && <span className="chip font-mono">{accountId}</span>}
             <button
               className="key key-flat ml-auto"
@@ -132,42 +134,45 @@ export function ChatGptSignIn({
               disabled={busy}
               data-testid="chatgpt-sign-out"
             >
-              Sign out
+              {t("chatgpt.signOut")}
             </button>
           </div>
         ) : login ? (
           <div className="text-sm" data-testid="chatgpt-pending">
             <p>
-              Open{" "}
-              <a
-                className="underline"
-                href={login.verificationUrl}
-                target="_blank"
-                rel="noreferrer"
-              >
-                {login.verificationUrl}
-              </a>{" "}
-              and enter this code:
+              <Trans
+                i18nKey="chatgpt.openAndEnter"
+                values={{ url: login.verificationUrl }}
+                components={{
+                  here: (
+                    <a
+                      className="underline"
+                      href={login.verificationUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                    />
+                  ),
+                }}
+              />
             </p>
             <p className="my-2 font-mono text-lg tracking-widest" data-testid="chatgpt-user-code">
               {login.userCode}
             </p>
             <p className="text-xs text-dim">
-              Waiting for approval… you can do this on any device. Usage draws on
-              this ChatGPT plan's Codex limits.
+{t("chatgpt.waiting")}
             </p>
           </div>
         ) : (
           <div className="flex flex-wrap items-center gap-2">
             <span className="lamp lamp-off" aria-hidden />
-            <span className="legend text-current">Not signed in</span>
+            <span className="legend text-current">{t("chatgpt.notSignedIn")}</span>
             <button
               className="key key-go ml-auto"
               onClick={start}
               disabled={busy}
               data-testid="chatgpt-sign-in"
             >
-              {busy ? "Starting…" : "Sign in with ChatGPT"}
+              {busy ? t("chatgpt.starting") : t("chatgpt.signIn")}
             </button>
           </div>
         )}

@@ -1,5 +1,7 @@
 import { ChevronRight } from "lucide-react";
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
+import { i18n } from "../i18n";
 import type { WorkItem } from "../lib/transcriptSegments";
 import { cn } from "../lib/cn";
 import { formatDuration } from "../lib/time";
@@ -28,20 +30,22 @@ function renderItem(item: WorkItem, key: string) {
  * a group that summarised only its tools would tell the reader "ran 1 tool"
  * while quietly holding three finished subagents. */
 function summary(items: WorkItem[]): string {
-  const thinkingCount = items.filter((i) => i.kind === "thinking").length;
-  const toolCount = items.filter((i) => i.kind === "tool").length;
-  const subCount = items.filter((i) => i.kind === "subagent").length;
-  const clauses: string[] = [];
-  if (toolCount > 0) {
-    clauses.push(`ran ${toolCount} tool${toolCount === 1 ? "" : "s"}`);
-  }
-  if (subCount > 0) {
-    clauses.push(`${subCount} subagent${subCount === 1 ? "" : "s"} finished`);
-  }
-  if (clauses.length === 0) return "Thought for a moment";
-  const body = clauses.join(" and ");
-  const phrase = thinkingCount > 0 ? `Thought and ${body}` : body;
-  return phrase.charAt(0).toUpperCase() + phrase.slice(1);
+  const thought = items.some((i) => i.kind === "thinking");
+  const tools = items.filter((i) => i.kind === "tool").length;
+  const subagents = items.filter((i) => i.kind === "subagent").length;
+  // One sentence per shape rather than clauses joined with "and": the join
+  // word, the order and the capitalisation are all English-specific, and a
+  // language that puts the count after the noun cannot be assembled this way.
+  const shape = tools > 0 ? (subagents > 0 ? "both" : "tools") : "subagents";
+  if (tools === 0 && subagents === 0) return i18n.t("workGroup.thoughtOnly");
+  return i18n.t(`workGroup.${thought ? "thought" : "plain"}.${shape}`, {
+    // `count` selects the plural form; the named values are what the sentence
+    // interpolates. Both are needed — a plural key looked up without `count`
+    // resolves to nothing and renders as itself.
+    count: shape === "subagents" ? subagents : tools,
+    tools,
+    subagents,
+  });
 }
 
 /** Renders a `work` segment: a run of thinking blocks + regular tool calls.
@@ -65,6 +69,7 @@ export function WorkGroup({
   startedAtMs?: number;
   endedAtMs?: number;
 }) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const visibleWithIndices = items
     .map((item, index) => ({ item, index }))
@@ -78,7 +83,7 @@ export function WorkGroup({
         data-testid="work-group-pulse"
       >
         <span className="lamp lamp-live text-live-ink" aria-hidden />
-        <span className="legend">Working</span>
+        <span className="legend">{t("workGroup.working")}</span>
       </div>
     );
   }

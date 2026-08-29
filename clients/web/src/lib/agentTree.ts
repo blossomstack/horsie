@@ -1,6 +1,7 @@
 import { MAIN_AGENT } from "../api/client";
 import type { SubAgentView, SubSessionView } from "../api/types";
 import { clockTime, humanDuration } from "./format";
+import { i18n } from "../i18n";
 
 /**
  * Placing everything a session hosts as one tree: its agents *and* its sub
@@ -97,13 +98,12 @@ export function isLive(status: string): boolean {
 export type AgentKind = "main" | "subagent" | "step" | "sub_session" | "run";
 
 /** What each kind is called, where a picture has room to say so. */
-export const KIND_LABEL: Record<AgentKind, string> = {
-  main: "main session",
-  subagent: "subagent",
-  step: "workflow step",
-  sub_session: "sub session",
-  run: "workflow run",
-};
+/** A kind's name, looked up when it is drawn rather than captured here: a
+ * module-level map is built once at import, so its words would stay in the
+ * language the tab was opened in. */
+export function kindLabel(kind: AgentKind): string {
+  return i18n.t(`agentKind.${kind}`);
+}
 
 /**
  * A workflow run, drawn as the node its steps hang off.
@@ -178,7 +178,7 @@ export function runGroups(agents: SubAgentView[], rootTitle?: string): RunGroup[
       return {
         id,
         nodeId: runNodeId(id),
-        label: (root ? rootTitle : undefined) ?? ordered[0]?.workflow ?? "workflow run",
+        label: (root ? rootTitle : undefined) ?? ordered[0]?.workflow ?? i18n.t("agentKind.run"),
         parent,
         root,
         steps: ordered,
@@ -580,7 +580,7 @@ export function layoutAgentTree(
         // its own: the session is named by naming its main agent. It used to
         // read "main agent" — the one node in the picture that said what it
         // was instead of what it was doing.
-        label: member?.label ?? main?.title ?? "main agent",
+        label: member?.label ?? main?.title ?? i18n.t("agentKind.mainAgent"),
         status: member?.status ?? main?.status ?? "idle",
         agentType: member?.agentType ?? null,
         detail:

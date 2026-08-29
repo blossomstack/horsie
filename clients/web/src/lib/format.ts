@@ -1,3 +1,14 @@
+import { i18n, resolveLocale } from "../i18n";
+
+/** The BCP-47 tag `Intl` should format with — the language the interface is
+ * being read in, not the browser's, so a date under a Chinese UI is a Chinese
+ * date even in an English-locale browser. */
+export function localeTag(): string {
+  return resolveLocale(
+    (i18n.language as "en" | "zh-Hans" | "zh-Hant") ?? "en",
+  );
+}
+
 /**
  * Compact relative time, e.g. "just now", "3m ago", "in 2h", "Apr 4".
  *
@@ -11,16 +22,18 @@
 export function relativeTime(epochMillis: number): string {
   const diff = Date.now() - epochMillis;
   const future = diff < 0;
-  const say = (v: string) => (future ? `in ${v}` : `${v} ago`);
+  const say = (value: string) =>
+    future ? i18n.t("time.in", { value }) : i18n.t("time.ago", { value });
   const s = Math.round(Math.abs(diff) / 1000);
-  if (s < 45) return future ? "in a moment" : "just now";
+  if (s < 45)
+    return future ? i18n.t("time.inAMoment") : i18n.t("time.justNow");
   const m = Math.round(s / 60);
-  if (m < 60) return say(`${m}m`);
+  if (m < 60) return say(i18n.t("time.minutesShort", { value: m }));
   const h = Math.round(m / 60);
-  if (h < 24) return say(`${h}h`);
+  if (h < 24) return say(i18n.t("time.hoursShort", { value: h }));
   const d = Math.round(h / 24);
-  if (d < 7) return say(`${d}d`);
-  return new Date(epochMillis).toLocaleDateString(undefined, {
+  if (d < 7) return say(i18n.t("time.daysShort", { value: d }));
+  return new Date(epochMillis).toLocaleDateString(localeTag(), {
     month: "short",
     day: "numeric",
   });
@@ -28,7 +41,7 @@ export function relativeTime(epochMillis: number): string {
 
 /** Absolute local timestamp for tooltips. */
 export function absoluteTime(epochMillis: number): string {
-  return new Date(epochMillis).toLocaleString();
+  return new Date(epochMillis).toLocaleString(localeTag());
 }
 
 /**
@@ -40,10 +53,16 @@ export function absoluteTime(epochMillis: number): string {
  * version of this.
  */
 export function humanDuration(ms: number): string {
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`;
-  return `${Math.floor(ms / 3_600_000)}h ${Math.round((ms % 3_600_000) / 60_000)}m`;
+  if (ms < 1000)
+    return i18n.t("time.millisecondsShort", { value: Math.round(ms) });
+  if (ms < 60_000)
+    return i18n.t("time.secondsShort", { value: (ms / 1000).toFixed(1) });
+  if (ms < 3_600_000)
+    return i18n.t("time.minutesShort", { value: Math.round(ms / 60_000) });
+  return i18n.t("time.hoursMinutesShort", {
+    hours: Math.floor(ms / 3_600_000),
+    minutes: Math.round((ms % 3_600_000) / 60_000),
+  });
 }
 
 /** A moment, 24-hour, so a label is five characters wide however long the
@@ -59,8 +78,9 @@ export function clockTime(ms: number): string {
 /** Group-thousands integer formatting. */
 export function compactNumber(n: number): string {
   if (n < 1000) return String(n);
-  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
-  return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n < 1_000_000)
+    return i18n.t("format.thousands", { value: (n / 1000).toFixed(n < 10_000 ? 1 : 0) });
+  return i18n.t("format.millions", { value: (n / 1_000_000).toFixed(1) });
 }
 
 /** Last path segment of a workdir, for compact display. */
@@ -73,7 +93,7 @@ export function basename(path: string): string {
 /** Display title for a session: its name once titled, else a plain
  * placeholder (never the raw uuid — nobody wants to scan session ids). */
 export function sessionTitle(name: string | undefined): string {
-  return name?.trim() || "New session";
+  return name?.trim() || i18n.t("session.untitled");
 }
 
 const TITLE_MAX_CHARS = 60;

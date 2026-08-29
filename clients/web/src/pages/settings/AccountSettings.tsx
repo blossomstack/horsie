@@ -5,10 +5,12 @@ import { AUTH_STATUS_KEY, useAuthStatus } from "../../hooks/useAuth";
 import { ReadError } from "../../components/ReadError";
 import { askConfirm } from "../../lib/confirm";
 import { SettingsPage } from "./fields";
+import { Trans, useTranslation } from "react-i18next";
 
 /** Long-lived tokens for headless vendor processes: a container, a CI runner, a
  *  machine with nobody to approve a device code. */
 function MachineTokens() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const [label, setLabel] = useState("");
   const [fresh, setFresh] = useState<string | null>(null);
@@ -36,8 +38,8 @@ function MachineTokens() {
 
   const revoke = async (id: string, label: string) => {
     const ok = await askConfirm(
-      `Revoke machine token “${label}”? Anything still using it stops connecting.`,
-      "Revoke",
+      t("account.confirmRevoke", { label }),
+      t("account.revoke"),
     );
     if (ok) remove.mutate(id);
   };
@@ -51,13 +53,12 @@ function MachineTokens() {
       data-testid="machine-tokens"
     >
       <div>
-        <h2 className="section-title">Machine tokens</h2>
+        <h2 className="section-title">{t("account.tokens")}</h2>
         <p className="mt-0.5 text-xs text-faint">
-          For runtime vendor processes that run unattended. On your own machine,
-          <code className="mx-1">horsie auth login</code> is enough — use a
-          token where nobody is there to approve one. A machine token connects a
-          runtime and can do nothing else: it cannot read sessions, change
-          settings, or create another token.
+          <Trans
+            i18nKey="account.tokensDesc"
+            components={{ cmd: <code className="mx-1" /> }}
+          />
         </p>
       </div>
 
@@ -71,7 +72,7 @@ function MachineTokens() {
         <input
           className="field flex-1"
           data-testid="token-label"
-          placeholder="What machine is this for?"
+          placeholder={t("account.tokenLabelPlaceholder")}
           value={label}
           onChange={(e) => setLabel(e.target.value)}
         />
@@ -81,7 +82,7 @@ function MachineTokens() {
           data-testid="token-create"
           disabled={!label.trim() || create.isPending}
         >
-          Create
+          {t("common.create")}
         </button>
       </form>
       {error && (
@@ -93,7 +94,7 @@ function MachineTokens() {
       {fresh && (
         <div className="space-y-1" data-testid="token-secret">
           <p className="text-xs text-lamp-ok">
-            Copy this now — it will not be shown again.
+{t("account.copyNow")}
           </p>
           <code className="block break-all rounded-[var(--radius-control)] p-2 font-mono text-xs">
             {fresh}
@@ -102,42 +103,44 @@ function MachineTokens() {
       )}
 
       <div className="space-y-1.5">
-        {tokens.isLoading && <p className="text-xs text-faint">Loading…</p>}
+        {tokens.isLoading && (
+          <p className="text-xs text-faint">{t("common.loading")}</p>
+        )}
         {/* A revoked-looking list is the worst possible failure mode here: the
             reflex is to mint a replacement token, which does nothing about a
             server that is not answering. */}
         {tokens.isError && (
           <ReadError
-            what="machine tokens"
+            what={t("account.tokensWhat")}
             error={tokens.error}
             testId="tokens-error"
           />
         )}
         {tokens.data?.length === 0 && (
-          <p className="text-xs text-faint">No machine tokens yet.</p>
+          <p className="text-xs text-faint">{t("account.noTokens")}</p>
         )}
-        {tokens.data?.map((t) => (
+        {tokens.data?.map((token) => (
           <div
-            key={t.id}
+            key={token.id}
             className="flex items-center justify-between gap-3 rounded-[var(--radius-control)] px-3 py-2"
-            data-testid={`token-row-${t.label}`}
+            data-testid={`token-row-${token.label}`}
           >
             <div className="min-w-0">
-              <div className="truncate text-sm text-legend">{t.label}</div>
+              <div className="truncate text-sm text-legend">{token.label}</div>
               <div className="text-[0.6875rem] text-faint">
-                {t.lastUsedAt ? "in use" : "never used"}
+                {token.lastUsedAt ? t("account.inUse") : t("account.neverUsed")}
               </div>
             </div>
             <button
               className="key shrink-0 text-xs"
-              data-testid={`token-revoke-${t.label}`}
+              data-testid={`token-revoke-${token.label}`}
               // Nothing here says which machine holds a token, so a revoke is
               // both irreversible and hard to undo by hand: the confirm names
               // the label and what stops working.
-              onClick={() => void revoke(t.id, t.label)}
+              onClick={() => void revoke(token.id, token.label)}
               disabled={remove.isPending}
             >
-              Revoke
+              {t("account.revoke")}
             </button>
           </div>
         ))}
@@ -148,6 +151,7 @@ function MachineTokens() {
 
 /** Password change and sign-out for the single admin account. */
 export function AccountSettings() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const { data: status } = useAuthStatus();
   const [current, setCurrent] = useState("");
@@ -179,13 +183,12 @@ export function AccountSettings() {
 
   if (!status?.enabled) {
     return (
-      <SettingsPage title="Account" desc="Sign-in for this server.">
+      <SettingsPage title={t("settingsNav.account")} desc={t("account.desc")}>
           <p
             data-testid="account-disabled"
             className="section  text-sm text-dim"
           >
-            Authentication is disabled on this deployment, so there is no
-            account to manage. Anyone who can reach this server has full access.
+{t("account.disabled")}
           </p>
       </SettingsPage>
     );
@@ -195,15 +198,13 @@ export function AccountSettings() {
     change.error instanceof ApiRequestError ? change.error.message : null;
 
   return (
-    <SettingsPage title="Account" desc="Sign-in for this server.">
+    <SettingsPage title={t("settingsNav.account")} desc={t("account.desc")}>
         {status.mustChangePassword && (
           <p
             data-testid="account-must-change"
             className="section  text-sm text-legend"
           >
-            This server is still using the password it generated on first boot.
-            Change it below — that also deletes the{" "}
-            <code>initial-admin-password</code> file from the state directory.
+            <Trans i18nKey="account.mustChange" components={{ file: <code /> }} />
           </p>
         )}
         {status.external ? (
@@ -211,8 +212,7 @@ export function AccountSettings() {
             data-testid="account-external"
             className="section  text-sm text-dim"
           >
-            Sign-in for this server is managed elsewhere, so there is no
-            password to change here.
+{t("account.external")}
           </p>
         ) : (
           <form
@@ -228,7 +228,7 @@ export function AccountSettings() {
               type="password"
               autoComplete="current-password"
               data-testid="current-password"
-              placeholder="Current password"
+              placeholder={t("account.currentPassword")}
               value={current}
               onChange={(e) => setCurrent(e.target.value)}
             />
@@ -237,7 +237,7 @@ export function AccountSettings() {
               type="password"
               autoComplete="new-password"
               data-testid="new-password"
-              placeholder="New password (8 characters or more)"
+              placeholder={t("account.newPassword")}
               value={next}
               onChange={(e) => setNext(e.target.value)}
             />
@@ -248,7 +248,7 @@ export function AccountSettings() {
             )}
             {change.isSuccess && (
               <p data-testid="password-saved" className="text-xs text-lamp-ok">
-                Password changed. Other browsers have been signed out.
+{t("account.passwordChanged")}
               </p>
             )}
             <button
@@ -257,7 +257,7 @@ export function AccountSettings() {
               className="key key-go"
               disabled={change.isPending || !current || !next}
             >
-              Change password
+              {t("account.changePassword")}
             </button>
           </form>
         )}
@@ -267,7 +267,7 @@ export function AccountSettings() {
           className="key"
           onClick={() => logout.mutate()}
         >
-          Sign out
+          {t("chatgpt.signOut")}
         </button>
         <MachineTokens />
       </SettingsPage>

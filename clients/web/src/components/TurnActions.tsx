@@ -1,6 +1,8 @@
 import { Check, Clipboard, Type } from "lucide-react";
 import { useEffect, useRef, useState, type RefObject } from "react";
+import { useTranslation } from "react-i18next";
 import { copyText, renderedTextOf } from "../lib/clipboard";
+import { absoluteTime } from "../lib/format";
 import { formatTime } from "../lib/time";
 
 /**
@@ -37,6 +39,7 @@ export function TurnActions({
   /** The rendered prose node, read for the plain-text copy. */
   renderedRef?: RefObject<HTMLDivElement | null>;
 }) {
+  const { t } = useTranslation();
   const [copied, setCopied] = useState<"md" | "txt" | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -83,8 +86,8 @@ export function TurnActions({
           type="button"
           className="key-icon !h-6 !w-6"
           onClick={copyMarkdown}
-          title="Copy as markdown"
-          aria-label="Copy as markdown"
+          title={t("turnActions.copyMarkdown")}
+          aria-label={t("turnActions.copyMarkdown")}
           data-testid="turn-copy-markdown"
         >
           {copied === "md" ? (
@@ -99,8 +102,8 @@ export function TurnActions({
         type="button"
         className="key-icon !h-6 !w-6"
         onClick={copyPlain}
-        title={plainOnly ? "Copy" : "Copy as plain text"}
-        aria-label={plainOnly ? "Copy" : "Copy as plain text"}
+        title={plainOnly ? t("common.copy") : t("turnActions.copyPlain")}
+        aria-label={plainOnly ? t("common.copy") : t("turnActions.copyPlain")}
         data-testid="turn-copy-plain"
       >
         {copied === "txt" ? (
@@ -116,7 +119,7 @@ export function TurnActions({
         <span
           className="readout ml-0.5 text-[0.625rem] tabular-nums"
           data-testid="turn-time"
-          title={new Date(atMs).toLocaleString()}
+          title={absoluteTime(atMs)}
         >
           {formatTime(atMs)}
         </span>
@@ -126,9 +129,9 @@ export function TurnActions({
           a screen reader; this is the word that goes with the lamp. */}
       <span className="sr-only" role="status">
         {copied === "md"
-          ? "Markdown copied"
+          ? t("turnActions.markdownCopied")
           : copied === "txt"
-            ? "Text copied"
+            ? t("turnActions.textCopied")
             : ""}
       </span>
     </div>

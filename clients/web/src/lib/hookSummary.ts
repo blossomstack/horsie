@@ -1,4 +1,5 @@
 import type { HookRecord } from "../api/types";
+import { i18n } from "../i18n";
 
 /** What a hook did, in a few words, plus whether it changed anything.
  *
@@ -10,15 +11,24 @@ export interface HookSummary {
   intervened: boolean;
 }
 
-const ALLOWED: HookSummary = { text: "allowed", intervened: false };
-const RAN: HookSummary = { text: "ran", intervened: false };
+// Functions, not constants: a module-level constant is built once at import,
+// so its wording would stay in whatever language the tab was opened in.
+const allowed = (): HookSummary => ({
+  text: i18n.t("hook.allowed"),
+  intervened: false,
+});
+const ran = (): HookSummary => ({ text: i18n.t("hook.ran"), intervened: false });
 
 function failed(reason: string): HookSummary {
-  return { text: `could not run — ${reason}`, intervened: true };
+  return { text: i18n.t("hook.couldNotRun", { reason }), intervened: true };
 }
 
-function rewrote(what: string): HookSummary {
-  return { text: `rewrote the ${what}`, intervened: true };
+function rewroteInput(): HookSummary {
+  return { text: i18n.t("hook.rewroteInput"), intervened: true };
+}
+
+function rewroteOutput(): HookSummary {
+  return { text: i18n.t("hook.rewroteOutput"), intervened: true };
 }
 
 /** The call a record guarded, or `null` when it guarded none.
@@ -97,8 +107,11 @@ export function deniesCall(r: HookRecord): boolean {
 export function hookSummary(r: HookRecord): HookSummary {
   const outcome = outcomeSummary(r);
   if (!r.halt) return outcome;
-  const why = r.halt.reason ?? "no reason given";
-  return { text: `stopped horsie — ${why} (${outcome.text})`, intervened: true };
+  const why = r.halt.reason ?? i18n.t("hook.noReason");
+  return {
+    text: i18n.t("hook.stoppedHorsie", { why, outcome: outcome.text }),
+    intervened: true,
+  };
 }
 
 /** No `default` clause in the switch below, deliberately: adding a `HookAction`
@@ -110,33 +123,33 @@ function outcomeSummary(r: HookRecord): HookSummary {
     case "PreToolUse":
       switch (a.value.outcome.outcome) {
         case "Allowed":
-          return a.value.outcome.value.input ? rewrote("input") : ALLOWED;
+          return a.value.outcome.value.input ? rewroteInput() : allowed();
         case "Denied":
           return {
-            text: a.value.outcome.value.reason ?? "denied the call",
+            text: a.value.outcome.value.reason ?? i18n.t("hook.deniedCall"),
             intervened: true,
           };
         // horsie has no permission prompt, so there is nobody to ask.
         case "Ask":
         case "Defer":
-          return { text: "asked for approval — allowed", intervened: false };
+          return { text: i18n.t("hook.askedApproval"), intervened: false };
         case "Failed":
           return failed(a.value.outcome.value.reason);
       }
     case "PostToolUse":
       switch (a.value.outcome.outcome) {
         case "Ran": {
-          const ran = a.value.outcome.value;
-          if (ran.output) return rewrote("output");
-          if (ran.additionalContext)
-            return { text: "added context to the result", intervened: true };
-          return ALLOWED;
+          const result = a.value.outcome.value;
+          if (result.output) return rewroteOutput();
+          if (result.additionalContext)
+            return { text: i18n.t("hook.addedResultContext"), intervened: true };
+          return allowed();
         }
         case "Blocked":
           return {
             text:
               a.value.outcome.value.reason ??
-              "objected — the call had already run",
+              i18n.t("hook.objectedAlreadyRan"),
             intervened: true,
           };
         case "Failed":
@@ -147,11 +160,11 @@ function outcomeSummary(r: HookRecord): HookSummary {
       switch (a.value.outcome.outcome) {
         case "Ran":
           return a.value.outcome.value.additionalContext
-            ? { text: "added context", intervened: true }
-            : RAN;
+            ? { text: i18n.t("hook.addedContext"), intervened: true }
+            : ran();
         case "Blocked":
           return {
-            text: a.value.outcome.value.reason ?? "objected",
+            text: a.value.outcome.value.reason ?? i18n.t("hook.objected"),
             intervened: true,
           };
         case "Failed":
@@ -162,8 +175,8 @@ function outcomeSummary(r: HookRecord): HookSummary {
       switch (a.value.outcome.outcome) {
         case "Ran":
           return a.value.outcome.value.additionalContext
-            ? { text: "added session context", intervened: true }
-            : RAN;
+            ? { text: i18n.t("hook.addedSessionContext"), intervened: true }
+            : ran();
         case "Failed":
           return failed(a.value.outcome.value.reason);
       }
@@ -172,11 +185,11 @@ function outcomeSummary(r: HookRecord): HookSummary {
       switch (a.value.outcome.outcome) {
         case "Ran":
           return a.value.outcome.value.additionalContext
-            ? { text: "added context to the prompt", intervened: true }
-            : RAN;
+            ? { text: i18n.t("hook.addedPromptContext"), intervened: true }
+            : ran();
         case "Blocked":
           return {
-            text: a.value.outcome.value.reason ?? "rejected the prompt",
+            text: a.value.outcome.value.reason ?? i18n.t("hook.rejectedPrompt"),
             intervened: true,
           };
         case "Failed":
@@ -191,16 +204,20 @@ function outcomeSummary(r: HookRecord): HookSummary {
       switch (a.value.outcome.outcome) {
         case "Ran":
           return a.value.outcome.value.additionalContext
-            ? { text: "left a note for the next turn", intervened: true }
-            : RAN;
+            ? { text: i18n.t("hook.leftNote"), intervened: true }
+            : ran();
         case "Blocked":
           return {
-            text: `kept the turn going — ${a.value.outcome.value.reason ?? "no reason given"}`,
+            text: i18n.t("hook.keptTurnGoing", {
+              reason: a.value.outcome.value.reason ?? i18n.t("hook.noReason"),
+            }),
             intervened: true,
           };
         case "CapReached":
           return {
-            text: `hit the continuation limit — ${a.value.outcome.value.reason ?? "no reason given"}`,
+            text: i18n.t("hook.hitContinuationLimit", {
+              reason: a.value.outcome.value.reason ?? i18n.t("hook.noReason"),
+            }),
             intervened: true,
           };
         case "Failed":
@@ -209,10 +226,12 @@ function outcomeSummary(r: HookRecord): HookSummary {
     case "PreCompact":
       switch (a.value.outcome.outcome) {
         case "Ran":
-          return RAN;
+          return ran();
         case "Blocked":
           return {
-            text: `stopped the compaction — ${a.value.outcome.value.reason ?? "no reason given"}`,
+            text: i18n.t("hook.stoppedCompaction", {
+              reason: a.value.outcome.value.reason ?? i18n.t("hook.noReason"),
+            }),
             intervened: true,
           };
         // A compaction has no continuation budget to exhaust: a block abandons
@@ -220,7 +239,9 @@ function outcomeSummary(r: HookRecord): HookSummary {
         // shared with `Stop`, which does.
         case "CapReached":
           return {
-            text: `stopped the compaction — ${a.value.outcome.value.reason ?? "no reason given"}`,
+            text: i18n.t("hook.stoppedCompaction", {
+              reason: a.value.outcome.value.reason ?? i18n.t("hook.noReason"),
+            }),
             intervened: true,
           };
         case "Failed":
@@ -235,7 +256,7 @@ function outcomeSummary(r: HookRecord): HookSummary {
     case "CwdChanged":
       switch (a.value.outcome.outcome) {
         case "Ran":
-          return RAN;
+          return ran();
         case "Failed":
           return failed(a.value.outcome.value.reason);
       }

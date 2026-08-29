@@ -6,6 +6,7 @@ import {
   useState,
   type KeyboardEvent,
 } from "react";
+import { useTranslation } from "react-i18next";
 import { SessionStatusKind, type CatalogEntryView } from "../api/types";
 import { UNLOADED, statusMeta } from "../lib/status";
 import { EntryMenu, filterEntries, invocationPrefix } from "./EntryMenu";
@@ -28,7 +29,7 @@ export function Composer({
   status,
   busy,
   blockedReason = null,
-  idlePlaceholder = "Message the agent…",
+  idlePlaceholder,
   entries = [],
   onSend,
   onStop,
@@ -41,7 +42,7 @@ export function Composer({
   blockedReason?: string | null;
   /** What an idle, unblocked field invites. A workflow run is handed an input
    * rather than sent a message, so the two surfaces do not ask for the same
-   * thing. */
+   * thing. Defaults to the plain "message the agent" invitation. */
   idlePlaceholder?: string;
   /** What the selected bundles offer, for the `/` and `@` typeahead. Empty
    * where there is nothing to complete against. */
@@ -51,6 +52,7 @@ export function Composer({
   onSend: (text: string) => void | Promise<unknown>;
   onStop: () => void;
 }) {
+  const { t } = useTranslation();
   const [text, setText] = useState("");
   const [active, setActive] = useState(0);
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -161,15 +163,15 @@ export function Composer({
             onChange={(e) => setText(e.target.value)}
             onKeyDown={onKeyDown}
             data-testid="composer-input"
-            aria-label="Message the agent"
+            aria-label={t("composer.ariaLabel")}
             placeholder={
               !meta.canSend
                 ? meta.hint
                 : awaiting
-                  ? "Answer the agent…"
+                  ? t("composer.answerPlaceholder")
                   : running
-                    ? "Queue a message for the next turn…"
-                    : idlePlaceholder
+                    ? t("composer.queuePlaceholder")
+                    : (idlePlaceholder ?? t("composer.idlePlaceholder"))
             }
             disabled={!meta.canSend}
             // `pr-14` reserves the button's lane so a long line never runs
@@ -183,8 +185,8 @@ export function Composer({
                 className="key key-stop !h-8 !w-8 !p-0"
                 onClick={onStop}
                 disabled={busy}
-                title="Stop this turn — queued messages are kept"
-                aria-label="Stop this turn"
+                title={t("composer.stopTitle")}
+                aria-label={t("composer.stop")}
                 data-testid="composer-stop"
               >
                 <Square size={12} className="fill-current" aria-hidden />
@@ -196,9 +198,9 @@ export function Composer({
                 disabled={!text.trim() || !meta.canSend || busy || blocked}
                 title={
                   blockedReason ??
-                  "Send — Enter sends, Shift+Enter starts a new line"
+                  t("composer.sendTitle")
                 }
-                aria-label="Send message"
+                aria-label={t("composer.send")}
                 data-testid="composer-send"
               >
                 <ArrowUp size={15} aria-hidden />

@@ -1,4 +1,5 @@
 import { FoldVertical } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import type { RenderedCompactionSkip } from "../hooks/useSessionStream";
 import { compactNumber } from "../lib/format";
 
@@ -13,12 +14,16 @@ import { compactNumber } from "../lib/format";
  * reported. Not a button: there is nothing to expand, and the whole account
  * fits in a line and its tooltip. */
 export function CompactionNotice({ value }: { value: RenderedCompactionSkip }) {
+  const { t } = useTranslation();
   // Without a declared context window there is no budget, so the only honest
   // thing to say is that nothing was folded.
   const explanation =
     value.retainTokens === null
-      ? "This model declares no context window, so there is no budget to compact against."
-      : `This session is about ${compactNumber(value.contextTokens)} tokens and a compaction keeps the most recent ${compactNumber(value.retainTokens)} verbatim — so there is nothing before that to fold. Compacting anyway would trade real messages for a summary to buy room that is not scarce.`;
+      ? t("compaction.noWindow")
+      : t("compaction.nothingToFold", {
+          used: compactNumber(value.contextTokens),
+          retain: compactNumber(value.retainTokens),
+        });
 
   return (
     <div data-testid="compaction-notice" className="py-1">
@@ -30,12 +35,15 @@ export function CompactionNotice({ value }: { value: RenderedCompactionSkip }) {
         >
           <FoldVertical size={11} aria-hidden />
           <span>
-            Nothing to compact
+            {t("compaction.nothingToCompact")}
             {value.retainTokens !== null && (
               <>
                 {" "}
-                · {compactNumber(value.contextTokens)} of{" "}
-                {compactNumber(value.retainTokens)} tokens kept
+                ·{" "}
+                {t("compaction.tokensKept", {
+                  used: compactNumber(value.contextTokens),
+                  retain: compactNumber(value.retainTokens),
+                })}
               </>
             )}
           </span>

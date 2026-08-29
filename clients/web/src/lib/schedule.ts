@@ -1,24 +1,52 @@
 import type { RoutineSchedule } from "../api/types";
+import { i18n } from "../i18n";
+import { localeTag } from "./format";
 
 /** The shortest interval the server accepts (`MIN_INTERVAL_SECS`). */
 export const MIN_INTERVAL_SECS = 60;
 
-const MONTHS = [
-  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-] as const;
+/** A month's short name in the language the interface is being read in.
+ * `Intl` already knows every one of them, so the catalogue does not have to
+ * carry twelve names per language. */
+function monthName(month: number): string {
+  return new Date(Date.UTC(2000, month - 1, 1)).toLocaleDateString(localeTag(), {
+    month: "short",
+    timeZone: "UTC",
+  });
+}
+
+/** A weekday as the wire names it, in the reader's language. */
+function weekdayName(day: string): string {
+  const index = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].indexOf(day);
+  if (index < 0) return day;
+  // 2024-01-01 was a Monday, so the offset lands on the right day.
+  return new Date(Date.UTC(2024, 0, 1 + index)).toLocaleDateString(localeTag(), {
+    weekday: "short",
+    timeZone: "UTC",
+  });
+}
 
 /** "9" → "09", for clock and day rendering. */
 function pad2(n: number): string {
   return String(n).padStart(2, "0");
 }
 
-/** "3" → "3rd"; the ordinal suffix a calendar reader expects. */
+/** "3" → "3rd"; the ordinal a calendar reader expects, in their language.
+ * `Intl.PluralRules` picks the rule (English has four, Chinese has one), and
+ * the catalogue supplies the wording for it. */
+const ORDINAL_KEYS = {
+  one: "schedule.ordinalOne",
+  two: "schedule.ordinalTwo",
+  few: "schedule.ordinalFew",
+  other: "schedule.ordinalOther",
+} as const;
+
 function ordinal(n: number): string {
-  const last = n % 10;
-  const suffix = last === 1 ? "st" : last === 2 ? "nd" : last === 3 ? "rd" : "th";
-  return `${n}${suffix}`;
+  const rule = new Intl.PluralRules(localeTag(), { type: "ordinal" }).select(n);
+  const key = ORDINAL_KEYS[rule as keyof typeof ORDINAL_KEYS] ?? ORDINAL_KEYS.other;
+  return i18n.t(key, { n });
 }
+
 
 /** The browser's IANA timezone; the form's default. */
 export function browserTimezone(): string {
@@ -49,26 +77,47 @@ export function timezoneOptions(): string[] {
 /** A schedule in words: "manually", "every 30m", "once on Apr 4, 09:00",
  * "every Mon, Wed, Fri at 09:00 (Asia/Shanghai)". */
 export function describeSchedule(schedule: RoutineSchedule): string {
+  const at = (h: number, m: number) => `${pad2(h)}:${pad2(m)}`;
   switch (schedule.type) {
     case "Manual":
-      return "manually";
+      return i18n.t("schedule.manually");
     case "Every":
-      return `every ${formatInterval(schedule.value.intervalSecs)}`;
+      return i18n.t("schedule.every", {
+        interval: formatInterval(schedule.value.intervalSecs),
+      });
     case "Once":
-      return `once on ${new Date(schedule.value.atMs).toLocaleString(undefined, {
-        month: "short",
-        day: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-      })}`;
+      return i18n.t("schedule.once", {
+        when: new Date(schedule.value.atMs).toLocaleString(localeTag(), {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+      });
     case "Daily":
-      return `daily at ${pad2(schedule.value.hour)}:${pad2(schedule.value.minute)} (${schedule.value.timezone})`;
+      return i18n.t("schedule.daily", {
+        time: at(schedule.value.hour, schedule.value.minute),
+        timezone: schedule.value.timezone,
+      });
     case "Weekly":
-      return `every ${schedule.value.weekdays.join(", ")} at ${pad2(schedule.value.hour)}:${pad2(schedule.value.minute)} (${schedule.value.timezone})`;
+      return i18n.t("schedule.weekly", {
+        days: schedule.value.weekdays.map(weekdayName).join(", "),
+        time: at(schedule.value.hour, schedule.value.minute),
+        timezone: schedule.value.timezone,
+      });
     case "Monthly":
-      return `monthly on the ${ordinal(schedule.value.dayOfMonth)} at ${pad2(schedule.value.hour)}:${pad2(schedule.value.minute)} (${schedule.value.timezone})`;
+      return i18n.t("schedule.monthly", {
+        day: ordinal(schedule.value.dayOfMonth),
+        time: at(schedule.value.hour, schedule.value.minute),
+        timezone: schedule.value.timezone,
+      });
     case "Yearly":
-      return `yearly on ${MONTHS[schedule.value.month - 1]} ${ordinal(schedule.value.dayOfMonth)} at ${pad2(schedule.value.hour)}:${pad2(schedule.value.minute)} (${schedule.value.timezone})`;
+      return i18n.t("schedule.yearly", {
+        month: monthName(schedule.value.month),
+        day: ordinal(schedule.value.dayOfMonth),
+        time: at(schedule.value.hour, schedule.value.minute),
+        timezone: schedule.value.timezone,
+      });
   }
 }
 

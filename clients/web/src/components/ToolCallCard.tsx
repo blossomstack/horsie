@@ -12,6 +12,7 @@ import { isAskCall } from "../lib/askUser";
 import { cn } from "../lib/cn";
 import { deniesCall, hookSummary, systemMessage } from "../lib/hookSummary";
 import { AskUserCard } from "./AskUserCard";
+import { useTranslation } from "react-i18next";
 
 function stringifyInput(input: unknown): string {
   if (input == null) return "";
@@ -49,6 +50,7 @@ function inputPreview(input: unknown): string | null {
  * shows the raw input and output on recessed screens, because these operators
  * came to read exactly what the machine sent and got back. */
 export function ToolCallCard({ call }: { call: RenderedToolCall }) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   if (isAskCall(call.name)) return <AskUserCard call={call} />;
   const preview = inputPreview(call.input);
@@ -98,9 +100,11 @@ export function ToolCallCard({ call }: { call: RenderedToolCall }) {
           </span>
         )}
         {!preview && <span className="flex-1" />}
-        {call.running && <span className="legend shrink-0">Running</span>}
+        {call.running && (
+          <span className="legend shrink-0">{t("common.running")}</span>
+        )}
         {call.isError && !call.running && (
-          <span className="legend shrink-0 !text-red-ink">Failed</span>
+          <span className="legend shrink-0 !text-red-ink">{t("common.failed")}</span>
         )}
         {/* A hook that changed the call is state the collapsed row must carry:
             "this is not what the agent asked for" cannot wait behind a toggle.
@@ -110,7 +114,7 @@ export function ToolCallCard({ call }: { call: RenderedToolCall }) {
             className="legend shrink-0 !text-red-ink"
             data-testid="tool-call-hook-blocked"
           >
-            Blocked by {blocked.plugin}
+            {t("toolCall.blockedBy", { plugin: blocked.plugin })}
           </span>
         )}
       </button>
@@ -119,7 +123,7 @@ export function ToolCallCard({ call }: { call: RenderedToolCall }) {
         <div className="mt-1.5 space-y-1.5 pl-[26px]">
           {inputStr && (
             <div>
-              <span className="legend">Input</span>
+              <span className="legend">{t("toolCall.input")}</span>
               <pre className="screen mt-1 overflow-x-auto px-2.5 py-2 font-mono text-[0.6875rem] leading-relaxed whitespace-pre-wrap text-dim">
                 {inputStr}
               </pre>
@@ -128,7 +132,7 @@ export function ToolCallCard({ call }: { call: RenderedToolCall }) {
           {hasOutput && (
             <div>
               <span className={cn("legend", call.isError && "!text-red-ink")}>
-                {call.isError ? "Error" : "Output"}
+                {call.isError ? t("toolCall.error") : t("toolCall.output")}
               </span>
               <pre
                 data-testid="tool-call-output"
@@ -142,11 +146,11 @@ export function ToolCallCard({ call }: { call: RenderedToolCall }) {
             </div>
           )}
           {!hasOutput && !call.running && (
-            <p className="legend">Returned nothing</p>
+            <p className="legend">{t("toolCall.returnedNothing")}</p>
           )}
           {call.hooks.length > 0 && (
             <div data-testid="tool-call-hooks">
-              <span className="legend">Plugin hooks</span>
+              <span className="legend">{t("toolCall.pluginHooks")}</span>
               <ul className="mt-1 space-y-1">
                 {call.hooks.map((h, i) => {
                   const { text, intervened } = hookSummary(h);

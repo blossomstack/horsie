@@ -25,6 +25,7 @@ import {
   runGroups,
   runStatus,
 } from "./agentTree";
+import { i18n } from "../i18n";
 import { clockTime, humanDuration } from "./format";
 
 /** A gap longer than this is dead air, not part of the work. */
@@ -214,7 +215,7 @@ function endOfSubSession(subSessions: SubSessionView[], id: string): number {
 
 /** What the root lane is called when nothing has named it yet. */
 function sessionTitleFallback(kind: LaneKind): string {
-  return kind === "main" ? "this session" : "this agent";
+  return kind === "main" ? i18n.t("timeline.thisSession") : i18n.t("timeline.thisAgent");
 }
 
 /**
@@ -267,7 +268,7 @@ function entriesOf(m: RenderedMessage, nowMs: number): Entry[] {
       entryId: m.id,
       startMs: began,
       endMs: ended,
-      title: `Thinking · ${m.thinking.length} block${m.thinking.length > 1 ? "s" : ""}`,
+      title: i18n.t("timeline.thinkingBlocks", { count: m.thinking.length }),
       live: false,
       turnStart: false,
     });
@@ -351,7 +352,7 @@ export function buildTimeline(
         entryId: String(item.value.seq),
         startMs: item.value.atMs,
         endMs: item.value.atMs,
-        title: "Session compacted",
+        title: i18n.t("timeline.sessionCompacted"),
         live: false,
         turnStart: false,
       });

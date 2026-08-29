@@ -3,6 +3,7 @@ import { createContext, useContext, useState } from "react";
 import type { RenderedToolCall } from "../hooks/useSessionStream";
 import { askInputOf, composeAnswer, pickedChoices } from "../lib/askUser";
 import { cn } from "../lib/cn";
+import { useTranslation } from "react-i18next";
 
 export interface AskAnswerApi {
   /** Tool call ids of every ask awaiting an answer. A turn may ask more than
@@ -32,6 +33,7 @@ export function useAskAnswer(): AskAnswerApi | null {
 /** An `ask_user` call: the question, its suggested answers, and — while it is
  * the pending ask — the controls to answer it. */
 export function AskUserCard({ call }: { call: RenderedToolCall }) {
+  const { t } = useTranslation();
   const api = useAskAnswer();
   const input = askInputOf(call.input);
   // Duplicate labels would make a multi-select join ambiguous.
@@ -175,7 +177,7 @@ export function AskUserCard({ call }: { call: RenderedToolCall }) {
                 superseded ? "text-faint italic" : "text-dim",
               )}
             >
-              {superseded ? `Not answered — ${answer}` : answer}
+              {superseded ? t("askUser.notAnswered", { answer }) : answer}
             </p>
           )}
         </div>

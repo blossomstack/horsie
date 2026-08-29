@@ -1,4 +1,15 @@
 import { SessionStatusKind } from "../api/types";
+import { i18n } from "../i18n";
+
+/** The catalogue section a status reads its words out of. */
+type StatusKey =
+  | "provisioning"
+  | "idle"
+  | "running"
+  | "awaitingInput"
+  | "finished"
+  | "failed"
+  | "unrecoverable";
 
 /** Panel lamp colours. `live` is a value in motion, `attention` is a control
  * waiting on the operator, `fault` is a stopped machine, `idle` is a subdued
@@ -37,55 +48,55 @@ export const UNLOADED: StatusMeta = {
   hint: "",
 };
 
-const META: Record<SessionStatusKind, StatusMeta> = {
+/** Everything about a status that is not words. The words are looked up at
+ * call time instead of baked in here — a module-level constant is evaluated
+ * once at import, so a translated label captured here would still be in the
+ * language the tab was opened in after a switch. */
+const META: Record<
+  SessionStatusKind,
+  Omit<StatusMeta, "label" | "hint"> & { key: StatusKey }
+> = {
   [SessionStatusKind.Provisioning]: {
-    label: "Provisioning",
+    key: "provisioning",
     tone: "live",
     busy: true,
     canSend: true,
-    hint: "Building this session's runtime — anything you send runs as soon as it is up.",
   },
   [SessionStatusKind.Idle]: {
-    label: "Idle",
+    key: "idle",
     tone: "idle",
     busy: false,
     canSend: true,
-    hint: "Ready for your next message.",
   },
   [SessionStatusKind.Running]: {
-    label: "Running",
+    key: "running",
     tone: "live",
     busy: true,
     canSend: true,
-    hint: "The agent is working — anything you send is answered next turn.",
   },
   [SessionStatusKind.AwaitingInput]: {
-    label: "Awaiting input",
+    key: "awaitingInput",
     tone: "attention",
     busy: false,
     canSend: true,
-    hint: "The agent asked you a question.",
   },
   [SessionStatusKind.Finished]: {
-    label: "Finished",
+    key: "finished",
     tone: "ready",
     busy: false,
     canSend: true,
-    hint: "This run completed. Retry a step to take it further.",
   },
   [SessionStatusKind.Failed]: {
-    label: "Failed",
+    key: "failed",
     tone: "fault",
     busy: false,
     canSend: true,
-    hint: "The last turn failed — send a message to try again.",
   },
   [SessionStatusKind.Unrecoverable]: {
-    label: "Unrecoverable",
+    key: "unrecoverable",
     tone: "fault",
     busy: false,
     canSend: false,
-    hint: "This session's runtime is gone for good. Start a new session.",
   },
 };
 
@@ -96,7 +107,12 @@ const META: Record<SessionStatusKind, StatusMeta> = {
  * There used to be — every row rendered an em dash until someone opened it —
  * and that "unknown" was never a state, only an empty cache. */
 export function statusMeta(status: SessionStatusKind): StatusMeta {
-  return META[status];
+  const { key, ...rest } = META[status];
+  return {
+    ...rest,
+    label: i18n.t(`status.${key}.label`),
+    hint: i18n.t(`status.${key}.hint`),
+  };
 }
 
 /** An agent's status, in the session vocabulary the panel lamps speak.
@@ -139,12 +155,12 @@ export function agentStatusMeta(status: string): SessionStatusKind {
 export function progressionLabel(stage: string): string {
   const known: Record<string, string> = {
     // The session's sandbox.
-    runtime_acquiring: "Starting runtime…",
-    runtime_failed: "Runtime failed",
+    runtime_acquiring: i18n.t("progression.startingRuntime"),
+    runtime_failed: i18n.t("progression.runtimeFailed"),
     // This turn's setup.
-    acquiring_runtime: "Starting runtime…",
-    scanning_workspace: "Scanning workspace…",
-    connecting_tools: "Connecting tools…",
+    acquiring_runtime: i18n.t("progression.startingRuntime"),
+    scanning_workspace: i18n.t("progression.scanningWorkspace"),
+    connecting_tools: i18n.t("progression.connectingTools"),
   };
   return known[stage] ?? `${stage.replace(/_/g, " ")}…`;
 }

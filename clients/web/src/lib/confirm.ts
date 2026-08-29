@@ -1,3 +1,5 @@
+import { i18n } from "../i18n";
+
 /**
  * The app's own "are you sure?", in one place.
  *
@@ -49,7 +51,7 @@ export function confirmSnapshot(): ConfirmRequest | null {
  */
 export function askConfirm(
   message: string,
-  confirmLabel = "Delete",
+  confirmLabel = i18n.t("common.delete"),
 ): Promise<boolean> {
   if (current) return Promise.resolve(false);
   return new Promise<boolean>((resolve) => {

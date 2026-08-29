@@ -10,6 +10,7 @@ import {
   useRestoreSkill,
   useSkillRevisions,
 } from "../../../hooks/useAuthored";
+import { useTranslation } from "react-i18next";
 
 /**
  * A skill's revisions, fetched only once someone asks for them.
@@ -21,14 +22,15 @@ import {
 function Revisions({ plugin, skill }: { plugin: string; skill: string }) {
   const { data, isLoading, isError } = useSkillRevisions(plugin, skill, true);
   const restore = useRestoreSkill();
+  const { t } = useTranslation();
 
   if (isLoading) {
-    return <p className="px-2 py-1.5 text-xs text-faint">Loading history…</p>;
+    return <p className="px-2 py-1.5 text-xs text-faint">{t("authored.loadingHistory")}</p>;
   }
   if (isError || !data) {
     return (
       <p className="px-2 py-1.5 text-xs text-faint">
-        Could not read this skill's history.
+        {t("authored.historyFailed")}
       </p>
     );
   }
@@ -41,7 +43,7 @@ function Revisions({ plugin, skill }: { plugin: string; skill: string }) {
         >
           <span className="chip !py-0 text-[0.625rem]">r{r.revision}</span>
           <span className="min-w-0 flex-1 truncate">
-            {r.deleted ? <em className="text-faint">deleted</em> : r.description}
+            {r.deleted ? <em className="text-faint">{t("authored.deleted")}</em> : r.description}
           </span>
           {/* Restoring the current revision is a no-op that still costs a
               generation bump, so it is not offered. */}
@@ -53,7 +55,7 @@ function Revisions({ plugin, skill }: { plugin: string; skill: string }) {
                 restore.mutate({ plugin, skill, revision: r.revision })
               }
             >
-              restore
+              {t("authored.restore")}
             </button>
           )}
         </li>
@@ -63,6 +65,7 @@ function Revisions({ plugin, skill }: { plugin: string; skill: string }) {
 }
 
 function SkillRow({ skill }: { skill: AuthoredSkillSummary }) {
+  const { t } = useTranslation();
   const [showHistory, setShowHistory] = useState(false);
   const remove = useRemoveSkill();
 
@@ -83,7 +86,7 @@ function SkillRow({ skill }: { skill: AuthoredSkillSummary }) {
         <button
           type="button"
           className="text-faint hover:text-dim"
-          aria-label={`History of ${skill.name}`}
+          aria-label={t("authored.historyOf", { name: skill.name })}
           aria-expanded={showHistory}
           onClick={() => setShowHistory((v) => !v)}
         >
@@ -96,7 +99,7 @@ function SkillRow({ skill }: { skill: AuthoredSkillSummary }) {
           onClick={async () => {
             if (
               await askConfirm(
-                `Delete skill "${skill.name}"? Its history is kept, so it can be restored.`,
+                t("authored.confirmDeleteSkill", { name: skill.name }),
               )
             ) {
               remove.mutate({ plugin: skill.plugin, skill: skill.name });
@@ -112,6 +115,7 @@ function SkillRow({ skill }: { skill: AuthoredSkillSummary }) {
 }
 
 function PluginRow({ plugin }: { plugin: AuthoredPluginView }) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const remove = useRemoveAuthoredPlugin();
 
@@ -153,11 +157,11 @@ function PluginRow({ plugin }: { plugin: AuthoredPluginView }) {
         <button
           type="button"
           className="text-faint hover:text-[var(--danger)]"
-          aria-label={`Delete ${plugin.name}`}
+          aria-label={t("common.deleteNamed", { name: plugin.name })}
           onClick={async () => {
             if (
               await askConfirm(
-                `Delete "${plugin.name}"? This removes every skill in it and its entry in the bundle library.`,
+                t("authored.confirmDeletePlugin", { name: plugin.name }),
               )
             ) {
               remove.mutate(plugin.name);
@@ -193,17 +197,16 @@ export function AuthoredSection({
 }) {
   const [name, setName] = useState("");
   const create = useCreateAuthoredPlugin();
+  const { t } = useTranslation();
 
   return (
     <section className="section" data-testid="authored-section">
       <div className="mb-3 flex items-start gap-2">
         <PenLine size={15} className="mt-0.5 text-faint" />
         <div>
-          <h2 className="section-title">Authored here</h2>
+          <h2 className="section-title">{t("authored.title")}</h2>
           <p className="mt-0.5 text-xs text-faint">
-            Plugins whose skills live in this server's database. Agents write
-            them through the authoring tools; you can read, roll back and remove
-            them here.
+{t("authored.desc")}
           </p>
         </div>
       </div>
@@ -212,10 +215,10 @@ export function AuthoredSection({
           getting a plugin onto this page read as the same kind of act. */}
       <div className="mb-3">
         <TextField
-          label="New plugin"
+          label={t("authored.newPlugin")}
           value={name}
           onChange={setName}
-          placeholder="field-notes"
+          placeholder={t("authored.newPluginPlaceholder")}
           testId="authored-plugin-name"
         />
         {create.isError && (
@@ -239,7 +242,7 @@ export function AuthoredSection({
             ) : (
               <Plus size={15} />
             )}
-            Create
+            {t("common.create")}
           </button>
         </div>
       </div>
@@ -247,8 +250,7 @@ export function AuthoredSection({
       <div className="space-y-2.5">
         {plugins.length === 0 && (
           <p className="screen px-3 py-4 text-center text-sm text-faint">
-            Nothing authored yet. A session with the authoring tools selected
-            can write skills here.
+{t("authored.empty")}
           </p>
         )}
         {plugins.map((p) => (

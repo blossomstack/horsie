@@ -4,6 +4,7 @@ import { getCurrentProject } from "../api/client";
 import { useProjects } from "../hooks/useProjects";
 import { projectHome } from "../pages/ProjectScope";
 import { PopoverMenu } from "./PopoverMenu";
+import { useTranslation } from "react-i18next";
 
 /**
  * Which project the rail below belongs to, and how to leave it.
@@ -21,6 +22,7 @@ import { PopoverMenu } from "./PopoverMenu";
  * at.
  */
 export function ProjectSwitcher() {
+  const { t } = useTranslation();
   const current = getCurrentProject();
   const { data } = useProjects();
   const here = data?.find((p) => p.id === current);
@@ -60,7 +62,7 @@ export function ProjectSwitcher() {
               onClick={close}
             >
               <Plus size={14} aria-hidden className="shrink-0 text-faint" />
-              <span>New project…</span>
+              <span>{t("projects.newProject")}</span>
             </Link>
           </div>
         )}

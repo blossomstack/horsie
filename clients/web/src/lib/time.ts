@@ -1,3 +1,6 @@
+import { i18n } from "../i18n";
+import { localeTag } from "./format";
+
 /** Formatting for the server-stamped timestamps that ride on every message
  * (`createdAtMs` / `startedAtMs`) and on tool-result events (`atMs`). */
 
@@ -11,15 +14,16 @@ export function formatDuration(ms: number): string | null {
   const hours = Math.floor(total / 3600);
   const minutes = Math.floor((total % 3600) / 60);
   const seconds = total % 60;
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  if (minutes > 0) return `${minutes}m ${seconds}s`;
-  return `${seconds}s`;
+  if (hours > 0) return i18n.t("time.hoursMinutesShort", { hours, minutes });
+  if (minutes > 0)
+    return i18n.t("time.minutesSecondsShort", { minutes, seconds });
+  return i18n.t("time.secondsShort", { value: seconds });
 }
 
 /** Clock time for a turn boundary — "14:32". Same-day assumption is
  * deliberate: the date belongs to the session, not to every bubble in it. */
 export function formatTime(atMs: number): string {
-  return new Date(atMs).toLocaleTimeString(undefined, {
+  return new Date(atMs).toLocaleTimeString(localeTag(), {
     hour: "2-digit",
     minute: "2-digit",
   });

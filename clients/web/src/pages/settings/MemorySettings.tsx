@@ -5,6 +5,7 @@ import type { MemorySpaceView, MemoryView } from "../../api/types";
 import { cn } from "../../lib/cn";
 import { ReadError } from "../../components/ReadError";
 import { SettingsPage } from "./fields";
+import { i18n } from "../../i18n";
 import { askConfirm } from "../../lib/confirm";
 import {
   useCreateMemory,
@@ -15,6 +16,7 @@ import {
   useMemorySpaces,
   useUpdateMemory,
 } from "../../hooks/useMemory";
+import { useTranslation } from "react-i18next";
 
 /**
  * Manage the agent's long-term memories: spaces on the left, the selected
@@ -22,6 +24,7 @@ import {
  * tools; this page is where a human curates what it wrote.
  */
 export function MemorySettings() {
+  const { t } = useTranslation();
   const spaces = useMemorySpaces();
   const [picked, setPicked] = useState<string | null>(null);
   // Fall back to the first space until the user picks one, so the page is
@@ -50,26 +53,26 @@ export function MemorySettings() {
 
   return (
     <SettingsPage
-        title="Memory"
-        desc="Durable notes the agent saves and reads back — grouped into spaces you pick per session."
+        title={t("settingsNav.memory")}
+        desc={t("memoryPage.desc")}
     >
           <section className="section">
             <SectionHeading
               icon={<FolderPlus size={15} className="mt-0.5 text-faint" />}
-              title="Memory spaces"
-              subtitle="A space is a namespace of memories. Sessions choose which ones they can read and write."
+              title={t("memoryPage.spaces")}
+              subtitle={t("memoryPage.spacesDesc")}
             />
 
             <div className="grid grid-cols-[1fr_auto] gap-3">
               <label className="block">
                 <span className="mb-1 block text-[0.6875rem] font-semibold text-dim">
-                  New space
+                  {t("memoryPage.newSpace")}
                 </span>
                 <input
                   className="field font-mono"
                   value={newSpace}
                   onChange={(e) => setNewSpace(e.target.value)}
-                  placeholder="ops"
+                  placeholder={t("memoryPage.newSpacePlaceholder")}
                 />
               </label>
               <div className="flex items-end">
@@ -83,30 +86,30 @@ export function MemorySettings() {
                   ) : (
                     <Plus size={15} />
                   )}
-                  Create
+                  {t("common.create")}
                 </button>
               </div>
             </div>
 
             <ErrorNote
               error={createSpace.error}
-              fallback="Failed to create space."
+              fallback={t("memoryPage.createSpaceFailed")}
             />
 
             <div className="mt-3 space-y-2.5">
               {spaces.isLoading && (
-                <p className="py-8 text-center text-sm text-faint">Loading…</p>
+                <p className="py-8 text-center text-sm text-faint">{t("common.loading")}</p>
               )}
               {spaces.isError && (
                 <ReadError
-                  what="memory spaces"
+                  what={t("channel.memorySpaces")}
                   error={spaces.error}
                   testId="memory-spaces-error"
                 />
               )}
               {spaces.data?.length === 0 && (
                 <p className="screen px-3 py-4 text-center text-sm text-faint">
-                  No memory spaces yet. Create one above.
+{t("memoryPage.noSpaces")}
                 </p>
               )}
               {spaces.data?.map((s) => (
@@ -123,13 +126,17 @@ export function MemorySettings() {
           <section className="section">
             <SectionHeading
               icon={<Brain size={15} className="mt-0.5 text-faint" />}
-              title={active ? `Memories in ${active}` : "Memories"}
-              subtitle="The agent writes these itself. Edit or delete anything that is wrong or no longer useful."
+              title={
+                active
+                  ? t("memoryPage.memoriesIn", { space: active })
+                  : t("memoryPage.memories")
+              }
+              subtitle={t("memoryPage.memoriesDesc")}
             />
 
             {!active ? (
               <p className="screen px-3 py-4 text-center text-sm text-faint">
-                Create a memory space first.
+{t("memoryPage.createSpaceFirst")}
               </p>
             ) : (
               <>
@@ -148,26 +155,26 @@ export function MemorySettings() {
                     onClick={() => setAddingMemory(true)}
                     data-testid="add-memory"
                   >
-                    <Plus size={13} aria-hidden /> Add memory
+                    <Plus size={13} aria-hidden /> {t("memoryPage.addMemory")}
                   </button>
                 )}
 
                 <div className="mt-3 space-y-2.5">
                   {memories.isLoading && (
                     <p className="py-8 text-center text-sm text-faint">
-                      Loading…
+                      {t("common.loading")}
                     </p>
                   )}
                   {memories.isError && (
                     <ReadError
-                      what="memories"
+                      what={t("memoryPage.memoriesWhat")}
                       error={memories.error}
                       testId="memories-error"
                     />
                   )}
                   {memories.data?.length === 0 && (
                     <p className="screen px-3 py-4 text-center text-sm text-faint">
-                      No memories in this space yet.
+{t("memoryPage.noMemories")}
                     </p>
                   )}
                   {memories.data?.map((m) => (
@@ -191,15 +198,18 @@ function SpaceRow({
   onSelect: () => void;
 }) {
   const remove = useDeleteSpace();
+  const { t } = useTranslation();
 
   const confirmDelete = async () => {
     const tail =
       space.memoryCount === 0
-        ? "It holds no memories."
-        : `This also deletes its ${space.memoryCount} ${
-            space.memoryCount === 1 ? "memory" : "memories"
-          }.`;
-    if (await askConfirm(`Delete memory space "${space.name}"? ${tail}`))
+        ? i18n.t("memoryPage.holdsNoMemories")
+        : i18n.t("memoryPage.alsoDeletes", { count: space.memoryCount });
+    if (
+      await askConfirm(
+        i18n.t("memoryPage.confirmDeleteSpace", { name: space.name, tail }),
+      )
+    )
       remove.mutate(space.name);
   };
 
@@ -226,14 +236,14 @@ function SpaceRow({
           <p className="mt-0.5 text-xs text-dim">{space.description}</p>
         )}
         <p className="mt-0.5 text-[0.6875rem] text-faint">
-          {space.memoryCount} {space.memoryCount === 1 ? "memory" : "memories"}
+          {t("memoryPage.memoryCount", { count: space.memoryCount })}
         </p>
       </button>
       <button
         className="key-icon shrink-0 text-faint hover:text-red-ink"
         onClick={confirmDelete}
         disabled={remove.isPending}
-        aria-label="Delete space"
+        aria-label={t("memoryPage.deleteSpace")}
       >
         <Trash2 size={15} />
       </button>
@@ -252,6 +262,7 @@ function NewMemoryForm({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [content, setContent] = useState("");
+  const { t } = useTranslation();
 
   const submit = async () => {
     if (!name.trim() || !description.trim() || !content.trim()) return;
@@ -279,7 +290,7 @@ function NewMemoryForm({
       <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-3">
         <label className="block">
           <span className="mb-1 block text-[0.6875rem] font-semibold text-dim">
-            Name
+            {t("memoryPage.name")}
           </span>
           <input
             className="field font-mono"
@@ -288,7 +299,7 @@ function NewMemoryForm({
             // — otherwise the click reveals fields and leaves the caret behind.
             autoFocus
             onChange={(e) => setName(e.target.value)}
-            placeholder="deploy-order"
+            placeholder={t("memoryPage.namePlaceholder")}
           />
         </label>
         <label className="block">
@@ -299,23 +310,23 @@ function NewMemoryForm({
             className="field"
             value={description}
             onChange={(e) => setDescription(e.target.value)}
-            placeholder="velos must be up before the server"
+            placeholder={t("memoryPage.descriptionPlaceholder")}
           />
         </label>
       </div>
       <label className="mt-3 block">
         <span className="mb-1 block text-[0.6875rem] font-semibold text-dim">
-          Content
+          {t("memoryPage.content")}
         </span>
         <textarea
           className="field min-h-24 font-mono text-xs"
           value={content}
           onChange={(e) => setContent(e.target.value)}
-          placeholder="Markdown. Reference another memory as [[space/name]]."
+          placeholder={t("memoryPage.contentPlaceholder")}
         />
       </label>
 
-      <ErrorNote error={create.error} fallback="Failed to save memory." />
+      <ErrorNote error={create.error} fallback={t("memoryPage.saveMemoryFailed")} />
 
       <div className="mt-3 flex justify-end gap-2">
         <button
@@ -323,7 +334,7 @@ function NewMemoryForm({
           onClick={onDone}
           data-testid="cancel-memory"
         >
-          Cancel
+          {t("common.cancel")}
         </button>
         <button
           className="key key-go"
@@ -340,7 +351,7 @@ function NewMemoryForm({
           ) : (
             <Plus size={15} />
           )}
-          Save memory
+          {t("memoryPage.saveMemory")}
         </button>
       </div>
     </div>
@@ -353,6 +364,7 @@ function MemoryRow({ memory }: { memory: MemoryView }) {
   const [open, setOpen] = useState(false);
   const [description, setDescription] = useState(memory.description);
   const [content, setContent] = useState(memory.content);
+  const { t } = useTranslation();
 
   const dirty =
     description !== memory.description || content !== memory.content;
@@ -388,11 +400,17 @@ function MemoryRow({ memory }: { memory: MemoryView }) {
         <button
           className="key-icon shrink-0 text-faint hover:text-red-ink"
           onClick={async () => {
-            if (await askConfirm(`Delete memory "${memory.space}/${memory.name}"?`))
+            if (
+              await askConfirm(
+                t("memoryPage.confirmDeleteMemory", {
+                  name: `${memory.space}/${memory.name}`,
+                }),
+              )
+            )
               remove.mutate(memory.id);
           }}
           disabled={remove.isPending}
-          aria-label="Delete memory"
+          aria-label={t("memoryPage.deleteMemory")}
         >
           <Trash2 size={15} />
         </button>
@@ -402,7 +420,7 @@ function MemoryRow({ memory }: { memory: MemoryView }) {
         <div className="mt-3 pt-3">
           <label className="block">
             <span className="mb-1 block text-[0.6875rem] font-semibold text-dim">
-              Description
+              {t("memoryPage.description")}
             </span>
             <input
               className="field"
@@ -412,7 +430,7 @@ function MemoryRow({ memory }: { memory: MemoryView }) {
           </label>
           <label className="mt-3 block">
             <span className="mb-1 block text-[0.6875rem] font-semibold text-dim">
-              Content
+              {t("memoryPage.content")}
             </span>
             <textarea
               className="field min-h-32 font-mono text-xs"
@@ -421,7 +439,10 @@ function MemoryRow({ memory }: { memory: MemoryView }) {
             />
           </label>
 
-          <ErrorNote error={update.error} fallback="Failed to update memory." />
+          <ErrorNote
+            error={update.error}
+            fallback={t("memoryPage.updateMemoryFailed")}
+          />
 
           <div className="mt-3 flex justify-end">
             <button
@@ -440,7 +461,7 @@ function MemoryRow({ memory }: { memory: MemoryView }) {
               {update.isPending && (
                 <Loader2 size={15} className="animate-spin" />
               )}
-              Save changes
+              {t("memoryPage.saveChanges")}
             </button>
           </div>
         </div>

@@ -1,5 +1,6 @@
 import type { CatalogEntryView } from "../api/types";
 import { cn } from "../lib/cn";
+import { useTranslation } from "react-i18next";
 
 /**
  * The `/` and `@` typeahead, filtered to what the user has typed so far.
@@ -18,12 +19,13 @@ export function EntryMenu({
   activeIndex: number;
   onPick: (entry: CatalogEntryView) => void;
 }) {
+  const { t } = useTranslation();
   if (entries.length === 0) return null;
   return (
     <ul
       className="panel absolute bottom-full left-0 right-0 z-10 mb-2 max-h-64 overflow-y-auto py-1"
       role="listbox"
-      aria-label="Commands, skills and agents"
+      aria-label={t("entryMenu.ariaLabel")}
       data-testid="entry-menu"
     >
       {entries.map((entry, i) => (

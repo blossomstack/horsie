@@ -12,8 +12,10 @@ import { TextField, SettingsPage } from "./fields";
 import { AuthoredSection } from "./skills/AuthoredSection";
 import { BundleRow } from "./skills/BundleRow";
 import { MarketplaceRow } from "./skills/MarketplaceRow";
+import { useTranslation } from "react-i18next";
 
 export function SkillsSettings() {
+  const { t } = useTranslation();
   const { data: bundles, isLoading, isError, error: bundlesError } = usePlugins();
   const {
     data: marketplaces,
@@ -56,33 +58,32 @@ export function SkillsSettings() {
 
   return (
     <SettingsPage
-        title="Skills"
-        desc="Shareable skill bundles installed from git repos — pick them per session."
+        title={t("settingsNav.skills")}
+        desc={t("skillsPage.desc")}
     >
         <section className="section">
           <div className="mb-3 flex items-start gap-2">
             <Download size={15} className="mt-0.5 text-faint" />
             <div>
-              <h2 className="section-title">Install a skill bundle</h2>
+              <h2 className="section-title">{t("skillsPage.installTitle")}</h2>
               <p className="mt-0.5 text-xs text-faint">
-                A bundle, or a marketplace of them — horsie works out which.
-                This can take a few seconds.
+{t("skillsPage.installDesc")}
               </p>
             </div>
           </div>
 
           <div className="grid grid-cols-[1fr_auto] gap-3">
             <TextField
-              label="Git URL"
+              label={t("skillsPage.gitUrl")}
               value={sourceUrl}
               onChange={setSourceUrl}
-              placeholder="https://github.com/owner/skills-bundle"
+              placeholder={t("skillsPage.gitUrlPlaceholder")}
             />
             <TextField
-              label="Ref (optional)"
+              label={t("skillsPage.ref")}
               value={sourceRef}
               onChange={setSourceRef}
-              placeholder="main"
+              placeholder={t("skillsPage.refPlaceholder")}
             />
           </div>
 
@@ -103,7 +104,7 @@ export function SkillsSettings() {
               ) : (
                 <Download size={15} />
               )}
-              Install
+              {t("skillsPage.install")}
             </button>
           </div>
         </section>
@@ -117,10 +118,9 @@ export function SkillsSettings() {
             <div className="mb-3 flex items-start gap-2">
               <Store size={15} className="mt-0.5 text-faint" />
               <div>
-                <h2 className="section-title">Marketplaces</h2>
+                <h2 className="section-title">{t("skillsPage.marketplaces")}</h2>
                 <p className="mt-0.5 text-xs text-faint">
-                  Catalogues you have added. Removing one leaves its installed
-                  bundles in place.
+{t("skillsPage.marketplacesDesc")}
                 </p>
               </div>
             </div>
@@ -128,7 +128,7 @@ export function SkillsSettings() {
             <div className="space-y-2.5">
               {marketplacesFailed && (
                 <ReadError
-                  what="marketplaces"
+                  what={t("skillsPage.marketplacesWhat")}
                   error={marketplacesError}
                   testId="marketplaces-error"
                 />
@@ -153,27 +153,27 @@ export function SkillsSettings() {
           <div className="mb-3 flex items-start gap-2">
             <Boxes size={15} className="mt-0.5 text-faint" />
             <div>
-              <h2 className="section-title">Installed bundles</h2>
+              <h2 className="section-title">{t("skillsPage.installedTitle")}</h2>
               <p className="mt-0.5 text-xs text-faint">
-                Toggle a bundle on to pre-select it for new sessions.
+{t("skillsPage.installedDesc")}
               </p>
             </div>
           </div>
 
           <div className="space-y-2.5">
             {isLoading && (
-              <p className="py-8 text-center text-sm text-faint">Loading…</p>
+              <p className="py-8 text-center text-sm text-faint">{t("common.loading")}</p>
             )}
             {isError && (
               <ReadError
-                what="skill bundles"
+                what={t("channel.skillBundles")}
                 error={bundlesError}
                 testId="bundles-error"
               />
             )}
             {bundles && bundles.length === 0 && (
               <p className="screen px-3 py-4 text-center text-sm text-faint">
-                No skill bundles installed yet.
+{t("skillsPage.empty")}
               </p>
             )}
             {bundles?.map((b) => (

@@ -2,6 +2,7 @@ import { ShieldAlert, ShieldCheck } from "lucide-react";
 import type { HookRecord } from "../api/types";
 import { cn } from "../lib/cn";
 import { hookSummary, systemMessage } from "../lib/hookSummary";
+import { useTranslation } from "react-i18next";
 
 /** A hook record with no tool call of its own — a `SessionStart` bootstrap, a
  * `Stop` that kept the turn going.
@@ -10,6 +11,7 @@ import { hookSummary, systemMessage } from "../lib/hookSummary";
  * card: this is something a plugin did *around* the session, not something
  * the agent asked for. */
 export function HookNoticeRow({ record }: { record: HookRecord }) {
+  useTranslation();
   const { text, intervened } = hookSummary(record);
   const note = systemMessage(record);
   return (

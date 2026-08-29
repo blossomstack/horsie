@@ -1,5 +1,6 @@
 import { X } from "lucide-react";
 import { useSyncExternalStore } from "react";
+import { useTranslation } from "react-i18next";
 import {
   dismissMutationError,
   snapshot,
@@ -18,6 +19,7 @@ import {
  * whatever was open when it happened.
  */
 export function MutationErrors() {
+  const { t } = useTranslation();
   const errors = useSyncExternalStore(subscribe, snapshot, snapshot);
   if (errors.length === 0) return null;
 
@@ -39,7 +41,7 @@ export function MutationErrors() {
           <div className="min-w-0 flex-1">
             {/* Never colour alone: the word says it failed even where the red
               does not read. */}
-            <h2 className="legend text-red-ink">Failed</h2>
+            <h2 className="legend text-red-ink">{t("mutationErrors.failed")}</h2>
             <p className="mt-1 text-sm leading-relaxed break-words text-red-ink">
               {e.message}
             </p>
@@ -47,7 +49,7 @@ export function MutationErrors() {
           <button
             className="key key-flat shrink-0"
             onClick={() => dismissMutationError(e.id)}
-            aria-label="Dismiss"
+            aria-label={t("common.dismiss")}
             data-testid="mutation-error-dismiss"
           >
             <X size={13} aria-hidden />

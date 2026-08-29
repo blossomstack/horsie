@@ -3,6 +3,7 @@ import { useState } from "react";
 import type { RenderedSubAgent } from "../hooks/useSessionStream";
 import { cn } from "../lib/cn";
 import { formatDuration } from "../lib/time";
+import { useTranslation } from "react-i18next";
 
 /** A finished subagent's report, in the same visual grammar as a tool call —
  * because that is what it is to the reader: a piece of machine work the agent
@@ -13,6 +14,7 @@ import { formatDuration } from "../lib/time";
  * Collapsed it is one line; expanded it shows the result the parent was handed.
  * A failure is marked, never left to look like an ordinary finish. */
 export function SubAgentCard({ result }: { result: RenderedSubAgent }) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const failed = result.status === "failed";
   const hasText = result.text.length > 0;
@@ -36,12 +38,16 @@ export function SubAgentCard({ result }: { result: RenderedSubAgent }) {
         )}
       </span>
       <span className="shrink-0 font-mono text-[0.6875rem] font-medium tracking-[0.02em] text-legend">
-        subagent
+        {t("subagent.label")}
       </span>
       <span className="min-w-0 flex-1 truncate font-mono text-[0.6875rem] text-faint">
         {result.title}
       </span>
-      {failed && <span className="legend shrink-0 !text-red-ink">Failed</span>}
+      {failed && (
+        <span className="legend shrink-0 !text-red-ink">
+          {t("common.failed")}
+        </span>
+      )}
       {duration && (
         <span className="legend shrink-0" data-testid="subagent-duration">
           {duration}

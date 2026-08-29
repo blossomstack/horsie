@@ -12,6 +12,7 @@ import { useDeleteSession } from "../hooks/useSessions";
 import { Menu, MenuItem } from "./Menu";
 import { useRenameSession } from "../hooks/useSessions";
 import { StatusDot } from "./StatusBadge";
+import { useTranslation } from "react-i18next";
 
 /** One channel strip on the rail: lamp, name, and what the channel last did. */
 export function SessionRow({
@@ -30,6 +31,7 @@ export function SessionRow({
   const navigate = useNavigate();
   const rename = useRenameSession();
   const [draft, setDraft] = useState("");
+  const { t } = useTranslation();
   const [renaming, setRenaming] = useState(false);
   // Set by Escape so the blur that may follow it stays quiet. Firefox fires
   // blur when the focused field is removed; Chrome and Safari do not, so the
@@ -81,7 +83,7 @@ export function SessionRow({
       <div className="px-0.5 py-1">
         <input
           data-testid="session-title-input"
-          aria-label="Rename session"
+          aria-label={t("sessionRow.renameSession")}
           className="field !py-1 !text-[0.8125rem]"
           defaultValue={title}
           // The whole name is selected, because a rename usually replaces it.
@@ -157,7 +159,7 @@ export function SessionRow({
           only inside the session, so a session you did not want to open was one
           you could not get rid of. */}
       <span className="absolute right-1.5 top-1.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
-        <Menu label="Session actions" testId={`session-row-menu-${s.id}`}>
+        <Menu label={t("sessionRow.actions")} testId={`session-row-menu-${s.id}`}>
           {tags.map((t) => (
             <MenuItem
               key={t}
@@ -185,9 +187,9 @@ export function SessionRow({
           <div className="px-2 py-1.5">
             <input
               data-testid="new-tag-input"
-              aria-label="New tag"
+              aria-label={t("sessionRow.newTag")}
               className="field !py-1 !text-[0.8125rem]"
-              placeholder="New tag…"
+              placeholder={t("sessionRow.newTagPlaceholder")}
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
@@ -207,14 +209,14 @@ export function SessionRow({
               setRenaming(true);
             }}
           >
-            Rename
+            {t("sessionRow.rename")}
           </MenuItem>
           <MenuItem
             danger
             testId={`delete-session-${s.id}`}
             onSelect={() => void remove()}
           >
-            Delete
+            {t("common.delete")}
           </MenuItem>
         </Menu>
       </span>

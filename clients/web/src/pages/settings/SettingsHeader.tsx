@@ -2,6 +2,7 @@ import { RotateCcw, Save } from "lucide-react";
 import { useEffect, useState } from "react";
 import { RailToggle } from "../../components/rail";
 import { useSettingsScroll } from "./scrollShadow";
+import { useTranslation } from "react-i18next";
 
 /**
  * The header bar every settings/admin page renders.
@@ -36,6 +37,7 @@ export function SettingsHeader({
   // until the next call, so read straight it would latch the lamp on forever
   // after the first write.
   const { barProps } = useSettingsScroll();
+  const { t } = useTranslation();
   const [showSaved, setShowSaved] = useState(false);
   useEffect(() => {
     if (!saved) return;
@@ -68,17 +70,17 @@ export function SettingsHeader({
             {saving ? (
               <span className="flex items-center gap-1.5 text-live-ink">
                 <span className="lamp lamp-live" aria-hidden />
-                <span className="legend text-current">Saving</span>
+                <span className="legend text-current">{t("settingsHeader.saving")}</span>
               </span>
             ) : dirty ? (
               <span className="flex items-center gap-1.5 text-live-ink">
                 <span className="lamp" aria-hidden />
-                <span className="legend text-current">Unsaved</span>
+                <span className="legend text-current">{t("settingsHeader.unsaved")}</span>
               </span>
             ) : showSaved ? (
               <span className="flex items-center gap-1.5 text-lamp-ok">
                 <span className="lamp" aria-hidden />
-                <span className="legend text-current">Saved</span>
+                <span className="legend text-current">{t("common.saved")}</span>
               </span>
             ) : null}
             {onSave && (
@@ -88,7 +90,7 @@ export function SettingsHeader({
                   onClick={onDiscard}
                   disabled={!dirty}
                 >
-                  <RotateCcw size={13} aria-hidden /> Discard
+                  <RotateCcw size={13} aria-hidden /> {t("settingsHeader.discard")}
                 </button>
                 <button
                   className="key key-go"
@@ -97,7 +99,7 @@ export function SettingsHeader({
                   data-testid="settings-save"
                 >
                   <Save size={13} aria-hidden />
-                  Save
+                  {t("common.save")}
                 </button>
               </>
             )}

@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { SessionStatusKind } from "../api/types";
 import { cn } from "../lib/cn";
 import { statusMeta, TONE_TEXT } from "../lib/status";
@@ -19,14 +20,15 @@ import { statusMeta, TONE_TEXT } from "../lib/status";
  * readout on the session header — the e2e suite's `expectStatus` reads them.
  */
 export function StatusLamp({ status }: { status: SessionStatusKind }) {
+  const { t } = useTranslation();
   const meta = statusMeta(status);
   return (
     <span
       data-testid="status-badge"
       data-status={status}
       className={cn("flex shrink-0 items-center", TONE_TEXT[meta.tone])}
-      title={`${meta.label} — ${meta.hint}`}
-      aria-label={`Status: ${meta.label}`}
+      title={t("statusBadge.title", { label: meta.label, hint: meta.hint })}
+      aria-label={t("statusBadge.ariaLabel", { label: meta.label })}
       role="img"
     >
       <StatusDot status={status} />

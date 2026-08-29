@@ -6,6 +6,7 @@ import {
   tagState,
   type TagFilter,
 } from "../lib/sessionTags";
+import { useTranslation } from "react-i18next";
 
 /** The tag chips, between the Sessions title and the list. Three states per
  * chip, because "show me web" and "hide anything done" are both filters and a
@@ -19,6 +20,7 @@ export function TagFilterPanel({
   filter: TagFilter;
   onChange: (next: TagFilter) => void;
 }) {
+  const { t } = useTranslation();
   return (
     <div
       className="flex flex-wrap items-center gap-1 px-2 pb-2"
@@ -60,7 +62,7 @@ export function TagFilterPanel({
           className="legend px-1.5 py-0.5 hover:!text-legend"
           onClick={() => onChange({ require: [], exclude: [] })}
         >
-          Clear
+          {t("tagFilter.clear")}
         </button>
       )}
     </div>
