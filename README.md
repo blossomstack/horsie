@@ -2,6 +2,8 @@
 
 **An open-source managed agent harness.**
 
+The project is under active development.
+
 📖 **[docs.horsie.dev](https://docs.horsie.dev)** — guides, operations, CLI
 reference, and how it works.
 
