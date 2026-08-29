@@ -339,6 +339,23 @@ pub enum ReadCommand {
         agent_id: Option<String>,
         reply: ReplyTo<Option<AgentDetail>>,
     },
+    /// The `git_checkout` urls one of this session's runtimes was built from.
+    ///
+    /// The authorization behind a runtime's git credential: a sandbox may mint
+    /// a token for a repository it was provisioned to clone and for nothing
+    /// else. Scoped to the *runtime* rather than to the session because a
+    /// session can own several, each with its own checkouts — answering for the
+    /// session would hand every sandbox the union of them.
+    ///
+    /// Urls rather than repository names: which of them is a GitHub repository
+    /// is the credential route's question, and nothing in a session should have
+    /// to know that a particular forge exists.
+    ///
+    /// `None` means this session has no such runtime.
+    RuntimeCheckouts {
+        runtime: RuntimeId,
+        reply: ReplyTo<Option<Vec<String>>>,
+    },
     /// Read this session's recovered state: status, usage, and its agents.
     Snapshot { reply: ReplyTo<SessionSnapshot> },
     /// Read this session's aggregated usage.

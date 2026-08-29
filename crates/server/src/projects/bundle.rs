@@ -109,6 +109,14 @@ pub struct Shared {
     /// use the internal endpoint. It is also the seam a test points somewhere
     /// harmless, since saving a Fly vendor now calls this API.
     pub fly_api_base: String,
+    /// The GitHub REST root every account's GitHub service is built against.
+    ///
+    /// Deployment-wide for the same reason as the Fly root, and injectable for
+    /// a sharper one: minting an installation token is the last step of the
+    /// runtime credential route, so a test that cannot point it at a mock can
+    /// only ever assert refusals — which is how a route that refused *every*
+    /// mint passed its whole suite.
+    pub github_api_base: String,
 }
 
 /// Everything one project owns.
@@ -223,7 +231,10 @@ async fn build_project(
 
     let github = Arc::new(crate::github::GithubService::new(
         crate::github::GithubStore::new(shared.db.clone(), project.clone()),
-        crate::github::GithubApi::new(),
+        crate::github::GithubApi::with_bases(
+            crate::github::GITHUB_WEB_BASE,
+            &shared.github_api_base,
+        ),
     ));
     let mcp = Arc::new(crate::mcp::McpService::new(
         crate::mcp::McpStore::new(shared.db.clone(), project.clone()),
@@ -564,6 +575,7 @@ mod tests {
             supervisor: SupervisorConfig::default(),
             deps: None,
             fly_api_base: crate::testing::UNREACHABLE_FLY_API.to_string(),
+            github_api_base: crate::testing::UNREACHABLE_GITHUB_API.to_string(),
         })));
         register_session_shards(&users).expect("a fresh system has no shard types yet");
         users

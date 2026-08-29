@@ -28,9 +28,16 @@ impl Default for GithubApi {
     }
 }
 
+/// Where the OAuth dance happens. Not injected: it is the address a *browser*
+/// is sent to, so a test pointing it elsewhere would be describing a redirect
+/// nobody follows.
+pub const GITHUB_WEB_BASE: &str = "https://github.com";
+/// Where tokens are minted and repositories listed.
+pub const GITHUB_API_BASE: &str = "https://api.github.com";
+
 impl GithubApi {
     pub fn new() -> Self {
-        Self::with_bases("https://github.com", "https://api.github.com")
+        Self::with_bases(GITHUB_WEB_BASE, GITHUB_API_BASE)
     }
 
     /// Inject bases (tests point these at a local mock server).

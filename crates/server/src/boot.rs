@@ -187,6 +187,7 @@ pub async fn boot(opts: BootOptions) -> Result<Booted, String> {
         #[cfg(any(test, feature = "test-util"))]
         deps: None,
         fly_api_base: crate::runtime_vendor::fly_api::DEFAULT_API_BASE.to_string(),
+        github_api_base: crate::github::GITHUB_API_BASE.to_string(),
     });
     let users = Arc::new(ProjectRegistry::new(shared.clone()));
     // Once per node, and only now: a recipe resolves an account's bundle

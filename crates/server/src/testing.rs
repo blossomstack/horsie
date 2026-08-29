@@ -159,6 +159,7 @@ pub struct TestStateBuilder {
     /// What this deployment reports for [`crate::sessions::addressing::Serving`].
     /// `None` is the single-node default: never stands down, never gated.
     serving: Option<tokio::sync::watch::Sender<bool>>,
+    github_api_base: String,
 }
 
 /// A Fly API root nothing is listening on, so a save's substrate check fails
@@ -169,6 +170,11 @@ pub struct TestStateBuilder {
 /// and a suite that reached the real one would either fail on a bogus token or
 /// spend a real request per save.
 pub const UNREACHABLE_FLY_API: &str = "http://127.0.0.1:1/v1";
+
+/// A GitHub REST root nothing is listening on. The default for every test
+/// deployment, so a suite that mints a token without saying where from fails as
+/// a refused connection rather than reaching the real GitHub.
+pub const UNREACHABLE_GITHUB_API: &str = "http://127.0.0.1:1";
 
 /// A deployment rooted at `state_dir`, on a fresh database, with auth off.
 ///
@@ -182,6 +188,7 @@ pub fn state(state_dir: impl Into<PathBuf>) -> TestStateBuilder {
         mode: AuthMode::Off,
         supervisor: SupervisorConfig::default(),
         serving: None,
+        github_api_base: UNREACHABLE_GITHUB_API.to_string(),
     }
 }
 
@@ -197,6 +204,14 @@ impl TestStateBuilder {
 
     pub fn auth(mut self, mode: AuthMode) -> Self {
         self.mode = mode;
+        self
+    }
+
+    /// Mint GitHub tokens against this root instead of the real API — a mock
+    /// server the test runs, so the credential route can be driven all the way
+    /// to a token rather than only to its refusals.
+    pub fn github_api_base(mut self, base: String) -> Self {
+        self.github_api_base = base;
         self
     }
 
@@ -268,6 +283,7 @@ impl TestStateBuilder {
             supervisor: self.supervisor,
             deps: None,
             fly_api_base: UNREACHABLE_FLY_API.to_string(),
+            github_api_base: self.github_api_base.clone(),
         });
         let projects = Arc::new(ProjectRegistry::new(shared.clone()));
         register_session_shards(&projects).expect("a fresh system has no shard types yet");
@@ -361,6 +377,7 @@ impl Deployment {
             supervisor,
             deps: Some(deps),
             fly_api_base: UNREACHABLE_FLY_API.to_string(),
+            github_api_base: UNREACHABLE_GITHUB_API.to_string(),
         })));
         crate::projects::register_session_shards(&projects)
             .expect("a fresh system has no shard types yet");

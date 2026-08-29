@@ -15,6 +15,15 @@
 //! dial knows which secret to check it against. A sandbox learning its own
 //! account id is not a disclosure: it is that account's own sandbox.
 //!
+//! It names the **session** for the same reason. A runtime used to be its
+//! session — one sandbox per session, sharing the id — so anything holding a
+//! token could find the session by asking for the runtime's id. Runtimes got
+//! ids of their own when a session became able to own several of them, and
+//! nothing replaced that link: the credential route went on looking a session
+//! up by a runtime id and stopped finding one at all. Carrying it is what keeps
+//! the answer derivable from the token rather than from a registry of live
+//! runtimes, which is the property this whole scheme is built on.
+//!
 //! "Account" is whoever owns the secret, which is not always a user: a vendor
 //! process signs with a secret of its own and puts its `--name` in the field.
 //! Both are caller-chosen strings, which is why the format is parsed from the
@@ -28,13 +37,20 @@ use sha2::Sha256;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DialClaims {
     pub user_id: String,
+    /// The session that owns this runtime — who to ask about it.
+    ///
+    /// A runtime cannot answer for itself: what a sandbox may do is a property
+    /// of the session that asked for it, and the session is the only durable
+    /// holder of that. Naming it here is what lets a route resolve one from a
+    /// token alone.
+    pub session_id: String,
     pub runtime_id: String,
     /// Which provision of that runtime this token belongs to.
     ///
-    /// A runtime id is stable across re-provisions — it is the session — so it
-    /// alone cannot tell a live sandbox from one left behind by an earlier
-    /// attempt. Both would answer to the same name, and both would receive the
-    /// same tool call. This is what separates them.
+    /// A runtime id is stable across re-provisions, so it alone cannot tell a
+    /// live sandbox from one left behind by an earlier attempt. Both would
+    /// answer to the same name, and both would receive the same tool call. This
+    /// is what separates them.
     pub incarnation: String,
 }
 
@@ -61,39 +77,44 @@ fn tag(secret: &[u8], payload: &str) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
-/// `<user_id>.<runtime_id>.<incarnation>.<hex tag>`.
+/// `<user_id>.<session_id>.<runtime_id>.<incarnation>.<hex tag>`.
 #[must_use]
 pub fn mint(secret: &[u8], claims: &DialClaims) -> String {
     let payload = format!(
-        "{}.{}.{}",
-        claims.user_id, claims.runtime_id, claims.incarnation
+        "{}.{}.{}.{}",
+        claims.user_id, claims.session_id, claims.runtime_id, claims.incarnation
     );
     let tag = tag(secret, &payload);
     format!("{payload}.{tag}")
 }
 
-/// Split a token into its four parts, **from the right**.
+/// Split a token into its five parts, **from the right**.
 ///
-/// The last three fields are `.`-free by construction — a hex tag, a uuid
-/// incarnation, and a runtime id that is a session uuid — so everything before
-/// them is the account, dots and all. Splitting from the left instead made a
-/// dotted account id (a delegating front layer whose subject is an email) or a
-/// dotted vendor name (`horsie connect --name mac.local`, which mints under its
-/// own name) produce a token that refused *every* dial-back as malformed.
+/// The last four fields are `.`-free by construction — a hex tag, an
+/// incarnation, and two uuids — so everything before them is the account, dots
+/// and all. Splitting from the left instead made a dotted account id (a
+/// delegating front layer whose subject is an email) or a dotted vendor name
+/// (`horsie connect --name mac.local`, which mints under its own name) produce
+/// a token that refused *every* dial-back as malformed.
 ///
 /// Which is why the account stays the *first* field and every field added since
 /// goes on the right: the moment two trailing fields could contain a dot, this
 /// stops being able to tell them apart, and the failure is a token that
 /// verifies for the wrong runtime rather than one that is rejected.
-fn split(token: &str) -> Option<(&str, &str, &str, &str)> {
+fn split(token: &str) -> Option<(&str, &str, &str, &str, &str)> {
     let (payload, presented) = token.rsplit_once('.')?;
     let (payload, incarnation) = payload.rsplit_once('.')?;
-    let (user_id, runtime_id) = payload.rsplit_once('.')?;
-    if user_id.is_empty() || runtime_id.is_empty() || incarnation.is_empty() || presented.is_empty()
+    let (payload, runtime_id) = payload.rsplit_once('.')?;
+    let (user_id, session_id) = payload.rsplit_once('.')?;
+    if user_id.is_empty()
+        || session_id.is_empty()
+        || runtime_id.is_empty()
+        || incarnation.is_empty()
+        || presented.is_empty()
     {
         return None;
     }
-    Some((user_id, runtime_id, incarnation, presented))
+    Some((user_id, session_id, runtime_id, incarnation, presented))
 }
 
 /// The account a token claims, before anything has verified it.
@@ -104,20 +125,24 @@ fn split(token: &str) -> Option<(&str, &str, &str, &str)> {
 /// [`verify`] on exactly the dotted names this format exists to tolerate.
 #[must_use]
 pub fn claimed_account(token: &str) -> Option<&str> {
-    split(token).map(|(user_id, _, _, _)| user_id)
+    split(token).map(|(user_id, _, _, _, _)| user_id)
 }
 
 /// Verify a presented token and recover what it claims.
 pub fn verify(secret: &[u8], token: &str) -> Result<DialClaims, DialTokenError> {
-    let Some((user_id, runtime_id, incarnation, presented)) = split(token) else {
+    let Some((user_id, session_id, runtime_id, incarnation, presented)) = split(token) else {
         return Err(DialTokenError::Malformed);
     };
-    let expected = tag(secret, &format!("{user_id}.{runtime_id}.{incarnation}"));
+    let expected = tag(
+        secret,
+        &format!("{user_id}.{session_id}.{runtime_id}.{incarnation}"),
+    );
     if expected.is_empty() || !constant_time_eq(expected.as_bytes(), presented.as_bytes()) {
         return Err(DialTokenError::BadSignature);
     }
     Ok(DialClaims {
         user_id: user_id.to_string(),
+        session_id: session_id.to_string(),
         runtime_id: runtime_id.to_string(),
         incarnation: incarnation.to_string(),
     })
@@ -140,7 +165,8 @@ mod tests {
     fn claims() -> DialClaims {
         DialClaims {
             user_id: "u1".to_string(),
-            runtime_id: "s1".to_string(),
+            session_id: "sess1".to_string(),
+            runtime_id: "rt1".to_string(),
             incarnation: "i1".to_string(),
         }
     }
@@ -173,7 +199,21 @@ mod tests {
         // re-address the token, which is what the old announce-your-own-id
         // listener allowed.
         let token = mint(b"secret", &claims());
-        let forged = token.replacen("s1", "s2", 1);
+        let forged = token.replacen("rt1", "rt2", 1);
+        assert_eq!(
+            verify(b"secret", &forged),
+            Err(DialTokenError::BadSignature)
+        );
+    }
+
+    /// The session is what a route resolves a runtime's permissions through, so
+    /// a token that could be re-pointed at another session would hand one
+    /// session's sandbox the other's. It is signed for exactly the same reason
+    /// the runtime id is.
+    #[test]
+    fn a_token_for_one_session_does_not_verify_as_another() {
+        let token = mint(b"secret", &claims());
+        let forged = token.replacen("sess1", "sess2", 1);
         assert_eq!(
             verify(b"secret", &forged),
             Err(DialTokenError::BadSignature)
@@ -198,7 +238,17 @@ mod tests {
 
     #[test]
     fn a_malformed_token_is_rejected_without_panicking() {
-        for bad in ["", ".", "..", "no-dot", "a.b", "a.b.c.d", "a..c", ".b.c"] {
+        for bad in [
+            "",
+            ".",
+            "..",
+            "no-dot",
+            "a.b",
+            "a.b.c",
+            "a.b.c.d.e.f",
+            "a..c.d",
+            ".b.c.d",
+        ] {
             assert!(verify(b"secret", bad).is_err(), "{bad:?} must not verify");
         }
     }
@@ -212,7 +262,8 @@ mod tests {
         for user_id in ["mac.local", "someone@example.com", "a.b.c.d"] {
             let claims = DialClaims {
                 user_id: user_id.to_string(),
-                runtime_id: "s1".to_string(),
+                session_id: "sess1".to_string(),
+                runtime_id: "rt1".to_string(),
                 incarnation: "i1".to_string(),
             };
             let token = mint(b"secret", &claims);
@@ -223,11 +274,11 @@ mod tests {
 
     #[test]
     fn the_claimed_account_reads_the_same_field_verify_does() {
-        assert_eq!(claimed_account("u1.s1.i1.deadbeef"), Some("u1"));
+        assert_eq!(claimed_account("u1.sess1.rt1.i1.deadbeef"), Some("u1"));
         // Guards the lookup a claim feeds: an empty account must never become a
         // lookup for the empty account.
-        assert_eq!(claimed_account(".s1.i1.deadbeef"), None);
-        assert_eq!(claimed_account("s1.i1.deadbeef"), None);
+        assert_eq!(claimed_account(".sess1.rt1.i1.deadbeef"), None);
+        assert_eq!(claimed_account("sess1.rt1.i1.deadbeef"), None);
         assert_eq!(claimed_account(""), None);
     }
 

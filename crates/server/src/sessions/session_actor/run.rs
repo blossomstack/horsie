@@ -1090,8 +1090,11 @@ mod tests {
         f.deps
             .runtimes
             .create(
-                &id.to_string(),
-                "i1",
+                crate::runtime_manager::RuntimeAddress {
+                    session: &id.to_string(),
+                    runtime: &id.to_string(),
+                    incarnation: "i1",
+                },
                 "mock",
                 &spec.runtime_env().expect("the fixture has a runtime"),
             )

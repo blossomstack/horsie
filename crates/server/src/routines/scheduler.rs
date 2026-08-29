@@ -171,6 +171,7 @@ mod tests {
             supervisor: crate::sessions::supervisor::SupervisorConfig::default(),
             deps: None,
             fly_api_base: crate::testing::UNREACHABLE_FLY_API.to_string(),
+            github_api_base: crate::testing::UNREACHABLE_GITHUB_API.to_string(),
         })));
         crate::projects::register_session_shards(&users).unwrap();
         users
