@@ -76,6 +76,8 @@ export function Composer({
   canAttachDocuments = true,
   onSend,
   onStop,
+  initialArtifacts = [],
+  onArtifactsChange,
 }: {
   /** `undefined` only while the session document is still being fetched — the
    * server always knows a status. Sending stays enabled meanwhile: sending is
@@ -102,10 +104,34 @@ export function Composer({
    * composer puts it — and everything attached to it — back. */
   onSend: (text: string, artifacts: ArtifactRef[]) => void | Promise<unknown>;
   onStop: () => void;
+  /** Attachments to restore into the tray, read once on mount.
+   *
+   * Once only, deliberately: this is a starting value, not a controlled one.
+   * Re-seeding on every render would fight the user — the parent stores what
+   * the composer reports, so a controlled version would reset the tray to its
+   * own echo mid-upload. */
+  initialArtifacts?: ArtifactRef[];
+  /** Fires whenever the settled set changes, so a caller can persist it.
+   *
+   * Only the uploaded ones: an attachment still going up has no id to store,
+   * and a failed one is something the person can still see and retry. */
+  onArtifactsChange?: (artifacts: ArtifactRef[]) => void;
 }) {
   const { t } = useTranslation();
   const [text, setText] = useState("");
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  // Lazy initializer, so a restored draft seeds the tray exactly once. A
+  // restored attachment has no `previewUrl`: the bytes are on the server and
+  // the thumbnail fetches them, which is why `Attachment.previewUrl` is
+  // optional.
+  const [attachments, setAttachments] = useState<Attachment[]>(() =>
+    initialArtifacts.map((ref) => ({
+      localId: `att-${attachSeq++}`,
+      name: ref.filename ?? t("composer.pastedName"),
+      isImage: ref.kind.kind === "Image",
+      status: "ready" as const,
+      ref,
+    })),
+  );
   const [notice, setNotice] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const [active, setActive] = useState(0);
@@ -250,6 +276,22 @@ export function Composer({
   const unsettled = attachments.some((a) => a.status !== "ready");
   const ready = attachments.filter((a) => a.ref !== undefined);
   const hasContent = text.trim().length > 0 || ready.length > 0;
+
+  // Report the settled set upward so a caller can persist it.
+  //
+  // Keyed on the joined ids, not the array: `ready` is a fresh object every
+  // render, so depending on it would fire this effect forever. Both the
+  // callback and the refs are read through refs so that neither a new
+  // callback identity nor an in-flight upload re-triggers it — only the set of
+  // uploaded ids actually changing does.
+  const readyIds = ready.map((a) => a.ref!.id).join(",");
+  const readyRefs = useRef<ArtifactRef[]>([]);
+  readyRefs.current = ready.map((a) => a.ref!);
+  const notify = useRef(onArtifactsChange);
+  notify.current = onArtifactsChange;
+  useEffect(() => {
+    notify.current?.(readyRefs.current);
+  }, [readyIds]);
 
   const submit = () => {
     const trimmed = text.trim();

@@ -394,3 +394,75 @@ describe("Composer attachments", () => {
     expect(screen.getByTestId("composer-attach-notice")).toBeTruthy();
   });
 });
+
+describe("attachment persistence seam", () => {
+  it("restores a stored attachment into the tray without re-uploading", async () => {
+    const onSend = vi.fn();
+    const { input } = composer(onSend, {
+      initialArtifacts: [imageRef("sha-restored")],
+    });
+
+    // Straight to ready: the bytes are already on the server, so a restored
+    // attachment must not go back up, and must not sit in a state that blocks
+    // the send button for ever.
+    expect(screen.getByTestId("composer-attachment").dataset.status).toBe(
+      "ready",
+    );
+    expect(upload).not.toHaveBeenCalled();
+
+    fireEvent.change(input, { target: { value: "still here" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    expect(onSend).toHaveBeenCalledWith("still here", [
+      imageRef("sha-restored"),
+    ]);
+  });
+
+  it("reports an attachment upward once it has uploaded", async () => {
+    const onArtifactsChange = vi.fn();
+    const { input } = composer(vi.fn(), { onArtifactsChange });
+
+    pasteFiles(input, [png()]);
+
+    await waitFor(() =>
+      expect(onArtifactsChange).toHaveBeenLastCalledWith([imageRef()]),
+    );
+  });
+
+  it("reports the empty set after a send, so a reload does not resurrect it", async () => {
+    const onArtifactsChange = vi.fn();
+    const { input } = composer(vi.fn(), { onArtifactsChange });
+
+    pasteFiles(input, [png()]);
+    await waitFor(() =>
+      expect(onArtifactsChange).toHaveBeenLastCalledWith([imageRef()]),
+    );
+
+    fireEvent.change(input, { target: { value: "go" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+
+    await waitFor(() => expect(onArtifactsChange).toHaveBeenLastCalledWith([]));
+  });
+
+  it("does not report an attachment that is still uploading", async () => {
+    // A ref stored mid-upload would name bytes that may never exist.
+    let release: (ref: ArtifactRef) => void = () => {};
+    upload.mockImplementationOnce(
+      () => new Promise<ArtifactRef>((resolve) => (release = resolve)),
+    );
+    const onArtifactsChange = vi.fn();
+    const { input } = composer(vi.fn(), { onArtifactsChange });
+
+    pasteFiles(input, [png()]);
+    await waitFor(() =>
+      expect(screen.getByTestId("composer-attachment").dataset.status).toBe(
+        "uploading",
+      ),
+    );
+    expect(onArtifactsChange).not.toHaveBeenCalledWith([imageRef()]);
+
+    release(imageRef());
+    await waitFor(() =>
+      expect(onArtifactsChange).toHaveBeenLastCalledWith([imageRef()]),
+    );
+  });
+});

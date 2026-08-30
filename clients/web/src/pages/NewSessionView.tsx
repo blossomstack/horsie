@@ -159,6 +159,8 @@ export function NewSessionView() {
           }
           onSend={handleSend}
           onStop={() => {}}
+          initialArtifacts={draft.artifacts}
+          onArtifactsChange={draft.setArtifacts}
         />
       </div>
     </div>

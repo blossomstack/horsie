@@ -122,6 +122,11 @@ export interface SessionDraft
    * attached to it; there is no create-only call, and no second call to
    * attach to afterwards. */
   buildRequest: (message: string, artifacts: ArtifactRef[]) => CreateSessionRequest;
+  /** Attachments carried over from a previous visit, for the composer to
+   * restore. Refs only — the bytes are already on the server. */
+  artifacts: ArtifactRef[];
+  /** Remember what is currently attached, so a reload does not lose it. */
+  setArtifacts: (artifacts: ArtifactRef[]) => void;
   /** Request for an invocation configured by a predefined agent. */
   buildAgentRequest: (message: string) => AgentInvokeRequest;
   /** The same channels as a workflow run. Only meaningful when `workflow` is set. */
@@ -293,6 +298,12 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
   const environmentSpec = (): EnvironmentSpec =>
     toEnvironmentSpec(environment, provisions);
 
+  // Stored beside the text rather than in component state: a reload that keeps
+  // what you typed and drops what you attached is the more annoying half of
+  // losing both.
+  const setArtifacts = (artifacts: ArtifactRef[]) =>
+    setDraft({ ...draft, artifacts });
+
   const buildRequest = (
     message: string,
     artifacts: ArtifactRef[],
@@ -378,6 +389,8 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
     githubConnected,
     canSend: blockedReason === null,
     blockedReason,
+    artifacts: draft.artifacts,
+    setArtifacts,
     buildRequest,
     buildAgentRequest,
     buildRunRequest,
