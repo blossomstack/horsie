@@ -26,6 +26,7 @@ vi.mock("../api/client", () => ({
       remove: vi.fn(),
       deleteAgent: vi.fn(),
     },
+    inbox: { list: vi.fn() },
     // The rail's switcher reads both of these. A project is what the rail
     // below belongs to, so a Sidebar rendered without one is not a Sidebar.
     projects: { list: vi.fn().mockResolvedValue([]) },
@@ -260,6 +261,46 @@ describe("Sidebar sessions", () => {
       expect(screen.queryAllByTestId("session-row")).toHaveLength(0),
     );
     expect(screen.getByTestId("no-text-matches")).toBeTruthy();
+  });
+
+  it("shows no inbox badge when there is nothing in it", async () => {
+    vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [] });
+    vi.mocked(api.inbox.list).mockResolvedValue({
+      messages: [],
+      unread: 0,
+      openAsks: 0,
+    });
+    renderSidebar();
+    await screen.findByTestId("inbox-link");
+    await waitFor(() => expect(api.inbox.list).toHaveBeenCalled());
+    expect(screen.queryByTestId("inbox-badge")).toBeNull();
+  });
+
+  /* The two numbers do not mean the same thing: an unread notice costs
+     nothing, an open ask is an agent that has stopped. The badge has to be
+     able to say the second one. */
+  it("counts unread quietly, and an agent waiting on an answer loudly", async () => {
+    vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [] });
+    vi.mocked(api.inbox.list).mockResolvedValue({
+      messages: [],
+      unread: 5,
+      openAsks: 0,
+    });
+    renderSidebar();
+    const quiet = await screen.findByTestId("inbox-badge");
+    expect(quiet.textContent).toBe("5");
+    const quietClass = quiet.className;
+
+    cleanup();
+    vi.mocked(api.inbox.list).mockResolvedValue({
+      messages: [],
+      unread: 5,
+      openAsks: 2,
+    });
+    renderSidebar();
+    const loud = await screen.findByTestId("inbox-badge");
+    expect(loud.textContent).toBe("2");
+    expect(loud.className).not.toBe(quietClass);
   });
 
   it("sends the nameplate home", async () => {

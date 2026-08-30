@@ -135,6 +135,13 @@ const SESSION: &[Row] = &[
         "ask_user",
         "Put a question to the person and wait for an answer.",
     ),
+    // Together with `ask_user`, because they are the two halves of talking to
+    // the person and differ only in whether the agent stops to hear back. An
+    // account that wants neither turns off one group rather than hunting two.
+    write(
+        crate::sessions::notify_tool::NOTIFY_USER_TOOL,
+        "Put a message in the person's inbox without stopping.",
+    ),
 ];
 
 /// Authoring is authority, so this group is out of the default set: a skill

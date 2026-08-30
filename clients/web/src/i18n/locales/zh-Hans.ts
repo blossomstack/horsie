@@ -132,6 +132,7 @@ const zhHans: typeof en = {
   },
 
   nav: {
+    inbox: "收件箱",
     agents: "智能体",
     environments: "环境",
     routines: "例行任务",
@@ -257,6 +258,11 @@ const zhHans: typeof en = {
 
   askUser: {
     notAnswered: "未作回答 —— {{answer}}",
+    orOwnWords: "也可以用自己的话回答……",
+    yourAnswer: "你的回答……",
+    sendAnswer: "发送回答",
+    sendAllAnswers: "发送全部回答",
+    oneOfMany: "{{total}} 个问题之一 —— 它们会一起发送。",
   },
 
   tagFilter: {
@@ -644,6 +650,41 @@ const zhHans: typeof en = {
     rosterTitle: "工作流清单",
     rosterBlurb:
       "工作流让多个智能体依次运行，每一个都决定下一个去哪里。所有步骤共享一个工作区，因此前一个写下的内容后一个就能读到。运行记录会与你的会话一同出现在侧栏。按<key>新建工作流</key>定义一个。",
+  },
+
+  inbox: {
+    title: "收件箱",
+    badgeLabel: "{{unread}} 条未读，{{openAsks}} 个在等回答",
+    filterAll: "全部",
+    filterUnread: "未读",
+    filterOpen: "待回答",
+    empty:
+      "这里还什么都没有。智能体有话要说、或者卡在一个问题上时，会写到这个收件箱。",
+    noneInView: "当前视图下没有内容。",
+    kindNotice: "通知",
+    kindAsk: "问题",
+    unread: "未读",
+    waiting: "等你回答",
+    openSession: "打开会话",
+    pickOne: "选一条消息来阅读。",
+    select: "选择“{{title}}”",
+    selectAll: "选中全部消息",
+    deleteSelected_one: "删除 {{count}} 条消息",
+    deleteSelected_other: "删除 {{count}} 条消息",
+    confirmDelete_one: "删除这条消息？",
+    confirmDeleteOnlyAsk:
+      "删除这个问题？智能体仍在等待它。删掉它就等于拒绝回答：该智能体会被告知没人会回答，然后在没有答案的情况下继续。",
+    confirmDelete_other: "删除这 {{count}} 条消息？",
+    declineWarning_one:
+      "其中 {{count}} 条是某个智能体仍在等待的问题。删掉它就等于拒绝回答：该智能体会被告知没人会回答，然后在没有答案的情况下继续。",
+    declineWarning_other:
+      "其中 {{count}} 条是智能体仍在等待的问题。删掉它们就等于拒绝回答：每个智能体都会被告知没人会回答，然后在没有答案的情况下继续。",
+    answered: "你已经回答过了。",
+    declined:
+      "你拒绝了这个问题。智能体被告知没人会回答，已经在没有答案的情况下继续了。",
+    closed: "从未作答 —— 会话里后来的事情已经越过了它。",
+    replyPlaceholder: "回复这个智能体……",
+    send: "发送",
   },
 
   settingsNav: {

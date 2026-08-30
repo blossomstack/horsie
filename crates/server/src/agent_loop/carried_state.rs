@@ -310,6 +310,8 @@ mod tests {
         state.asks.push(crate::agent_loop::AskedQuestion {
             tool_call_id: Some("tc-42".into()),
             question: "Which database should this point at?".into(),
+            choices: Vec::new(),
+            multiple: false,
         });
 
         let rendered = render_carried_state(&state);

@@ -1124,6 +1124,17 @@ impl ContextProvider for SessionContextProvider {
             | SessionAgentKind::SubSession(id)
             | SessionAgentKind::Sub(id) => id,
         };
+        // The same agent id an inbox row has to be an *address* in: `?aid=` on
+        // every agent-scoped route spells the main agent `main`, not the
+        // session's uuid, so a row carrying the uuid would open a page that
+        // does not exist. Distinct from `caller` above, which attributes a
+        // spawn and for which the session's own id is right.
+        let agent_address = match self.kind {
+            SessionAgentKind::Main => crate::sessions::session_actor::MAIN_AGENT_ID.to_string(),
+            SessionAgentKind::Step(id)
+            | SessionAgentKind::SubSession(id)
+            | SessionAgentKind::Sub(id) => id.to_string(),
+        };
         // A zero cap disables subagents outright: no tools advertised, so the
         // model never meets a tool that only ever rejects.
         let with_spawn: Arc<dyn Toolbox> = if settings.max_subagents() == 0 {
@@ -1191,6 +1202,25 @@ impl ContextProvider for SessionContextProvider {
             | SessionAgentKind::SubSession(_)
             | SessionAgentKind::Step(_)
             | SessionAgentKind::Sub(_) => with_spawn,
+        };
+        // Every kind of agent may put a message in the person's inbox — main,
+        // sub sessions, steps, subagents, and unattended runs alike — so this
+        // wraps before the match below rather than inside one of its arms. It
+        // is the one difference from `ask_user`: a notice waits for nobody, so
+        // an overnight routine leaving one is the case that most justifies
+        // there being an inbox, where a question nobody is there to answer is
+        // exactly what an unattended session must not be offered.
+        let with_spawn: Arc<dyn Toolbox> = match &self.services {
+            Some(services) => Arc::new(crate::sessions::notify_tool::NotifyUserToolbox::new(
+                with_spawn,
+                Arc::clone(&services.user_inbox),
+                self.session_id.to_string(),
+                agent_address,
+            )),
+            // No services means no store to write to, which is the shape of a
+            // unit test rather than of a deployment. Offering a tool that could
+            // only ever fail would be worse than not offering it.
+            None => with_spawn,
         };
         let toolbox: Arc<dyn Toolbox> = match self.kind {
             // An unattended session skips the ask layer entirely rather than

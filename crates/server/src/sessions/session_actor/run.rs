@@ -1036,6 +1036,86 @@ mod tests {
         );
     }
 
+    /// A step's question reaches the inbox too, and settles when the step is
+    /// answered.
+    ///
+    /// A run has no main agent — it *is* its steps — so a step is a different
+    /// agent kind, addressed by uuid rather than by `main`, and its park is
+    /// recorded against the run rather than against a session turn. Everything
+    /// the projection does is per-agent, so a version that only ever worked for
+    /// a session's main agent would pass every test in `turns` and leave every
+    /// workflow run's question invisible.
+    #[tokio::test]
+    async fn a_parked_step_reaches_the_inbox_and_settles_when_answered() {
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        let provider = MockProvider::scripted(
+            Script::of([
+                Ok(asks("p0 or p2?")),
+                Ok(concludes(serde_json::json!({"outcome": "p0"}))),
+            ])
+            .then_repeating_with(|| Ok(concludes(serde_json::json!({"description": "fixed"})))),
+        );
+        let (f, session, id, journal) = spawn_run_with_provider(provider).await;
+        let inbox = f.node.services().await.user_inbox.clone();
+        let poll = |why: &'static str, pred: fn(&crate::user_inbox::InboxRow) -> bool| {
+            let inbox = inbox.clone();
+            async move {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    let page = inbox
+                        .list(&crate::user_inbox::InboxFilter::default())
+                        .await
+                        .unwrap();
+                    if let Some(row) = page.messages.first()
+                        && pred(row)
+                    {
+                        return row.clone();
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "timed out waiting for {why}; inbox held {:?}",
+                        page.messages
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            }
+        };
+
+        let parked = wait_for_run(&journal, id, |r| {
+            r.status == crate::sessions::workflow::WorkflowRunStatus::AwaitingInput
+        })
+        .await;
+        let step_agent = parked
+            .current_agent()
+            .expect("a step in flight has an agent");
+
+        let row = poll("the step's question to reach the inbox", |r| r.is_open()).await;
+        assert_eq!(row.body, "p0 or p2?");
+        assert_eq!(
+            row.agent_id,
+            step_agent.to_string(),
+            "a step is addressed by its own uuid, never as the session's main agent"
+        );
+
+        session
+            .ask(|reply| {
+                SessionCommand::Turn(TurnCommand::Answer {
+                    agent_id: None,
+                    answers: vec![answer(ASK_CALL_ID, "p0")],
+                    reply,
+                })
+            })
+            .await
+            .unwrap()
+            .expect("the parked step is answerable");
+
+        let settled = poll("the row to settle once the step resumes", |r| !r.is_open()).await;
+        assert!(
+            !settled.is_open(),
+            "the run carried on, so nothing is waiting on this any more"
+        );
+    }
+
     /// Interrupting a run suspends it. Cancelling the agent was never enough:
     /// the step's entry stayed `Running`, so `current()` never cleared and the
     /// driver started nothing ever again — the run wedged while its page read

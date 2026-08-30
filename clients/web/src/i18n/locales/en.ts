@@ -133,6 +133,7 @@ const en = {
   },
 
   nav: {
+    inbox: "Inbox",
     agents: "Agents",
     environments: "Environments",
     routines: "Routines",
@@ -264,6 +265,12 @@ const en = {
 
   askUser: {
     notAnswered: "Not answered \u2014 {{answer}}",
+    orOwnWords: "Or answer in your own words\u2026",
+    yourAnswer: "Your answer\u2026",
+    sendAnswer: "Send answer",
+    sendAllAnswers: "Send all answers",
+    oneOfMany:
+      "One of {{total}} questions \u2014 all of them are sent together.",
   },
 
   tagFilter: {
@@ -657,6 +664,43 @@ const en = {
     rosterTitle: "Workflow roster",
     rosterBlurb:
       "A workflow runs several agents in order, each one deciding where the next goes. Every step shares one workspace, so what one writes the next one reads. Runs appear in the rail alongside your sessions. Press <key>New workflow</key> to define one.",
+  },
+
+  inbox: {
+    title: "Inbox",
+    badgeLabel: "{{unread}} unread, {{openAsks}} waiting on an answer",
+    filterAll: "All",
+    filterUnread: "Unread",
+    filterOpen: "Needs answer",
+    empty:
+      "Nothing here. Agents write to this inbox when they have something to tell you, or a question they cannot get past.",
+    noneInView: "Nothing in this view.",
+    kindNotice: "Notice",
+    kindAsk: "Question",
+    unread: "Unread",
+    waiting: "Waiting on you",
+    openSession: "Open session",
+    pickOne: "Pick a message to read it.",
+    select: "Select \u201c{{title}}\u201d",
+    selectAll: "Select every message",
+    deleteSelected_one: "Delete {{count}} message",
+    deleteSelected_other: "Delete {{count}} messages",
+    confirmDelete_one: "Delete this message?",
+    // The whole selection is one question, so there is no "of them" to speak of
+    // — the two-sentence form reads as a mismatch at a count of one.
+    confirmDeleteOnlyAsk:
+      "Delete this question? The agent is still parked on it. Deleting it declines the question: the agent is told nobody will answer, and carries on without one.",
+    confirmDelete_other: "Delete these {{count}} messages?",
+    declineWarning_one:
+      "{{count}} of them is a question an agent is still parked on. Deleting it declines the question: the agent is told nobody will answer, and carries on without one.",
+    declineWarning_other:
+      "{{count}} of them are questions agents are still parked on. Deleting them declines those questions: each agent is told nobody will answer, and carries on without one.",
+    answered: "You answered this.",
+    declined:
+      "You declined this. The agent was told nobody would answer and carried on without one.",
+    closed: "Never answered \u2014 something later in the session moved past it.",
+    replyPlaceholder: "Reply to this agent\u2026",
+    send: "Send",
   },
 
   settingsNav: {

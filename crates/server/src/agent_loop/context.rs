@@ -43,6 +43,19 @@ pub struct AskedQuestion {
     /// `None` only for a pre-#62 journal, where the call id was not recorded.
     pub tool_call_id: Option<String>,
     pub question: String,
+    /// The suggested answers the model offered, if any.
+    ///
+    /// Carried here so an inbox row can render the same answer control the
+    /// transcript does. The transcript reads them off the echoed tool call it
+    /// is already showing; nothing outside a transcript has that, and a
+    /// question whose choices are only visible in one of the two places it can
+    /// be answered is answerable differently in each.
+    #[serde(default)]
+    pub choices: Vec<String>,
+    /// Whether several `choices` may be picked at once. Meaningless without
+    /// them, and false is the honest default for a question that offered none.
+    #[serde(default)]
+    pub multiple: bool,
 }
 
 /// A terminal outcome an [`AgentActor`](crate::agent_loop::AgentActor) reports

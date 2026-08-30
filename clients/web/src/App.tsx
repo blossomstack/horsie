@@ -17,6 +17,7 @@ import { AgentsPage } from "./pages/agents/AgentsPage";
 import { DeviceApprovalPage } from "./pages/DeviceApprovalPage";
 import { EnvironmentEditPage } from "./pages/environments/EnvironmentEditPage";
 import { EnvironmentsPage } from "./pages/environments/EnvironmentsPage";
+import { InboxPage } from "./pages/inbox/InboxPage";
 import { LoginPage } from "./pages/LoginPage";
 import { NewSessionView } from "./pages/NewSessionView";
 import { RoutineDetailPage } from "./pages/routines/RoutineDetailPage";
@@ -127,6 +128,7 @@ function ProjectApp({ project }: { project: string }) {
               {/* One agent of a session, full page: a workflow step, or a
                   subagent, which had no page of its own before. */}
               <Route path="sessions/:id/agents/:agentId" element={<SessionView />} />
+              <Route path="inbox" element={<InboxPage />} />
               <Route path="agents" element={<AgentsPage />} />
               <Route path="agents/new" element={<AgentEditPage />} />
               <Route path="agents/:name/edit" element={<AgentEditPage />} />

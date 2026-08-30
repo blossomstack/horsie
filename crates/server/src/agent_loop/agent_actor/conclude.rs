@@ -323,6 +323,26 @@ impl AgentActor {
                             .and_then(Value::as_str)
                             .unwrap_or_default()
                             .to_string(),
+                        // Read off the same input the transcript renders from,
+                        // once, here — so the inbox and the transcript offer
+                        // the identical set rather than each parsing the call
+                        // for themselves.
+                        choices: call
+                            .input
+                            .get("choices")
+                            .and_then(Value::as_array)
+                            .map(|cs| {
+                                cs.iter()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_string)
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        multiple: call
+                            .input
+                            .get("multiple")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
                     })
                     .collect(),
             );
