@@ -80,14 +80,26 @@ test("Z1: a pasted image uploads, sends, and renders from the server", async ({
 
   // The transcript renders it, and the `<img>` actually resolves — a broken
   // src would still be "visible" to Playwright, so assert the decoded size.
-  const image = page.getByTestId("artifact-image").first();
-  await expect(image).toBeVisible();
-  const natural = await image.evaluate(
-    (el: HTMLImageElement) =>
-      el.complete ? { w: el.naturalWidth, h: el.naturalHeight } : null,
-  );
-  expect(natural, "the image element never finished loading").not.toBeNull();
-  expect(natural?.w, "a broken src decodes to zero width").toBeGreaterThan(0);
+  // The testid sits on the button that opens the lightbox; the `<img>` is
+  // inside it. Reading `complete` off the button silently yields `undefined`,
+  // which is an assertion that can never pass and never says why.
+  const thumb = page.getByTestId("artifact-image").first();
+  await expect(thumb).toBeVisible();
+  const image = thumb.locator("img");
+  // Poll rather than read once: `toBeVisible` resolves as soon as the element
+  // is laid out, which is well before the browser has fetched the bytes. The
+  // distinction that matters is `complete && naturalWidth > 0` — an element
+  // that finished loading a 404 is `complete` with a zero natural width, so
+  // this separates "still fetching" from "broken src".
+  await expect
+    .poll(
+      () =>
+        image.evaluate(
+          (el: HTMLImageElement) => (el.complete ? el.naturalWidth : null),
+        ),
+      { message: "the image never decoded — a broken src stays at zero width" },
+    )
+    .toBeGreaterThan(0);
 
   // The URL is the artifact route, keyed by content hash.
   const src = await image.getAttribute("src");
