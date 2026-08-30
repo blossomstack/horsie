@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type {
   AgentInvokeRequest,
+  ArtifactRef,
   CreateSessionRequest,
   EnvironmentSpec,
   EnvironmentView,
@@ -117,8 +118,10 @@ export interface SessionDraft
     WorkflowChannel {
   canSend: boolean;
   blockedReason: string | null;
-  /** A session is created with its first message; there is no create-only call. */
-  buildRequest: (message: string) => CreateSessionRequest;
+  /** A session is created with its first message — and with whatever was
+   * attached to it; there is no create-only call, and no second call to
+   * attach to afterwards. */
+  buildRequest: (message: string, artifacts: ArtifactRef[]) => CreateSessionRequest;
   /** Request for an invocation configured by a predefined agent. */
   buildAgentRequest: (message: string) => AgentInvokeRequest;
   /** The same channels as a workflow run. Only meaningful when `workflow` is set. */
@@ -290,8 +293,15 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
   const environmentSpec = (): EnvironmentSpec =>
     toEnvironmentSpec(environment, provisions);
 
-  const buildRequest = (message: string): CreateSessionRequest => ({
+  const buildRequest = (
+    message: string,
+    artifacts: ArtifactRef[],
+  ): CreateSessionRequest => ({
     message,
+    // Always sent, even empty — the same shape `sessions.send` uses. The
+    // refs are ids the composer already uploaded; the server re-checks every
+    // one against this project before it accepts the create.
+    artifacts,
     agent: {
       model: draft.model.trim(),
       // Not gated on the environment — see `plugins` below.

@@ -54,6 +54,45 @@ test.describe("model cards", () => {
     await expect(page.getByTestId("model-card-row-e2e-model-1")).toHaveCount(0);
   });
 
+  // The save is a full replacement, so any field this editor cannot show is a
+  // field every save silently clears — and `seed_if_missing` never repairs an
+  // existing row, so the loss is permanent from inside the product. That has
+  // already happened once here, to the thinking config. This pins the vision
+  // flags against a repeat.
+  test("editing an unrelated field does not clear a card's vision flags", async ({
+    page,
+    appBase,
+  }) => {
+    await page.goto(`${appBase}/admin/model-cards`);
+
+    const row = page.getByTestId("model-card-row-claude-sonnet-4-6");
+    await row.getByTestId("model-card-edit-claude-sonnet-4-6").click();
+    const editor = page.getByTestId("model-card-editor-claude-sonnet-4-6");
+
+    // Seeded as a model that can be shown both.
+    await expect(editor.getByTestId("model-card-supports-images")).toBeChecked();
+    await expect(
+      editor.getByTestId("model-card-supports-documents"),
+    ).toBeChecked();
+
+    // Touch something else entirely, and save.
+    await editor.getByLabel("Name").fill("Claude Sonnet 4.6 (edited)");
+    await editor.getByTestId("model-card-save").click();
+    await expect(row).toContainText("Claude Sonnet 4.6 (edited)");
+
+    // Reload so this reads the stored row rather than local state.
+    await page.reload();
+    await page
+      .getByTestId("model-card-row-claude-sonnet-4-6")
+      .getByTestId("model-card-edit-claude-sonnet-4-6")
+      .click();
+    const reopened = page.getByTestId("model-card-editor-claude-sonnet-4-6");
+    await expect(reopened.getByTestId("model-card-supports-images")).toBeChecked();
+    await expect(
+      reopened.getByTestId("model-card-supports-documents"),
+    ).toBeChecked();
+  });
+
   test("settings model form autocompletes model id and prefills limits", async ({
     page,
     appBase,

@@ -181,6 +181,11 @@ function CardDetails({ card }: { card: ModelCard }) {
       t("modelCards.forcedTools"),
       card.forcedToolsDisableThinking ? t("common.yes") : t("common.no"),
     ],
+    [t("modelCards.supportsImages"), card.supportsImages ? t("common.yes") : t("common.no")],
+    [
+      t("modelCards.supportsDocuments"),
+      card.supportsDocuments ? t("common.yes") : t("common.no"),
+    ],
   ];
   return (
     <dl className="grid grid-cols-1 gap-x-6 gap-y-1.5 sm:grid-cols-2">
@@ -271,6 +276,10 @@ function ModelCardEditor({
   const [forcedToolsDisableThinking, setForcedToolsDisableThinking] = useState(
     card?.forcedToolsDisableThinking ?? false,
   );
+  const [supportsImages, setSupportsImages] = useState(card?.supportsImages ?? false);
+  const [supportsDocuments, setSupportsDocuments] = useState(
+    card?.supportsDocuments ?? false,
+  );
   const [thinkingEfforts, setThinkingEfforts] = useState<string[]>(
     card?.thinkingEfforts ?? [],
   );
@@ -339,6 +348,8 @@ function ModelCardEditor({
           defaultThinkingEffort: defaultThinkingEffort || undefined,
           thinkingDialect: thinkingDialect || undefined,
           forcedToolsDisableThinking,
+          supportsImages,
+          supportsDocuments,
         });
         onDone?.();
       } else {
@@ -353,6 +364,8 @@ function ModelCardEditor({
             defaultThinkingEffort: defaultThinkingEffort || undefined,
             thinkingDialect: thinkingDialect || undefined,
             forcedToolsDisableThinking,
+            supportsImages,
+            supportsDocuments,
           },
         });
         setDirty(false);
@@ -456,6 +469,37 @@ function ModelCardEditor({
               />
             </span>
           </span>
+        </label>
+
+        {/* Both must be here, not merely in Settings: the PUT below is a full
+          replacement, so a field this form cannot show is a field every save
+          silently clears — the same defect the note under this block records. */}
+        <label className="col-span-1 flex items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            className="mt-1"
+            checked={supportsImages}
+            onChange={(e) => {
+              setSupportsImages(e.target.checked);
+              touch();
+            }}
+            data-testid="model-card-supports-images"
+          />
+          <span>{t("modelCards.supportsImages")}</span>
+        </label>
+
+        <label className="col-span-1 flex items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            className="mt-1"
+            checked={supportsDocuments}
+            onChange={(e) => {
+              setSupportsDocuments(e.target.checked);
+              touch();
+            }}
+            data-testid="model-card-supports-documents"
+          />
+          <span>{t("modelCards.supportsDocuments")}</span>
         </label>
 
         {/* The three fields the editor could not show. A full-replacement PUT

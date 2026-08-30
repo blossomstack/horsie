@@ -13,6 +13,7 @@ use crate::routines::store::RunOutcome;
 use crate::runtime_vendor::RuntimeVendorRegistry;
 use crate::sessions::addressing::SupervisorRef;
 use crate::sessions::builder::{AgentChoice, SpecError, build_session_spec};
+use crate::sessions::session_actor::NewSessionMessage;
 use crate::sessions::spec::{SessionOrigin, SessionStatus, status_kind, status_reason};
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use crate::sessions::{CreateSessionError, UserMessageError};
@@ -158,7 +159,7 @@ impl RoutineRunner {
                 // actually did.
                 name: Some(routine.name.clone()),
                 created_at: now_ms,
-                message: Some(routine.prompt.clone()),
+                message: Some(NewSessionMessage::text(routine.prompt.clone())),
                 reply,
             })
             .await

@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ProviderView, SettingsView } from "../../api/types";
+import type { ModelView, ProviderView, SettingsView } from "../../api/types";
 import { ModelsSettings } from "./ModelsSettings";
 
 afterEach(cleanup);
@@ -18,9 +18,16 @@ const settings: { current: SettingsView } = {
   current: undefined as unknown as SettingsView,
 };
 
-const view = (providers: ProviderView[]): SettingsView => ({
+const model = (over: Partial<ModelView>): ModelView => ({
+  alias: "sonnet",
+  provider: "p",
+  modelId: "claude-sonnet-4-5",
+  ...over,
+});
+
+const view = (providers: ProviderView[], models: ModelView[] = []): SettingsView => ({
   providers,
-  models: [],
+  models,
   vendors: [],
   defaultRuntimeVendor: "local",
   restartRequired: false,
@@ -43,6 +50,9 @@ const idleMutation = () => ({
   error: null,
 });
 
+/** What the model form last saved, so a round trip can be read back. */
+const savedModel = vi.fn();
+
 vi.mock("../../hooks/useSettings", () => ({
   useRefreshSettings: () => vi.fn(),
   useSettings: () => ({
@@ -52,7 +62,7 @@ vi.mock("../../hooks/useSettings", () => ({
   }),
   usePutProvider: () => idleMutation(),
   useDeleteProvider: () => idleMutation(),
-  usePutModel: () => idleMutation(),
+  usePutModel: () => ({ ...idleMutation(), mutateAsync: savedModel }),
   useDeleteModel: () => idleMutation(),
 }));
 
@@ -95,6 +105,63 @@ describe("ModelsSettings", () => {
     fireEvent.click(screen.getByTestId("provider-connect-codex"));
 
     expect(screen.getByTestId("chatgpt-signin")).toBeTruthy();
+  });
+
+  // Whether a model may be shown an attachment is a property of the model, and
+  // the model form is the only place it is set — so it has to be visible there
+  // and it has to survive a save.
+  it("shows each vision flag as its own box, checked from the saved model", () => {
+    settings.current = view(
+      [provider({ name: "p", kind: "anthropic", hasCredential: true })],
+      [model({ supportsImages: true })],
+    );
+    render(<ModelsSettings />);
+
+    fireEvent.click(screen.getByTestId("model-edit-sonnet"));
+
+    const images = screen.getByTestId("model-supports-images") as HTMLInputElement;
+    const documents = screen.getByTestId("model-supports-documents") as HTMLInputElement;
+    expect(images.checked).toBe(true);
+    // Two flags, not one: a model that takes images need not take PDFs.
+    expect(documents.checked).toBe(false);
+  });
+
+  it("sends both flags on save", async () => {
+    savedModel.mockClear();
+    settings.current = view(
+      [provider({ name: "p", kind: "anthropic", hasCredential: true })],
+      [model({})],
+    );
+    render(<ModelsSettings />);
+
+    fireEvent.click(screen.getByTestId("model-edit-sonnet"));
+    fireEvent.click(screen.getByTestId("model-supports-images"));
+    fireEvent.click(screen.getByTestId("model-supports-documents"));
+    fireEvent.click(screen.getByTestId("editor-save"));
+
+    expect(savedModel).toHaveBeenCalledTimes(1);
+    expect(savedModel.mock.calls[0][0]).toMatchObject({
+      body: { supportsImages: true, supportsDocuments: true },
+    });
+  });
+
+  // An unticked box means "does not take them", and has to be sent as false —
+  // dropping it would leave a model that used to see still seeing.
+  it("sends a cleared flag as false, not as absent", async () => {
+    savedModel.mockClear();
+    settings.current = view(
+      [provider({ name: "p", kind: "anthropic", hasCredential: true })],
+      [model({ supportsImages: true })],
+    );
+    render(<ModelsSettings />);
+
+    fireEvent.click(screen.getByTestId("model-edit-sonnet"));
+    fireEvent.click(screen.getByTestId("model-supports-images"));
+    fireEvent.click(screen.getByTestId("editor-save"));
+
+    expect(savedModel.mock.calls[0][0]).toMatchObject({
+      body: { supportsImages: false, supportsDocuments: false },
+    });
   });
 
   // A stored API key on a ChatGPT row is a leftover from a previous kind and

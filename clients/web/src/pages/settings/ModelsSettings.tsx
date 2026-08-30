@@ -125,6 +125,8 @@ type ModelDraft = {
   thinkingEffort: string; // "" = no default
   thinkingDialect: string; // "" = no thinking control
   forcedToolsDisableThinking: boolean;
+  supportsImages: boolean;
+  supportsDocuments: boolean;
 };
 
 const providerToDraft = (p: ProviderView): ProviderDraft => ({
@@ -149,6 +151,8 @@ const modelToDraft = (m: ModelView): ModelDraft => ({
   thinkingEffort: m.thinkingEffort ?? "",
   thinkingDialect: m.thinkingDialect ?? "",
   forcedToolsDisableThinking: m.forcedToolsDisableThinking ?? false,
+  supportsImages: m.supportsImages ?? false,
+  supportsDocuments: m.supportsDocuments ?? false,
 });
 
 const newProvider = (): ProviderDraft => ({
@@ -171,6 +175,8 @@ const newModel = (provider: string): ModelDraft => ({
   thinkingEffort: "",
   thinkingDialect: "",
   forcedToolsDisableThinking: false,
+  supportsImages: false,
+  supportsDocuments: false,
 });
 
 const toProviderInput = (p: ProviderDraft): ProviderInput => ({
@@ -192,6 +198,8 @@ const toModelInput = (m: ModelDraft): ModelInput => ({
   thinkingEffort: m.thinkingEffort || undefined,
   thinkingDialect: m.thinkingDialect || undefined,
   forcedToolsDisableThinking: m.forcedToolsDisableThinking,
+  supportsImages: m.supportsImages,
+  supportsDocuments: m.supportsDocuments,
   contextWindow: m.contextWindow.trim() ? Number(m.contextWindow.trim()) : undefined,
 });
 
@@ -813,6 +821,8 @@ function ModelIdField({
       // read here — it describes the provider, not the model.
       forcedToolsDisableThinking:
         draft.forcedToolsDisableThinking || (card.forcedToolsDisableThinking ?? false),
+      supportsImages: draft.supportsImages || (card.supportsImages ?? false),
+      supportsDocuments: draft.supportsDocuments || (card.supportsDocuments ?? false),
     });
     setFocused(false);
   };
@@ -998,6 +1008,30 @@ function ModelEditor({
               </span>
             </span>
           </label>
+          {/* Two boxes, not one: images and documents are separate
+              capabilities on both wires, and a model routinely has one and
+              not the other. */}
+          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={draft.supportsImages}
+                onChange={(ev) => set({ supportsImages: ev.target.checked })}
+                data-testid="model-supports-images"
+              />
+              {t("modelCards.supportsImages")}
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={draft.supportsDocuments}
+                onChange={(ev) => set({ supportsDocuments: ev.target.checked })}
+                data-testid="model-supports-documents"
+              />
+              {t("modelCards.supportsDocuments")}
+            </label>
+          </div>
+          <p className="mt-1 text-xs text-dim">{t("modelsPage.visionHint")}</p>
         </div>
       </div>
     </Editor>

@@ -39,4 +39,16 @@ export interface ModelView {
    * Wire encoding for this model's thinking control.
    */
   thinkingDialect?: string;
+  /**
+   * This model can be shown images. Absent means false.
+   */
+  supportsImages?: boolean;
+  /**
+   * This model can be shown documents (PDFs). A separate flag from
+   * `supports_images` because the two are genuinely different capabilities:
+   * the OpenAI chat wire takes images almost everywhere but reaches PDFs by
+   * another route, and Anthropic's PDF support is per model. One flag would
+   * have to lie about one of them. Absent means false.
+   */
+  supportsDocuments?: boolean;
 }

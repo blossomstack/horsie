@@ -110,7 +110,7 @@ fn validate_thinking(
     Ok(())
 }
 
-const COLUMNS: &str = "model_id, name, context_window, max_tokens, thinking_efforts, default_thinking_effort, thinking_dialect, base_url, forced_tools_disable_thinking, created_at, updated_at";
+const COLUMNS: &str = "model_id, name, context_window, max_tokens, thinking_efforts, default_thinking_effort, thinking_dialect, base_url, forced_tools_disable_thinking, supports_images, supports_documents, created_at, updated_at";
 
 fn row_to_card(r: &AnyRow) -> Result<ModelCard, sqlx::Error> {
     let cw: Option<i64> = r.try_get("context_window")?;
@@ -130,6 +130,8 @@ fn row_to_card(r: &AnyRow) -> Result<ModelCard, sqlx::Error> {
         forced_tools_disable_thinking: Some(
             r.try_get::<i64, _>("forced_tools_disable_thinking")? != 0,
         ),
+        supports_images: Some(r.try_get::<i64, _>("supports_images")? != 0),
+        supports_documents: Some(r.try_get::<i64, _>("supports_documents")? != 0),
         created_at: r.try_get("created_at")?,
         updated_at: r.try_get("updated_at")?,
     })
@@ -211,8 +213,8 @@ impl ModelCardStore {
             )));
         }
         sqlx::query(&self.db.q(
-            "INSERT INTO model_cards (project_id, model_id, name, context_window, max_tokens, thinking_efforts, default_thinking_effort, thinking_dialect, base_url, forced_tools_disable_thinking) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO model_cards (project_id, model_id, name, context_window, max_tokens, thinking_efforts, default_thinking_effort, thinking_dialect, base_url, forced_tools_disable_thinking, supports_images, supports_documents) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ))
         .bind(self.user.as_str())
         .bind(&input.model_id)
@@ -224,6 +226,8 @@ impl ModelCardStore {
         .bind(input.thinking_dialect.clone())
         .bind(input.base_url.clone())
         .bind(i64::from(input.forced_tools_disable_thinking.unwrap_or(false)))
+        .bind(i64::from(input.supports_images.unwrap_or(false)))
+        .bind(i64::from(input.supports_documents.unwrap_or(false)))
         .execute(self.db.pool())
         .await
         .map_err(|e| ModelCardError::Db(e.to_string()))?;
@@ -251,6 +255,7 @@ impl ModelCardStore {
             "UPDATE model_cards SET name = ?, context_window = ?, max_tokens = ?, \
              thinking_efforts = ?, default_thinking_effort = ?, thinking_dialect = ?, \
              base_url = ?, forced_tools_disable_thinking = ?, \
+             supports_images = ?, supports_documents = ?, \
              updated_at = {} WHERE project_id = ? AND model_id = ?",
             self.db.now_text()
         );
@@ -267,6 +272,8 @@ impl ModelCardStore {
             .bind(i64::from(
                 update.forced_tools_disable_thinking.unwrap_or(false),
             ))
+            .bind(i64::from(update.supports_images.unwrap_or(false)))
+            .bind(i64::from(update.supports_documents.unwrap_or(false)))
             .bind(self.user.as_str())
             .bind(model_id)
             .execute(self.db.pool())
@@ -311,8 +318,8 @@ impl ModelCardStore {
             // `ON CONFLICT DO NOTHING` rather than SQLite's `INSERT OR IGNORE`:
             // same semantics, and the standard spelling works on both backends.
             let res = sqlx::query(&self.db.q(
-                "INSERT INTO model_cards (project_id, model_id, name, context_window, max_tokens, thinking_efforts, default_thinking_effort, thinking_dialect, base_url, forced_tools_disable_thinking) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                "INSERT INTO model_cards (project_id, model_id, name, context_window, max_tokens, thinking_efforts, default_thinking_effort, thinking_dialect, base_url, forced_tools_disable_thinking, supports_images, supports_documents) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT (project_id, model_id) DO NOTHING",
             ))
             .bind(self.user.as_str())
@@ -325,6 +332,8 @@ impl ModelCardStore {
             .bind(c.thinking_dialect.clone())
             .bind(c.base_url.clone())
             .bind(i64::from(c.forced_tools_disable_thinking.unwrap_or(false)))
+            .bind(i64::from(c.supports_images.unwrap_or(false)))
+            .bind(i64::from(c.supports_documents.unwrap_or(false)))
             .execute(self.db.pool())
             .await
             .map_err(|e| ModelCardError::Db(e.to_string()))?;
@@ -513,6 +522,8 @@ mod tests {
             thinking_dialect: None,
             base_url: None,
             forced_tools_disable_thinking: None,
+            supports_images: None,
+            supports_documents: None,
         }
     }
 
@@ -526,6 +537,8 @@ mod tests {
             thinking_dialect: None,
             base_url: None,
             forced_tools_disable_thinking: None,
+            supports_images: None,
+            supports_documents: None,
         }
     }
 
@@ -556,6 +569,66 @@ mod tests {
         let updated = store.update("ds", &change).await.unwrap();
         assert_eq!(updated.base_url.as_deref(), Some("https://proxy.example"));
         assert_eq!(updated.forced_tools_disable_thinking, Some(false));
+    }
+
+    /// The two vision flags are independent: a card may claim either, both or
+    /// neither, and an update that turns one off must not take the other with
+    /// it.
+    #[tokio::test]
+    async fn vision_flags_round_trip_independently() {
+        let store = test_store().await;
+
+        let mut card = input("seer", "Seer", None, None);
+        card.supports_images = Some(true);
+        let created = store.insert(&card).await.unwrap();
+        assert_eq!(created.supports_images, Some(true));
+        assert_eq!(created.supports_documents, Some(false));
+        let fetched = store.get("seer").await.unwrap().unwrap();
+        assert_eq!(fetched.supports_images, Some(true));
+        assert_eq!(fetched.supports_documents, Some(false));
+
+        let mut change = update_of("Seer", None, None);
+        change.supports_documents = Some(true);
+        let updated = store.update("seer", &change).await.unwrap();
+        assert_eq!(updated.supports_images, Some(false));
+        assert_eq!(updated.supports_documents, Some(true));
+    }
+
+    /// A card written before 0046 claims neither capability, and reads that
+    /// way — the direction that withholds rather than the one that fails a
+    /// turn.
+    #[tokio::test]
+    async fn a_card_without_the_vision_flags_reads_as_false() {
+        let store = test_store().await;
+        store
+            .insert(&input("plain", "Plain", None, None))
+            .await
+            .unwrap();
+        let c = store.get("plain").await.unwrap().unwrap();
+        assert_eq!(c.supports_images, Some(false));
+        assert_eq!(c.supports_documents, Some(false));
+    }
+
+    /// The seeded catalogue is where a fresh install learns which models can
+    /// see, so the models the form prefills from must actually carry it.
+    #[tokio::test]
+    async fn bundled_seed_marks_the_models_that_can_see() {
+        let cards = bundled_seed().expect("bundled seed parses");
+        let of = |id: &str| {
+            cards
+                .iter()
+                .find(|c| c.model_id == id)
+                .unwrap_or_else(|| panic!("catalog includes {id}"))
+                .clone()
+        };
+        for id in ["claude-sonnet-4-5", "claude-opus-4-5"] {
+            assert_eq!(of(id).supports_images, Some(true), "{id} takes images");
+            assert_eq!(of(id).supports_documents, Some(true), "{id} takes PDFs");
+        }
+        // OpenAI takes images on the chat wire this server speaks; PDFs go by
+        // another route, so the card does not claim them.
+        assert_eq!(of("gpt-4.1").supports_images, Some(true));
+        assert_eq!(of("gpt-4.1").supports_documents, None);
     }
 
     /// Omitting the flag is legal and means false, so existing seed files and

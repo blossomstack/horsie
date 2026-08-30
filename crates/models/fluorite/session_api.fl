@@ -34,6 +34,15 @@ struct CreateSessionRequest {
     /// The first user message, queued as part of the create. Required and
     /// non-empty.
     message: String,
+    /// What came attached to that first message — images and documents already
+    /// uploaded to this project, named by id. Same shape and same rule as
+    /// `SendMessageRequest.artifacts`: the bytes went up separately, and the
+    /// server re-resolves every id against this project before accepting.
+    ///
+    /// Defaulted, so every client that creates a session with `{"message": ...}`
+    /// alone keeps working.
+    #[default = "[]"]
+    artifacts: Vec<ArtifactRef>,
     /// Where this session runs and what it runs against. Required — a session
     /// that did not say has not chosen, it has been chosen for.
     environment: EnvironmentSpec,

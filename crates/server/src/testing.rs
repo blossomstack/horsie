@@ -130,6 +130,8 @@ impl TestState {
                 crate::sessions::spec::ModelEntry {
                     provider,
                     context_window,
+                    supports_images: false,
+                    supports_documents: false,
                 },
             );
     }

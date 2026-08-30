@@ -111,6 +111,11 @@ pub async fn create_session(
     if req.message.trim().is_empty() {
         return Err(Api::unprocessable("message must not be empty"));
     }
+    // The same check `send_message` makes, for the same reason: an artifact id
+    // is a content hash, so one from another project is a guessable name for
+    // someone else's bytes. Membership in *this* project is what refuses it,
+    // and it is done before the session exists rather than at render time.
+    super::artifacts::verify_owned(&state, &req.artifacts).await?;
     let name = req.name;
     let spec = build_session_spec(
         &state.config_store,
@@ -132,7 +137,10 @@ pub async fn create_session(
         spec: spec.clone(),
         name: name.clone(),
         created_at,
-        message: Some(req.message),
+        message: Some(crate::sessions::session_actor::NewSessionMessage {
+            text: req.message,
+            artifacts: req.artifacts,
+        }),
         reply,
     })
     .await?

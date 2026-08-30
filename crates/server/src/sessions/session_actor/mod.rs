@@ -789,16 +789,11 @@ impl SessionActor {
             .as_deref()
             .and_then(horsie_agentcore::ThinkingEffort::parse);
         let agent_ctx = AgentRuntimeContext {
-            // Gated on the model, once, here: a source that resolves nothing
-            // is how a text-only model is served, so no provider below this
-            // holds a vision flag or can forget to check one.
-            artifacts: self.deps().artifacts.as_ref().map(|service| {
-                Arc::new(crate::artifacts::source::ProjectArtifacts::new(
-                    service.clone(),
-                    self.deps().project.clone(),
-                    true,
-                )) as Arc<dyn horsie_agentcore::ArtifactSource>
-            }),
+            // Gated on the model, once, inside `artifact_source`: a source that
+            // resolves nothing is how a text-only model is served, so no
+            // provider below this holds a vision flag or can forget to check
+            // one.
+            artifacts: self.deps().artifact_source(&plan.settings.model),
             context_provider: provider.clone(),
             revision,
             parent: StopHookParent::wrap(self.me(ctx), key, provider.clone()),

@@ -1,4 +1,5 @@
 
+import { ArtifactRef } from '../agent';
 import { EnvironmentSpec } from '../environments';
 import { AgentSettings } from '../session';
 /**
@@ -14,6 +15,16 @@ export interface CreateSessionRequest {
    * non-empty.
    */
   message: string;
+  /**
+   * What came attached to that first message — images and documents already
+   * uploaded to this project, named by id. Same shape and same rule as
+   * `SendMessageRequest.artifacts`: the bytes went up separately, and the
+   * server re-resolves every id against this project before accepting.
+   *
+   * Defaulted, so every client that creates a session with `{"message": ...}`
+   * alone keeps working.
+   */
+  artifacts: ArtifactRef[];
   /**
    * Where this session runs and what it runs against. Required — a session
    * that did not say has not chosen, it has been chosen for.

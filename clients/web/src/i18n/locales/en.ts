@@ -517,6 +517,8 @@ const en = {
     needModel: "Select a model or agent to start.",
     needEnvironment: "Select an environment to start.",
     needGithub: "Connect GitHub to use these repos.",
+    attachmentsUnsupported:
+      "Attachments can\u2019t be sent with a workflow run or an agent invocation. Remove them, or start a plain session.",
   },
 
   tools: {
@@ -988,6 +990,8 @@ const en = {
     defaultEffort: "Default effort",
     defaultEffortOptional: "Default thinking effort (optional)",
     forcedTools: "Pinned tool choice disables thinking",
+    supportsImages: "Can be shown images",
+    supportsDocuments: "Can be shown documents (PDF)",
     forcedToolsHint:
       "For backends that reject a forced <mono>tool_choice</mono> while thinking is on \u2014 DeepSeek answers 400 \u201cThinking mode does not support this tool_choice\u201d.",
     addCard: "Add card",
@@ -1205,6 +1209,8 @@ const en = {
     wireDialect: "Wire dialect",
     forcedToolsHint:
       "Required for DeepSeek, which rejects a forced tool choice while thinking is on. Sub-agents that must call a handoff tool will run without thinking.",
+    visionHint:
+      "Attachments are only loaded for a model that takes them. A model with neither box ticked is told an attachment was withheld, instead of being sent bytes it cannot read.",
   },
 
   integrations: {

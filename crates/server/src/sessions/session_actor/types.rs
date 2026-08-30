@@ -391,6 +391,31 @@ pub enum HookCommand {
     Halt { key: AgentKey, reason: String },
 }
 
+/// What a session is created saying: the words, and what came attached to
+/// them.
+///
+/// One value rather than two fields on the create, so nothing can hand a
+/// create attachments for a message it does not have.
+#[derive(Serialize, Deserialize)]
+pub struct NewSessionMessage {
+    pub text: String,
+    /// Already uploaded, and verified by the HTTP layer to belong to this
+    /// project — these are ids, never bytes. The same contract
+    /// [`TurnCommand::UserMessage`] keeps, because this becomes one.
+    pub artifacts: Vec<horsie_models::agent::ArtifactRef>,
+}
+
+impl NewSessionMessage {
+    /// A message with nothing attached — what every server-side creator has:
+    /// a routine's prompt, an agent invocation, a workflow's input.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            artifacts: Vec::new(),
+        }
+    }
+}
+
 /// The first thing said to a session, carried by the command that creates it.
 ///
 /// Travels *with* the spec rather than behind it: a message is the one thing a
@@ -399,7 +424,7 @@ pub enum HookCommand {
 /// durable — the same promise [`TurnCommand::UserMessage`] makes.
 #[derive(Serialize, Deserialize)]
 pub struct FirstMessage {
-    pub text: String,
+    pub message: NewSessionMessage,
     pub reply: ReplyTo<Result<MessageAccepted, UserMessageError>>,
 }
 

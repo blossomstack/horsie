@@ -489,6 +489,7 @@ mod tests {
     use crate::runtime_vendor::fake::FakeRuntimeVendor;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use horsie_models::agent::ArtifactRef;
     use horsie_models::session_api::{CreateSessionResponse, ListSessionsResponse};
     use tower::util::ServiceExt;
 
@@ -1226,6 +1227,129 @@ mod tests {
         let res = app.clone().oneshot(get(&t.url("/sessions"))).await.unwrap();
         let list: ListSessionsResponse = read_json(res).await;
         assert!(list.sessions.is_empty());
+    }
+
+    /// A real 1x1 PNG — the artifact service decides what an upload is from
+    /// the bytes, so a test that wants one stored has to hand it real ones.
+    fn png() -> Vec<u8> {
+        vec![
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00,
+        ]
+    }
+
+    /// Upload one file into the harness's project and answer with its ref.
+    async fn upload_png(app: &Router, t: &crate::testing::TestState) -> ArtifactRef {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(t.url("/artifacts?filename=shot.png"))
+                    .body(Body::from(png()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        read_json(res).await
+    }
+
+    /// The same ref with an id this project does not hold — a well-formed
+    /// sha256 that names somebody else's bytes.
+    fn from_another_project(stored: &ArtifactRef) -> serde_json::Value {
+        let mut json = serde_json::to_value(stored).unwrap();
+        json["id"] = serde_json::json!("f".repeat(64));
+        json
+    }
+
+    /// A session can be created with attachments, and only with this
+    /// project's.
+    ///
+    /// An artifact id is the sha256 of its bytes, so an id from another
+    /// project is a *guessable* name for someone else's file. Membership in
+    /// this project is the whole check, and the create must make it before it
+    /// accepts — not at render time, by which point the id is in a session's
+    /// log.
+    #[tokio::test]
+    async fn a_create_takes_this_projects_artifacts_and_refuses_any_other() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = test_state(&tmp).await;
+        let app = app(t.state.clone());
+        let stored = upload_png(&app, &t).await;
+
+        let creating = |artifacts: serde_json::Value| {
+            serde_json::json!({
+                "agent": {"model": "mock"},
+                "environment": {"type": "Runtime", "value": {"vendor": "mock"}},
+                "message": "what is in this?",
+                "artifacts": artifacts,
+            })
+        };
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                &t.url("/sessions"),
+                &creating(serde_json::json!([serde_json::to_value(&stored).unwrap()])),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                &t.url("/sessions"),
+                &creating(serde_json::json!([from_another_project(&stored)])),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        let error: horsie_models::session_api::ApiError = read_json(res).await;
+        assert_eq!(error.code, "unknown-artifact");
+
+        // And refusing cost nothing: the second create left no session behind.
+        let res = app.clone().oneshot(get(&t.url("/sessions"))).await.unwrap();
+        let list: ListSessionsResponse = read_json(res).await;
+        assert_eq!(list.sessions.len(), 1, "{:?}", list.sessions);
+    }
+
+    /// The same rule on the message route, which is where it started.
+    #[tokio::test]
+    async fn a_message_takes_this_projects_artifacts_and_refuses_any_other() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = test_state(&tmp).await;
+        let app = app(t.state.clone());
+        let stored = upload_png(&app, &t).await;
+        let id = create_session_via_api(&app, &t).await;
+
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                &t.url(&format!("/sessions/{id}/messages")),
+                &serde_json::json!({
+                    "text": "and this one?",
+                    "artifacts": [serde_json::to_value(&stored).unwrap()],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
+
+        let res = app
+            .oneshot(post_json(
+                &t.url(&format!("/sessions/{id}/messages")),
+                &serde_json::json!({
+                    "text": "and this one?",
+                    "artifacts": [from_another_project(&stored)],
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        let error: horsie_models::session_api::ApiError = read_json(res).await;
+        assert_eq!(error.code, "unknown-artifact");
     }
 
     #[tokio::test]
@@ -2236,6 +2360,8 @@ mod tests {
             thinking_dialect: None,
             base_url: None,
             forced_tools_disable_thinking: None,
+            supports_images: None,
+            supports_documents: None,
         };
         store
             .seed_if_missing(&[

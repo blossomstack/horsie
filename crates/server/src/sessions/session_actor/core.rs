@@ -138,16 +138,17 @@ impl SessionCore {
                 // Answered either way: a create that carried a message owes
                 // one, and a caller left waiting on a redelivery is the
                 // failure this whole command exists to remove.
-                if let Some(FirstMessage { text, reply }) = message {
+                if let Some(FirstMessage { message, reply }) = message {
                     let _ = me
                         .tell(SessionCommand::Turn(TurnCommand::UserMessage {
                             agent_id: None,
-                            text,
-                            // A session is created with its first message and
-                            // `CreateSessionRequest` carries no attachments, so
-                            // there are none to pass on. See the note on
-                            // `SendMessageRequest.artifacts`.
-                            artifacts: Vec::new(),
+                            text: message.text,
+                            // Whatever was attached to the create, carried on
+                            // to the first turn: pasting a screenshot is how a
+                            // session most often starts, and dropping it here
+                            // would lose it silently. Already verified against
+                            // this project by the HTTP layer.
+                            artifacts: message.artifacts,
                             reply,
                         }))
                         .await;
@@ -411,7 +412,7 @@ impl Component for SessionCore {
 mod tests {
     use super::super::testing::*;
     use super::*;
-    use crate::sessions::session_actor::SessionCommand;
+    use crate::sessions::session_actor::{NewSessionMessage, SessionCommand};
     use std::sync::Arc;
     use uuid::Uuid;
 
@@ -550,7 +551,7 @@ mod tests {
                 spec: Box::new(actor_spec_fixture()),
                 name: None,
                 message: Some(FirstMessage {
-                    text: "hi".into(),
+                    message: NewSessionMessage::text("hi"),
                     reply: horsie_actor::ReplyTo::from_sender(tx),
                 }),
             }))
@@ -642,6 +643,101 @@ mod tests {
         assert_eq!(
             journaled_title(&journal, id).await,
             Some("named".to_string())
+        );
+    }
+
+    /// What was attached to the create reaches the turn its message starts.
+    ///
+    /// The reason the create carries artifacts at all: pasting a screenshot is
+    /// how a session most often begins, and the id used to be dropped on the
+    /// floor between `CreateSessionRequest` and the agent's queue — silently,
+    /// because the sentence still arrived and only the picture was missing.
+    ///
+    /// Asserted on the agent's own history rather than on what was sent,
+    /// because the parts are built two hops further on: the queue entry
+    /// becomes a turn, and the turn becomes the message the model is shown.
+    #[tokio::test]
+    async fn the_creates_attachments_reach_the_first_turns_message() {
+        let f = actor_fixture().await;
+        let id = Uuid::new_v4();
+        // The runtime the session will adopt, and a model behind "mock" — a
+        // create whose turn never runs journals no message to read.
+        f.deps
+            .runtimes
+            .create(
+                crate::runtime_manager::RuntimeAddress {
+                    session: &id.to_string(),
+                    runtime: &id.to_string(),
+                    incarnation: "i1",
+                },
+                "mock",
+                &actor_spec_fixture()
+                    .runtime_env()
+                    .expect("the fixture has a runtime"),
+            )
+            .await
+            .expect("create");
+        f.deps.provider_registry.write().unwrap().insert(
+            "mock".to_string(),
+            crate::sessions::spec::ModelEntry::provider_only(Arc::new(EchoProvider)),
+        );
+        let session = f.node.session(id);
+        let shot = horsie_models::agent::ArtifactRef {
+            id: "sha256-of-the-screenshot".to_string(),
+            media_type: "image/png".to_string(),
+            kind: horsie_models::agent::ArtifactKind::Image(horsie_models::agent::ImageArtifact {
+                width: Some(1),
+                height: Some(1),
+            }),
+            byte_size: 29,
+            filename: Some("shot.png".to_string()),
+        };
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _ = session
+            .tell(SessionCommand::Core(CoreCommand::Create {
+                spec: Box::new(actor_spec_fixture()),
+                name: None,
+                message: Some(FirstMessage {
+                    message: NewSessionMessage {
+                        text: "what is in this?".into(),
+                        artifacts: vec![shot.clone()],
+                    },
+                    reply: horsie_actor::ReplyTo::from_sender(tx),
+                }),
+            }))
+            .await;
+        let accepted = tokio::time::timeout(std::time::Duration::from_secs(10), rx)
+            .await
+            .expect("the first message is answered")
+            .expect("the session answered it");
+        assert!(accepted.is_ok(), "the message is accepted: {accepted:?}");
+
+        await_turns(&session, 1).await;
+        let page = agent_history(&session, None).await;
+        let attached: Vec<String> = page
+            .messages()
+            .filter(|m| m.role == horsie_agentcore::Role::User)
+            .flat_map(|m| m.parts.iter())
+            .filter_map(|p| match p {
+                horsie_agentcore::ContentPart::Artifact(a) => Some(a.artifact.id.clone()),
+                horsie_agentcore::ContentPart::Text(_)
+                | horsie_agentcore::ContentPart::ToolCall(_)
+                | horsie_agentcore::ContentPart::ToolResult(_)
+                | horsie_agentcore::ContentPart::Thinking(_)
+                | horsie_agentcore::ContentPart::SubAgentResult(_) => None,
+            })
+            .collect();
+        assert_eq!(
+            attached,
+            vec![shot.id],
+            "the create's attachment is a part of the first user message: {:?}",
+            page.entries
+        );
+        assert_eq!(
+            user_texts(&page),
+            vec!["what is in this?".to_string()],
+            "and it did not cost the sentence it came with"
         );
     }
 

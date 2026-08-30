@@ -507,6 +507,8 @@ const zhHans: typeof en = {
     needModel: "请选择一个模型或智能体后开始。",
     needEnvironment: "请选择一个环境后开始。",
     needGithub: "请连接 GitHub 以使用这些仓库。",
+    attachmentsUnsupported:
+      "工作流运行与智能体调用暂不支持附件。请移除附件，或改为开始一个普通会话。",
   },
 
   tools: {
@@ -957,6 +959,8 @@ const zhHans: typeof en = {
     defaultEffort: "默认强度",
     defaultEffortOptional: "默认思考强度（可选）",
     forcedTools: "固定工具选择时禁用思考",
+    supportsImages: "可以接收图片",
+    supportsDocuments: "可以接收文档（PDF）",
     forcedToolsHint:
       "适用于在开启思考时拒绝强制 <mono>tool_choice</mono> 的后端 —— DeepSeek 会返回 400“Thinking mode does not support this tool_choice”。",
     addCard: "添加模型卡",
@@ -1160,6 +1164,8 @@ const zhHans: typeof en = {
     wireDialect: "协议方言",
     forcedToolsHint:
       "DeepSeek 必需，它在开启思考时会拒绝强制的工具选择。必须调用交接工具的子智能体将在不思考的情况下运行。",
+    visionHint:
+      "只有能够接收附件的模型才会加载附件内容。两项都未勾选的模型只会被告知附件已被略过，而不会收到它读不了的字节。",
   },
 
   integrations: {

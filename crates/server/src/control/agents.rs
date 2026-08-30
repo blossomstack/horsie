@@ -6,6 +6,7 @@ use crate::control::{
 use crate::http::handlers;
 use crate::projects::ProjectServices;
 use crate::sessions::builder::{AgentChoice, build_session_spec};
+use crate::sessions::session_actor::NewSessionMessage;
 use crate::sessions::spec::{SessionOrigin, SessionStatus};
 use crate::sessions::supervisor::{SessionRecord, SessionSupervisorCommand};
 use horsie_models::agents::{
@@ -250,7 +251,7 @@ async fn invoke(
         spec: spec.clone(),
         name: session_name.clone(),
         created_at,
-        message: Some(request.message),
+        message: Some(NewSessionMessage::text(request.message)),
         reply,
     })
     .await?
@@ -339,6 +340,8 @@ mod tests {
                 thinking_effort: None,
                 thinking_dialect: None,
                 forced_tools_disable_thinking: None,
+                supports_images: None,
+                supports_documents: None,
             })
             .await
             .unwrap();

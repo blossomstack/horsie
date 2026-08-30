@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ApiRequestError } from "../api/client";
-import { SessionStatusKind } from "../api/types";
+import { SessionStatusKind, type ArtifactRef } from "../api/types";
 import { Composer } from "../components/Composer";
 import { RailToggle } from "../components/rail";
 import { SessionConfigBar } from "../components/SessionConfigBar";
@@ -45,10 +45,10 @@ export function NewSessionView() {
   // SessionView renders it from the session it fetches on mount. What used to
   // be handed over in router state — and lost on a reload — is now simply
   // already there.
-  const startSession = async (text: string) => {
+  const startSession = async (text: string, artifacts: ArtifactRef[]) => {
     const res = draft.agent
       ? await invoke.mutateAsync({ name: draft.agent, body: draft.buildAgentRequest(text) })
-      : await create.mutateAsync(draft.buildRequest(text));
+      : await create.mutateAsync(draft.buildRequest(text, artifacts));
     // Marked as freshly started so it opens in the transcript rather than in
     // the remembered view: you just typed a message, and the answer to it is
     // the transcript. A view is remembered for the sessions you *open*, not
@@ -58,16 +58,20 @@ export function NewSessionView() {
     navigate(`/sessions/${res.session.id}`, { state: { fresh: true } });
   };
 
-  // `artifacts` is taken and dropped on purpose. Attachments are turned off
-  // on this page — see the `canAttach*` props below — because a session is
-  // created *with* its first message and `CreateSessionRequest` has no field
-  // to carry them in. Accepting the parameter and ignoring it keeps this one
-  // signature with the session page's.
-  const handleSend = async (text: string) => {
+  const handleSend = async (text: string, artifacts: ArtifactRef[]) => {
     setError(null);
+    // A run is handed an input and a preset invocation carries only a
+    // message: neither request shape has anywhere to put a file. Said out
+    // loud rather than dropped, and thrown rather than returned — a rejection
+    // is what puts the message *and* its attachments back in the composer.
+    if (artifacts.length > 0 && (draft.workflow || draft.agent)) {
+      const why = t("newSession.attachmentsUnsupported");
+      setError(why);
+      throw new Error(why);
+    }
     try {
       if (draft.workflow) await startRun(text);
-      else await startSession(text);
+      else await startSession(text, artifacts);
     } catch (e) {
       setError(
         e instanceof ApiRequestError
@@ -148,8 +152,6 @@ export function NewSessionView() {
           busy={create.isPending || invoke.isPending || run.isPending}
           blockedReason={draft.blockedReason}
           entries={entries}
-          canAttachImages={false}
-          canAttachDocuments={false}
           idlePlaceholder={
             draft.workflow
               ? "What this run is about — the first step is handed it."

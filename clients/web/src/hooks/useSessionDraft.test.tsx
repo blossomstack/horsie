@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { ApiRequestError } from "../api/client";
 import type {
   AgentView,
+  ArtifactRef,
   EnvironmentView,
   GitHubStatus,
   MemorySpaceView,
@@ -238,6 +239,37 @@ describe("useSessionDraft persistence", () => {
     act(() => result.current.setModel("opus"));
     const stored = JSON.parse(localStorage.getItem(DRAFT_STORAGE_KEY)!) as DraftPayload;
     expect(stored.model).toBe("opus");
+  });
+});
+
+describe("useSessionDraft create request", () => {
+  const shot: ArtifactRef = {
+    id: "sha-1",
+    mediaType: "image/png",
+    byteSize: 1234,
+    kind: { kind: "Image", value: { width: 8, height: 6 } },
+    filename: "shot.png",
+  };
+
+  // A session is created *with* its first message, so what was attached to
+  // that message has this one call to travel in — there is no create-only
+  // shape and no second call to attach to afterwards.
+  it("carries the first message's attachments", async () => {
+    storeDraft({ environment: runtime("local"), model: "opus" });
+    const { result } = render(makeClient());
+    await waitFor(() => expect(result.current.model).toBe("opus"));
+    const body = result.current.buildRequest("what is in this?", [shot]);
+    expect(body.message).toBe("what is in this?");
+    expect(body.artifacts).toEqual([shot]);
+  });
+
+  // Always sent, even empty: one shape for the server to read, the same rule
+  // `sessions.send` follows.
+  it("sends an empty list when nothing is attached", async () => {
+    storeDraft({ environment: runtime("local"), model: "opus" });
+    const { result } = render(makeClient());
+    await waitFor(() => expect(result.current.model).toBe("opus"));
+    expect(result.current.buildRequest("just talking", []).artifacts).toEqual([]);
   });
 });
 

@@ -355,6 +355,8 @@ mod tests {
                         thinking_effort: None,
                         thinking_dialect: None,
                         forced_tools_disable_thinking: None,
+                        supports_images: None,
+                        supports_documents: None,
                     },
                     ModelInput {
                         alias: "haiku".into(),
@@ -366,6 +368,8 @@ mod tests {
                         thinking_effort: None,
                         thinking_dialect: None,
                         forced_tools_disable_thinking: None,
+                        supports_images: None,
+                        supports_documents: None,
                     },
                 ],
             )
