@@ -373,6 +373,28 @@ describe("layoutAgentTree", () => {
       ]);
     });
 
+    /** The shape the server used to flatten: a session invokes a workflow,
+     *  and one of that run's steps spawns a subagent of its own. The step's
+     *  child reached the client parentless and drew on the main agent, three
+     *  ranks away from the step that actually spawned it. */
+    it("hangs the subagent of an invoked run's step off that step", () => {
+      const tree = layoutAgentTree([
+        main,
+        step("plan", 10),
+        step("code", 20),
+        agent("toolchain", "code", 1, 22),
+      ]);
+      expect(tree.nodes.map((n) => [n.id, n.depth])).toEqual([
+        ["main", 0],
+        [RUN_ROOT, 1],
+        ["plan", 2],
+        ["code", 3],
+        ["toolchain", 4],
+      ]);
+      expect(tree.edges).toContainEqual({ from: "code", to: "toolchain" });
+      expect(tree.edges).not.toContainEqual({ from: "main", to: "toolchain" });
+    });
+
     /** A session can host several at once — its own and one per invocation,
      *  or two invocations from different agents. Flattened into one list they
      *  drew as a single impossible run whose steps interleaved. */

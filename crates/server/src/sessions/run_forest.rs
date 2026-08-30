@@ -483,6 +483,26 @@ impl RunForest {
         self.agents.contains_key(&agent)
     }
 
+    /// Whether `agent` is a row the roster lists under its own id.
+    ///
+    /// Which is every agent but a session's main one: that is listed under a
+    /// well-known id instead, so naming it as a parent names a row no client
+    /// holds. This is the whole of what a reported parent has to satisfy —
+    /// asked once here rather than as a list of kinds at each call site, where
+    /// the list was short by exactly one and a subagent a *workflow step*
+    /// spawned came out parentless, drawn on the main agent as though the
+    /// session had delegated to it directly.
+    #[must_use]
+    pub fn is_hosted_agent(&self, agent: Uuid) -> bool {
+        match self.owner_of_agent(agent).map(|(_, e)| &e.state) {
+            // A step agent's owner is its run, which hosts no other kind of
+            // agent — so reaching a `Workflow` entry by an agent id *is* the
+            // proof that this is one of its steps.
+            Some(RunState::Sub(_) | RunState::SubSession(_) | RunState::Workflow(_)) => true,
+            Some(RunState::Main(_)) | None => false,
+        }
+    }
+
     /// The runtime `agent` runs on, resolved by walking up to the nearest
     /// session or sub session.
     ///
