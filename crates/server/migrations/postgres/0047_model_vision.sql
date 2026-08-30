@@ -1,4 +1,4 @@
--- PostgreSQL mirror of migrations/sqlite/0046_model_vision.sql. See there for
+-- PostgreSQL mirror of migrations/sqlite/0047_model_vision.sql. See there for
 -- why the gate needs these columns, and why it is two flags and not one.
 --
 -- INTEGER rather than BOOLEAN; see 0003_mcp.sql.
