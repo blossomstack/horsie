@@ -92,16 +92,15 @@ impl DbEventLog {
 
         let mut floor = i64::MAX;
         for group in groups {
-            let acked: Option<i64> = sqlx::query_scalar(&self.db.q(
-                "SELECT acked_id FROM event_log_offsets \
-                 WHERE project_id = ? AND stream = ? AND consumer_group = ?",
-            ))
-            .bind(self.project.as_str())
-            .bind(stream)
-            .bind(*group)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(backend)?;
+            let sql = self.db.q("SELECT acked_id FROM event_log_offsets \
+                 WHERE project_id = ? AND stream = ? AND consumer_group = ?");
+            let acked: Option<i64> = sqlx::query_scalar(&sql)
+                .bind(self.project.as_str())
+                .bind(stream)
+                .bind(*group)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(backend)?;
             // No row means this group has consumed nothing. Trimming past it
             // would hand it a stream that begins after events it never saw.
             let Some(acked) = acked else { return Ok(0) };
@@ -164,17 +163,16 @@ impl EventLog for DbEventLog {
         group: &str,
         limit: i64,
     ) -> Result<Vec<Delivered>, EventLogError> {
-        let cursor: i64 = sqlx::query_scalar(&self.db.q(
-            "SELECT acked_id FROM event_log_offsets \
-             WHERE project_id = ? AND stream = ? AND consumer_group = ?",
-        ))
-        .bind(self.project.as_str())
-        .bind(stream)
-        .bind(group)
-        .fetch_optional(self.db.pool())
-        .await
-        .map_err(backend)?
-        .unwrap_or(0);
+        let sql = self.db.q("SELECT acked_id FROM event_log_offsets \
+             WHERE project_id = ? AND stream = ? AND consumer_group = ?");
+        let cursor: i64 = sqlx::query_scalar(&sql)
+            .bind(self.project.as_str())
+            .bind(stream)
+            .bind(group)
+            .fetch_optional(self.db.pool())
+            .await
+            .map_err(backend)?
+            .unwrap_or(0);
 
         // The dialects differ by one clause, and that clause is the entire
         // reason this log is safe on PostgreSQL. `BIGSERIAL` is allocated
@@ -225,14 +223,12 @@ impl EventLog for DbEventLog {
         // `acked_id < excluded.acked_id` keeps a cursor from going backwards. A
         // late ack from a consumer that was overtaken would otherwise replay
         // everything between, and at-least-once turns into at-least-many.
-        sqlx::query(&self.db.q(
-            "INSERT INTO event_log_offsets \
+        sqlx::query(&self.db.q("INSERT INTO event_log_offsets \
              (project_id, stream, consumer_group, acked_id, updated_at) \
              VALUES (?, ?, ?, ?, ?) \
              ON CONFLICT (project_id, stream, consumer_group) DO UPDATE SET \
              acked_id = excluded.acked_id, updated_at = excluded.updated_at \
-             WHERE event_log_offsets.acked_id < excluded.acked_id",
-        ))
+             WHERE event_log_offsets.acked_id < excluded.acked_id"))
         .bind(self.project.as_str())
         .bind(stream)
         .bind(group)

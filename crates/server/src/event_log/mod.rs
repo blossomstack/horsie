@@ -153,7 +153,10 @@ mod tests {
     /// nothing rather than duplicating a row.
     #[test]
     fn re_observing_an_unchanged_run_yields_the_same_id() {
-        assert_eq!(observed("running", None).id(), observed("running", None).id());
+        assert_eq!(
+            observed("running", None).id(),
+            observed("running", None).id()
+        );
     }
 
     /// And the other half: a state that has actually moved is a new event, or
