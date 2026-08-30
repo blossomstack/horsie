@@ -65,6 +65,8 @@ pub const SCOPED_TABLES: &[&str] = &[
     "inbox_messages",
     "artifacts",
     "artifact_uses",
+    "event_log",
+    "event_log_offsets",
 ];
 
 pub struct ProjectService {
