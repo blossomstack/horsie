@@ -70,7 +70,18 @@ pub struct Shared {
     /// exactly as it is for actors and their addresses.
     pub bus: Arc<dyn crate::bus::Bus>,
     /// Bundle bytes, addressed by content and therefore shared by construction.
+    ///
+    /// Plugin *packages*. Not to be confused with `message_artifacts` below,
+    /// which is the images and documents a conversation carries — two
+    /// different things that the word "artifact" fits equally well.
     pub artifacts: Arc<ArtifactStore>,
+    /// The images and documents messages carry, for every project.
+    ///
+    /// One per deployment rather than one per project, because it owns a
+    /// byte-bounded cache: a service per project would multiply that budget by
+    /// the number of projects. Its entries are keyed by project *and* id, so
+    /// sharing it isolates nothing less.
+    pub message_artifacts: Arc<crate::artifacts::ArtifactService>,
     /// The `projects` table: who owns which scope, and how one is created or
     /// destroyed.
     ///
@@ -154,6 +165,10 @@ pub struct ProjectServices {
     pub plugins: Arc<crate::plugins::PluginService>,
     pub authored: Arc<crate::plugins::authored::AuthoredService>,
     pub memory: Arc<crate::memory::MemoryService>,
+    /// The images and documents this project's messages carry. Bytes live
+    /// here; a message holds only an id. Shared across projects — see
+    /// [`Shared::message_artifacts`] — and every call names its project.
+    pub artifacts: Arc<crate::artifacts::ArtifactService>,
     pub agents: Arc<crate::agents::AgentService>,
     /// The agent-run index. A store rather than a service: the session actor
     /// writes rows it derived from its own state, and the control plane reads
@@ -243,6 +258,7 @@ async fn build_project(
     let mcp = Arc::new(crate::mcp::McpService::new(
         crate::mcp::McpStore::new(shared.db.clone(), project.clone()),
         github.clone(),
+        shared.message_artifacts.clone(),
     ));
     let plugins = Arc::new(crate::plugins::PluginService::new(
         crate::plugins::PluginStore::new(shared.db.clone(), project.clone()),
@@ -257,6 +273,7 @@ async fn build_project(
     let memory = Arc::new(crate::memory::MemoryService::new(
         crate::memory::MemoryStore::new(shared.db.clone(), project.clone()),
     ));
+    let artifacts = shared.message_artifacts.clone();
     let agents = Arc::new(crate::agents::AgentService::new(
         crate::agents::AgentStore::new(shared.db.clone(), project.clone()),
         opened.store.clone(),
@@ -317,6 +334,8 @@ async fn build_project(
         },
     ));
     let deps = ServerDeps {
+        artifacts: Some(artifacts.clone()),
+        project: project.clone(),
         runtimes,
         provider_registry: opened.registry.clone(),
         vendors: opened.vendors.clone(),
@@ -391,6 +410,7 @@ async fn build_project(
         mcp,
         plugins,
         memory,
+        artifacts,
         agents,
         agent_runs,
         user_inbox,
@@ -575,8 +595,9 @@ mod tests {
             system: node_system(&db, None),
             serving: None,
             project_service: Arc::new(crate::projects::ProjectService::new(db.clone())),
-            db,
             artifacts: Arc::new(ArtifactStore::new(tmp.path().join("artifacts"))),
+            message_artifacts: Arc::new(crate::artifacts::ArtifactService::in_database(db.clone())),
+            db,
             info: test_info(),
             model_card_seed: Arc::new(Vec::new()),
             model_card_seed_marker: model_cards::seed_marker(&[]),

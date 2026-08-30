@@ -190,7 +190,7 @@ impl Toolbox for InvokeWorkflowToolbox {
                 .await
                 .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?
                 .map_err(ToolCallError::ExecutionFailed)?;
-            return Ok(ToolOutcome::Result(Value::String(format!(
+            return Ok(ToolOutcome::result(Value::String(format!(
                 "Workflow run started: {id}"
             ))));
         }
@@ -214,7 +214,7 @@ impl Toolbox for InvokeWorkflowToolbox {
                 .await
                 .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?
                 .map_err(ToolCallError::ExecutionFailed)?;
-            return Ok(ToolOutcome::Result(Value::String(rendered)));
+            return Ok(ToolOutcome::result(Value::String(rendered)));
         }
         self.inner.execute(name, input, tool_call_id).await
     }

@@ -27,4 +27,14 @@ export interface ModelCardUpdate {
    * Absent means false.
    */
   forcedToolsDisableThinking?: boolean;
+  /**
+   * This model can be shown images. Absent means false.
+   */
+  supportsImages?: boolean;
+  /**
+   * This model can be shown documents (PDFs). Separate from
+   * `supports_images` because the wires differ per provider and per model.
+   * Absent means false.
+   */
+  supportsDocuments?: boolean;
 }

@@ -22,6 +22,7 @@ const sample: DraftPayload = {
   memorySpaces: ["horsie"],
   tools: null,
   thinkingEffort: "high",
+  artifacts: [],
 };
 
 beforeEach(() => localStorage.clear());
@@ -243,6 +244,62 @@ describe("emptyDraft", () => {
       memorySpaces: [],
       tools: null,
       thinkingEffort: "",
+      artifacts: [],
     });
+  });
+});
+
+describe("stored artifacts", () => {
+  const ref = {
+    id: "sha-1",
+    mediaType: "image/png",
+    byteSize: 1234,
+    kind: { kind: "Image", value: { width: 8, height: 6 } },
+    filename: "shot.png",
+  };
+
+  it("round-trips a reference", () => {
+    const stored = { ...sample, artifacts: [ref] };
+    expect(parseDraftPayload(stored)).toEqual(stored);
+  });
+
+  // References only: the bytes are already in the artifact service, and
+  // localStorage has a few megabytes in total.
+  it("stores plain JSON — no bytes, no Map, no Set", () => {
+    const stored = { ...sample, artifacts: [ref] };
+    expect(JSON.parse(JSON.stringify(stored))).toEqual(stored);
+  });
+
+  // A draft written before attachments existed has none, which is what an
+  // empty list says — so there is nothing to migrate.
+  it("reads a draft that predates the field as having no attachments", () => {
+    const { artifacts: _dropped, ...older } = sample;
+    expect(parseDraftPayload(older)?.artifacts).toEqual([]);
+  });
+
+  it("drops a malformed reference without losing the rest of the draft", () => {
+    const parsed = parseDraftPayload({
+      ...sample,
+      artifacts: [
+        ref,
+        { id: "no-kind", mediaType: "image/png", byteSize: 1 },
+        { id: 7, mediaType: "image/png", byteSize: 1, kind: { kind: "Image", value: {} } },
+        "nonsense",
+      ],
+    });
+    expect(parsed?.artifacts).toEqual([ref]);
+    expect(parsed?.model).toBe(sample.model);
+  });
+
+  it("keeps a document reference, which carries no dimensions", () => {
+    const doc = {
+      id: "sha-2",
+      mediaType: "application/pdf",
+      byteSize: 10,
+      kind: { kind: "Document", value: {} },
+    };
+    expect(parseDraftPayload({ ...sample, artifacts: [doc] })?.artifacts).toEqual(
+      [doc],
+    );
   });
 });

@@ -225,7 +225,7 @@ impl Toolbox for SubSessionToolbox {
                 env.vendor
             ),
         };
-        Ok(ToolOutcome::Result(Value::String(format!(
+        Ok(ToolOutcome::result(Value::String(format!(
             "Started a sub session: {id}. {where_it_runs} It carries on with the user from \
              here; you will hear nothing back from it."
         ))))
@@ -428,7 +428,8 @@ mod tests {
             )]
         );
         match out {
-            ToolOutcome::Result(Value::String(text)) => {
+            ToolOutcome::Result(v) if v.value.is_string() => {
+                let text = v.value.as_str().unwrap_or_default().to_string();
                 assert!(text.contains("hear nothing back"), "{text}");
             }
             other => panic!("{other:?}"),
@@ -506,7 +507,9 @@ mod tests {
     async fn the_result_says_where_the_sub_session_runs() {
         let h = harness(Ok(Uuid::new_v4()));
         let text = |out: ToolOutcome| match out {
-            ToolOutcome::Result(Value::String(t)) => t,
+            ToolOutcome::Result(v) if v.value.is_string() => {
+                v.value.as_str().unwrap_or_default().to_string()
+            }
             other => panic!("{other:?}"),
         };
         let inherited = text(

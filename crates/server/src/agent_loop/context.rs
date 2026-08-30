@@ -360,6 +360,12 @@ impl ContextProvider for FixedContextProvider {
 pub struct AgentRuntimeContext {
     /// Per-run context supplier; see [`ContextProvider`].
     pub context_provider: Arc<dyn ContextProvider>,
+    /// Where this agent fetches artifact bytes from, just before each provider
+    /// call. `None` shows the model no artifacts at all — the right answer for
+    /// a text-only model, and the safe default for any caller that has not
+    /// wired one up.
+    #[allow(clippy::type_complexity)]
+    pub artifacts: Option<Arc<dyn horsie_agentcore::ArtifactSource>>,
     /// Where this agent announces that it has moved, for readers to wait on.
     ///
     /// Injected rather than created by the actor so its lifetime can be longer
@@ -554,7 +560,7 @@ impl Toolbox for AgentToolbox {
                 let (_, shared) =
                     crate::agent_loop::workspace::scan(&self.runtime_client, None).await;
                 return match shared.skills.get(requested) {
-                    Some(skill) => Ok(ToolOutcome::Result(Value::String(skill_body(skill)))),
+                    Some(skill) => Ok(ToolOutcome::result(Value::String(skill_body(skill)))),
                     None => Err(ToolCallError::InvalidInput(format!(
                         "unknown shared skill '{requested}'; available: {}",
                         shared.skills.names().join(", ")
@@ -571,7 +577,7 @@ impl Toolbox for AgentToolbox {
                 )));
             };
             return match info.skills.get(requested) {
-                Some(skill) => Ok(ToolOutcome::Result(Value::String(skill_body(skill)))),
+                Some(skill) => Ok(ToolOutcome::result(Value::String(skill_body(skill)))),
                 None => Err(ToolCallError::InvalidInput(format!(
                     "unknown skill '{requested}' in workspace '{ws_name}'; available: {}",
                     info.skills.names().join(", ")
@@ -593,7 +599,7 @@ impl Toolbox for AgentToolbox {
                 }
                 let (_, shared) =
                     crate::agent_loop::workspace::scan(&self.runtime_client, None).await;
-                return Ok(ToolOutcome::Result(Value::String(
+                return Ok(ToolOutcome::result(Value::String(
                     crate::agent_loop::workspace::shared_inspect(
                         &shared.skills,
                         shared.root.as_deref(),
@@ -612,7 +618,7 @@ impl Toolbox for AgentToolbox {
                     shared.root.as_deref(),
                 ));
             }
-            return Ok(ToolOutcome::Result(Value::String(out)));
+            return Ok(ToolOutcome::result(Value::String(out)));
         }
         self.base.execute(name, input, tool_call_id).await
     }
@@ -724,7 +730,7 @@ mod tests {
     /// the run, which no test here calls.
     fn value(outcome: ToolOutcome) -> Value {
         match outcome {
-            ToolOutcome::Result(v) => v,
+            ToolOutcome::Result(v) => v.value,
             ToolOutcome::StopRun => panic!("expected a value, got a run-stopping call"),
         }
     }

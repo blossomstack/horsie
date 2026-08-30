@@ -570,6 +570,8 @@ impl SessionActor {
                 // second one.
                 id: format!("sub_session-message:{id}"),
                 text: message,
+                // A branch carries the command that made it, which is text.
+                artifacts: Vec::new(),
             };
             let cmd = match seed_sub_session(&source, &sub_session, seed, source_seq, queued).await
             {
@@ -928,6 +930,7 @@ mod tests {
                     agent_id,
                     text: text.into(),
                     reply,
+                    artifacts: Vec::new(),
                 })
             })
             .await

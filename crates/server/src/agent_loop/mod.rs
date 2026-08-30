@@ -44,7 +44,7 @@ pub use inbox::{
     answered_turn, queued_turn,
 };
 pub use mcp_toolbox::{
-    CompositeToolbox, McpToolbox, McpToolboxes, McpUnavailable, PluginMcpToolbox,
+    ArtifactSink, CompositeToolbox, McpToolbox, McpToolboxes, McpUnavailable, PluginMcpToolbox,
 };
 pub use task_list::{
     TASK_LIST_TOOL, TaskListAction, TaskListState, TaskRecord, TaskStatus, task_list_tool_spec,

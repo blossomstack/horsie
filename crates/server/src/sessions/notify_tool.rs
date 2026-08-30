@@ -128,7 +128,7 @@ impl Toolbox for NotifyUserToolbox {
             )
             .await
             .map_err(ToolCallError::ExecutionFailed)?;
-        Ok(ToolOutcome::Result(Value::String(
+        Ok(ToolOutcome::result(Value::String(
             "Delivered to the user's inbox. They will see it when they next look; you have not \
              been paused, so carry on."
                 .to_string(),

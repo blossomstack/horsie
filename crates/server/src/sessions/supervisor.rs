@@ -24,7 +24,8 @@ use crate::sessions::session_actor::{
     AnswerError, AskAnswer, MessageAccepted, SessionCommand, SessionSnapshot, SessionUsageStats,
 };
 use crate::sessions::session_actor::{
-    CoreCommand, FirstMessage, LifecycleCommand, ReadCommand, RunCommand, TurnCommand,
+    CoreCommand, FirstMessage, LifecycleCommand, NewSessionMessage, ReadCommand, RunCommand,
+    TurnCommand,
 };
 use crate::sessions::spec::{SessionId, SessionSpec, SessionStatus};
 use crate::sessions::{CreateSessionError, CreatedSession, SessionRevisions, UserMessageError};
@@ -113,10 +114,10 @@ pub enum SessionSupervisorCommand {
         name: Option<String>,
         /// Unix epoch millis (supplied by the caller for deterministic tests).
         created_at: u64,
-        /// What to say to the new session's main agent. `None` only for a
-        /// workflow run, which works from its definition and has no
-        /// session to open.
-        message: Option<String>,
+        /// What to say to the new session's main agent, and what came attached
+        /// to it. `None` only for a workflow run, which works from its
+        /// definition and has no session to open.
+        message: Option<NewSessionMessage>,
         /// Answered once the session is durably recorded *and* its first
         /// message is durably queued, so a caller holding an id holds one the
         /// next node will recognise.
@@ -150,6 +151,9 @@ pub enum SessionSupervisorCommand {
         id: SessionId,
         agent_id: Option<String>,
         text: String,
+        /// What the person attached. Already stored and verified to belong to
+        /// this project by the HTTP layer — these are ids, never bytes.
+        artifacts: Vec<horsie_models::agent::ArtifactRef>,
         reply: ReplyTo<Result<MessageAccepted, UserMessageError>>,
     },
     /// Cancel one of a session's agents' turn in flight.
@@ -805,12 +809,12 @@ impl EventSourcedActor for SessionSupervisor {
                 // it once the agent's write is durable.
                 let (queued, first) = match message {
                     None => (None, None),
-                    Some(text) => {
+                    Some(message) => {
                         let (tx, rx) = oneshot::channel();
                         (
                             Some(rx),
                             Some(FirstMessage {
-                                text,
+                                message,
                                 reply: ReplyTo::from_sender(tx),
                             }),
                         )
@@ -921,6 +925,7 @@ impl EventSourcedActor for SessionSupervisor {
                 id,
                 agent_id,
                 text,
+                artifacts,
                 reply,
             } => {
                 match self.session(ctx, state, &id) {
@@ -932,6 +937,7 @@ impl EventSourcedActor for SessionSupervisor {
                             .tell(SessionCommand::Turn(TurnCommand::UserMessage {
                                 agent_id,
                                 text,
+                                artifacts,
                                 reply,
                             }))
                             .await;
@@ -1719,7 +1725,7 @@ mod tests {
                 spec: spec_fixture(),
                 name: None,
                 created_at: 1,
-                message: Some("hi".to_string()),
+                message: Some(NewSessionMessage::text("hi")),
                 reply,
             })
             .await
@@ -1741,7 +1747,7 @@ mod tests {
             spec: spec_fixture(),
             name: None,
             created_at: 1,
-            message: message.map(str::to_string),
+            message: message.map(NewSessionMessage::text),
             reply,
         })
         .await
@@ -2389,6 +2395,7 @@ mod tests {
             .ask(|reply| SessionSupervisorCommand::UserMessage {
                 id: id.clone(),
                 agent_id: None,
+                artifacts: Vec::new(),
                 text: "first".into(),
                 reply,
             })
@@ -2422,6 +2429,7 @@ mod tests {
             .ask(|reply| SessionSupervisorCommand::UserMessage {
                 id: id.clone(),
                 agent_id: None,
+                artifacts: Vec::new(),
                 text: "second".into(),
                 reply,
             })
@@ -2604,6 +2612,7 @@ mod tests {
             .ask(|reply| SessionSupervisorCommand::UserMessage {
                 id: "missing".into(),
                 agent_id: None,
+                artifacts: Vec::new(),
                 text: "hi".into(),
                 reply,
             })

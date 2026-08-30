@@ -130,6 +130,8 @@ impl TestState {
                 crate::sessions::spec::ModelEntry {
                     provider,
                     context_window,
+                    supports_images: false,
+                    supports_documents: false,
                 },
             );
     }
@@ -273,9 +275,10 @@ impl TestStateBuilder {
                 .serving
                 .as_ref()
                 .map(tokio::sync::watch::Sender::subscribe),
-            db,
             project_service,
             artifacts: Arc::new(ArtifactStore::new(self.state_dir.join("plugins"))),
+            message_artifacts: Arc::new(crate::artifacts::ArtifactService::in_database(db.clone())),
+            db,
             info: info(),
             model_card_seed: Arc::new(Vec::new()),
             model_card_seed_marker: crate::config::model_cards::seed_marker(&[]),
@@ -367,9 +370,10 @@ impl Deployment {
             bus: Arc::new(crate::bus::MemoryBus::new()),
             system: horsie_actor::ActorSystem::new(journal.clone()),
             serving: None,
-            db,
             project_service,
             artifacts: Arc::new(ArtifactStore::new(tmp.path().join("artifacts"))),
+            message_artifacts: Arc::new(crate::artifacts::ArtifactService::in_database(db.clone())),
+            db,
             info: info(),
             model_card_seed: Arc::new(Vec::new()),
             model_card_seed_marker: crate::config::model_cards::seed_marker(&[]),

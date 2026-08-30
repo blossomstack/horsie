@@ -201,6 +201,13 @@ const en = {
       "This session is about {{used}} tokens and a compaction keeps the most recent {{retain}} verbatim \u2014 so there is nothing before that to fold. Compacting anyway would trade real messages for a summary to buy room that is not scarce.",
   },
 
+  artifact: {
+    untitled: "Untitled file",
+    openFull: "Open at full size",
+    download: "Download",
+    close: "Close",
+  },
+
   composer: {
     ariaLabel: "Message the agent",
     idlePlaceholder: "Message the agent\u2026",
@@ -210,6 +217,15 @@ const en = {
     stopTitle: "Stop this turn \u2014 queued messages are kept",
     send: "Send message",
     sendTitle: "Send \u2014 Enter sends, Shift+Enter starts a new line",
+    attach: "Attach a file",
+    attachTitle: "Attach an image or a PDF",
+    attachUnavailable: "Attachments are not available here.",
+    attachRefused: "Only PNG, JPEG, GIF, WebP and PDF files can be attached.",
+    attachPending: "Wait for the attachments to finish uploading",
+    uploading: "Uploading",
+    uploadFailed: "Upload failed",
+    removeAttachment: "Remove this attachment",
+    pastedName: "Pasted file",
   },
 
   turnActions: {
@@ -323,6 +339,7 @@ const en = {
     returnedNothing: "Returned nothing",
     pluginHooks: "Plugin hooks",
     blockedBy: "Blocked by {{plugin}}",
+    artifacts: "Files",
   },
 
   transcript: {
@@ -507,6 +524,8 @@ const en = {
     needModel: "Select a model or agent to start.",
     needEnvironment: "Select an environment to start.",
     needGithub: "Connect GitHub to use these repos.",
+    attachmentsUnsupported:
+      "Attachments can\u2019t be sent with a workflow run or an agent invocation. Remove them, or start a plain session.",
   },
 
   tools: {
@@ -1015,6 +1034,8 @@ const en = {
     defaultEffort: "Default effort",
     defaultEffortOptional: "Default thinking effort (optional)",
     forcedTools: "Pinned tool choice disables thinking",
+    supportsImages: "Can be shown images",
+    supportsDocuments: "Can be shown documents (PDF)",
     forcedToolsHint:
       "For backends that reject a forced <mono>tool_choice</mono> while thinking is on \u2014 DeepSeek answers 400 \u201cThinking mode does not support this tool_choice\u201d.",
     addCard: "Add card",
@@ -1232,6 +1253,8 @@ const en = {
     wireDialect: "Wire dialect",
     forcedToolsHint:
       "Required for DeepSeek, which rejects a forced tool choice while thinking is on. Sub-agents that must call a handoff tool will run without thinking.",
+    visionHint:
+      "Attachments are only loaded for a model that takes them. A model with neither box ticked is told an attachment was withheld, instead of being sent bytes it cannot read.",
   },
 
   integrations: {

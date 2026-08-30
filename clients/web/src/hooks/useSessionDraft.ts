@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type {
   AgentInvokeRequest,
+  ArtifactRef,
   CreateSessionRequest,
   EnvironmentSpec,
   EnvironmentView,
@@ -117,8 +118,15 @@ export interface SessionDraft
     WorkflowChannel {
   canSend: boolean;
   blockedReason: string | null;
-  /** A session is created with its first message; there is no create-only call. */
-  buildRequest: (message: string) => CreateSessionRequest;
+  /** A session is created with its first message — and with whatever was
+   * attached to it; there is no create-only call, and no second call to
+   * attach to afterwards. */
+  buildRequest: (message: string, artifacts: ArtifactRef[]) => CreateSessionRequest;
+  /** Attachments carried over from a previous visit, for the composer to
+   * restore. Refs only — the bytes are already on the server. */
+  artifacts: ArtifactRef[];
+  /** Remember what is currently attached, so a reload does not lose it. */
+  setArtifacts: (artifacts: ArtifactRef[]) => void;
   /** Request for an invocation configured by a predefined agent. */
   buildAgentRequest: (message: string) => AgentInvokeRequest;
   /** The same channels as a workflow run. Only meaningful when `workflow` is set. */
@@ -290,8 +298,21 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
   const environmentSpec = (): EnvironmentSpec =>
     toEnvironmentSpec(environment, provisions);
 
-  const buildRequest = (message: string): CreateSessionRequest => ({
+  // Stored beside the text rather than in component state: a reload that keeps
+  // what you typed and drops what you attached is the more annoying half of
+  // losing both.
+  const setArtifacts = (artifacts: ArtifactRef[]) =>
+    setDraft({ ...draft, artifacts });
+
+  const buildRequest = (
+    message: string,
+    artifacts: ArtifactRef[],
+  ): CreateSessionRequest => ({
     message,
+    // Always sent, even empty — the same shape `sessions.send` uses. The
+    // refs are ids the composer already uploaded; the server re-checks every
+    // one against this project before it accepts the create.
+    artifacts,
     agent: {
       model: draft.model.trim(),
       // Not gated on the environment — see `plugins` below.
@@ -368,6 +389,8 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
     githubConnected,
     canSend: blockedReason === null,
     blockedReason,
+    artifacts: draft.artifacts,
+    setArtifacts,
     buildRequest,
     buildAgentRequest,
     buildRunRequest,

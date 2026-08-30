@@ -150,7 +150,7 @@ impl Toolbox for ControlToolbox {
         operation
             .run(self.services.clone(), input)
             .await
-            .map(ToolOutcome::Result)
+            .map(ToolOutcome::from)
             .map_err(Into::into)
     }
 }
@@ -193,6 +193,8 @@ mod tests {
                 thinking_effort: None,
                 thinking_dialect: None,
                 forced_tools_disable_thinking: None,
+                supports_images: None,
+                supports_documents: None,
             })
             .await
             .unwrap();

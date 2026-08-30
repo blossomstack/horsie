@@ -49,6 +49,9 @@ zip               = { workspace = true }
 tempfile          = { workspace = true }
 
 [dev-dependencies]
+# `ToolOutput.artifacts` is `Vec<fluorite::Bytes>`; a test that fakes a runtime's
+# MCP result has to build one. Production code here only ever unwraps them.
+fluorite               = { workspace = true }
 # The journal conformance suite lives in the actor testkit, so SqlJournal is held
 # to exactly the same contract as InMemoryJournal.
 horsie-actor           = { workspace = true, features = ["test-util"] }

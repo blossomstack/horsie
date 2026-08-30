@@ -129,9 +129,37 @@ fn approx_tokens(message: &Message) -> u32 {
             ContentPart::ToolCall(c) => c.input.to_string().len(),
             ContentPart::Thinking(t) => t.text.len(),
             ContentPart::SubAgentResult(r) => r.text.len(),
+            // An artifact contributes no characters but is a long way from
+            // free, so counting it as zero would let the retained window hold
+            // far more than the budget it was measured against.
+            ContentPart::Artifact(a) => artifact_chars(&a.artifact),
         })
         .sum();
     u32::try_from(chars / 4).unwrap_or(u32::MAX)
+}
+
+/// An artifact's size in the same char-per-4-tokens unit [`approx_tokens`] works
+/// in.
+///
+/// Anthropic prices an image at roughly `width * height / 750` tokens, which is
+/// the only published figure precise enough to be worth using; the flat
+/// fallbacks are order-of-magnitude guesses for the cases where there is
+/// nothing to compute from. As with the rest of this function, being well out
+/// moves the cut by a message and never decides whether to compact.
+fn artifact_chars(artifact: &horsie_models::agent::ArtifactRef) -> usize {
+    /// An image whose header would not parse.
+    const UNKNOWN_IMAGE_TOKENS: usize = 1_500;
+    /// A PDF, which the provider rasterises per page.
+    const DOCUMENT_TOKENS: usize = 3_000;
+
+    let tokens = match &artifact.kind {
+        horsie_models::agent::ArtifactKind::Image(image) => match (image.width, image.height) {
+            (Some(w), Some(h)) => (w as usize * h as usize) / 750,
+            _ => UNKNOWN_IMAGE_TOKENS,
+        },
+        horsie_models::agent::ArtifactKind::Document(_) => DOCUMENT_TOKENS,
+    };
+    tokens * 4
 }
 
 /// Whether a message may begin the retained window.
@@ -443,6 +471,10 @@ impl Agent {
             .complete(
                 CompletionRequest {
                     messages: &messages,
+                    // A summariser reads the transcript's text. Handing it the
+                    // images too would re-upload every one of them for a call
+                    // whose whole purpose is to make the context smaller.
+                    artifacts: crate::provider::ArtifactBytes::empty(),
                     // No system prompt: the workspace and tool guidance are
                     // instructions for doing the work, and this call is not
                     // doing the work. They would only bias the summary.
@@ -470,7 +502,8 @@ impl Agent {
                 ContentPart::ToolCall(_)
                 | ContentPart::ToolResult(_)
                 | ContentPart::Thinking(_)
-                | ContentPart::SubAgentResult(_) => None,
+                | ContentPart::SubAgentResult(_)
+                | ContentPart::Artifact(_) => None,
             })
             .collect::<Vec<_>>()
             .join("");
@@ -544,6 +577,7 @@ mod tests {
                 tool_call_id: tool_call_id.into(),
                 output: output.into(),
                 is_error: false,
+                artifacts: Vec::new(),
             })],
             created_at_ms: 0,
             started_at_ms: None,

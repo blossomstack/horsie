@@ -12,9 +12,9 @@
 //! use. A stdio child respawned per tool call would cost more than the call.
 
 use horsie_models::runtime::{
-    McpServerFailure, McpServerNeedsAuth, McpServerUnreachable, PluginMcpTool,
+    McpServerFailure, McpServerNeedsAuth, McpServerUnreachable, PluginMcpTool, ToolOutput,
 };
-use horsie_support::mcp::{HttpTransport, McpClient, McpError, StdioTransport};
+use horsie_support::mcp::{HttpTransport, McpClient, McpError, McpImage, StdioTransport};
 use horsie_support::plugin::mcp::{McpTransportSpec, PluginMcpServer};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -29,7 +29,25 @@ const DISCOVER_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Mirrors the hook and bash clamps. An MCP server is as capable of returning a
 /// megabyte as a command is, and the transcript pays for it either way.
+///
+/// Text only. Artifact bytes are not transcript and are bounded separately, by
+/// [`MAX_ARTIFACTS`] and [`MAX_ARTIFACT_BYTES`] — clamping an image at 50 KB
+/// would merely corrupt it.
 const OUTPUT_CLAMP: usize = 50_000;
+
+/// The most artifacts one MCP tool result may carry.
+///
+/// A screenshot tool answers with one image, and a busy one with a handful.
+/// Past that a result is a data dump rather than an answer, and an unbounded
+/// one would pin arbitrary memory here *and* in the server it is sent to.
+const MAX_ARTIFACTS: usize = 8;
+
+/// The most artifact bytes one MCP tool result may carry, in total.
+///
+/// 10 MB, which is what the server will store for a single artifact
+/// (`ArtifactService::MAX_ARTIFACT_BYTES`). Carrying more than the far end can
+/// keep buys nothing and costs a copy in two processes.
+const MAX_ARTIFACT_BYTES: usize = 10 * 1024 * 1024;
 
 /// Namespace one server's tool, the spelling admin-configured servers use.
 fn namespaced(server: &str, tool: &str) -> String {
@@ -56,6 +74,31 @@ fn clamp(text: String) -> String {
         cut -= 1;
     }
     format!("{}\n… truncated at {OUTPUT_CLAMP} bytes", &text[..cut])
+}
+
+/// Take the images that fit within the caps, in the order the server returned
+/// them, and say how many were left behind.
+///
+/// An outsized block costs itself rather than everything behind it, so one
+/// enormous screenshot does not swallow the small ones that followed. The
+/// dropped count comes back because the caller has to *say* so: an artifact
+/// that vanished without a word is worse than one that never existed.
+fn within_caps(images: Vec<McpImage>) -> (Vec<Vec<u8>>, usize) {
+    let total = images.len();
+    let mut kept: Vec<Vec<u8>> = Vec::new();
+    let mut budget = MAX_ARTIFACT_BYTES;
+    for McpImage(bytes) in images {
+        if kept.len() == MAX_ARTIFACTS {
+            break;
+        }
+        if bytes.len() > budget {
+            continue;
+        }
+        budget -= bytes.len();
+        kept.push(bytes);
+    }
+    let dropped = total - kept.len();
+    (kept, dropped)
 }
 
 fn unreachable(server: &str, reason: impl std::fmt::Display) -> McpServerFailure {
@@ -204,6 +247,10 @@ impl McpRegistry {
     }
 
     /// Call one namespaced tool.
+    ///
+    /// Answers with the whole [`ToolOutput`] rather than its text, because an
+    /// MCP result is not only text: a screenshot tool's entire answer is bytes,
+    /// and a caller handed a `String` could only have thrown them away.
     pub async fn invoke(
         &self,
         agent_id: &str,
@@ -211,7 +258,7 @@ impl McpRegistry {
         cwd: Option<&Path>,
         tool: &str,
         arguments: serde_json::Value,
-    ) -> Result<String, String> {
+    ) -> Result<ToolOutput, String> {
         let Some((server_name, tool_name)) = split_namespaced(tool) else {
             return Err(format!("'{tool}' is not an MCP tool name"));
         };
@@ -230,7 +277,20 @@ impl McpRegistry {
         if outcome.is_error {
             return Err(clamp(outcome.text));
         }
-        Ok(clamp(outcome.text))
+        let (artifacts, dropped) = within_caps(outcome.images);
+        let mut stdout = clamp(outcome.text);
+        if dropped > 0 {
+            stdout.push_str(&format!(
+                "\n… {dropped} artifact(s) dropped: a tool result may carry at most \
+                 {MAX_ARTIFACTS} artifacts and {MAX_ARTIFACT_BYTES} bytes"
+            ));
+        }
+        Ok(ToolOutput {
+            stdout,
+            stderr: String::new(),
+            exit_code: 0,
+            artifacts: artifacts.into_iter().map(fluorite::Bytes).collect(),
+        })
     }
 
     /// The live client for a server, connecting and handshaking on first use.
@@ -555,6 +615,86 @@ mod tests {
         );
     }
 
+    /// The reported bug: a screenshot tool's whole answer is an `image` block,
+    /// and it used to reach the model as an empty string.
+    #[tokio::test]
+    async fn an_image_block_reaches_the_tool_output_as_an_artifact() {
+        let plugins = TempDir::new().unwrap();
+        let json = serde_json::json!({
+            "mcpServers": { "shots": { "command": "sh", "args": ["-c", SNAPPING_SERVER] } }
+        });
+        declare(plugins.path(), "p", &json.to_string());
+        let out = McpRegistry::default()
+            .invoke(
+                "a1",
+                plugins.path(),
+                None,
+                "mcp__shots__screenshot",
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.stdout, "here it is");
+        assert_eq!(out.artifacts.len(), 1);
+        assert_eq!(out.artifacts[0].as_ref(), b"hi");
+    }
+
+    /// A result carrying more artifacts than the cap allows keeps the cap's
+    /// worth and *says* what it dropped — a screenshot that vanished without a
+    /// word is worse than one that never existed.
+    #[tokio::test]
+    async fn a_flood_of_artifacts_is_capped_and_reported() {
+        let plugins = TempDir::new().unwrap();
+        let json = serde_json::json!({
+            "mcpServers": { "flood": { "command": "sh", "args": ["-c", FLOODING_SERVER] } }
+        });
+        declare(plugins.path(), "p", &json.to_string());
+        let out = McpRegistry::default()
+            .invoke(
+                "a1",
+                plugins.path(),
+                None,
+                "mcp__flood__anything",
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.artifacts.len(), MAX_ARTIFACTS);
+        assert!(
+            out.stdout.contains("12 artifact(s) dropped"),
+            "{}",
+            out.stdout
+        );
+    }
+
+    /// The byte budget is spent in order, and an outsized block costs itself
+    /// rather than everything queued behind it.
+    #[test]
+    fn the_byte_budget_drops_what_will_not_fit_and_keeps_what_will() {
+        let huge = McpImage(vec![0u8; MAX_ARTIFACT_BYTES + 1]);
+        let small = McpImage(b"ok".to_vec());
+        let (kept, dropped) = within_caps(vec![huge, small.clone()]);
+        assert_eq!(kept, vec![b"ok".to_vec()]);
+        assert_eq!(dropped, 1);
+
+        // Two halves fit with room to spare; the third does not, and only it
+        // is lost — the two-byte block behind it still gets through.
+        let half = McpImage(vec![0u8; MAX_ARTIFACT_BYTES / 2 - 8]);
+        let (kept, dropped) = within_caps(vec![half.clone(), half.clone(), half, small]);
+        assert_eq!(kept.len(), 3, "the two halves and the two-byte block");
+        assert_eq!(dropped, 1);
+    }
+
+    /// The 50 KB text clamp is a transcript rule, not a byte rule: an image is
+    /// not truncated to fit it.
+    #[test]
+    fn the_text_clamp_does_not_apply_to_artifact_bytes() {
+        let big = vec![0u8; OUTPUT_CLAMP * 3];
+        let (kept, dropped) = within_caps(vec![McpImage(big.clone())]);
+        assert_eq!(dropped, 0);
+        assert_eq!(kept, vec![big]);
+    }
+
     /// A server returning a megabyte must not put a megabyte in the transcript.
     #[tokio::test]
     async fn an_oversized_tool_result_is_clamped() {
@@ -572,7 +712,8 @@ mod tests {
                 serde_json::json!({}),
             )
             .await
-            .unwrap();
+            .unwrap()
+            .stdout;
         assert!(out.len() < OUTPUT_CLAMP + 200, "{} bytes", out.len());
         assert!(out.contains("truncated"), "{}", &out[out.len() - 60..]);
     }
@@ -582,6 +723,31 @@ mod tests {
          id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
          case "$line" in
            *tools/list*) printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"search","description":"finds","inputSchema":{"type":"object"}}]}}\n' "$id" ;;
+           *) printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id" ;;
+         esac
+       done"#;
+
+    /// Answers every `tools/call` with a line of text and one image block —
+    /// `aGk=` is "hi".
+    const SNAPPING_SERVER: &str = r#"while read -r line; do
+         id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
+         case "$line" in
+           *tools/call*) printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"here it is"},{"type":"image","data":"aGk=","mimeType":"image/png"}]}}\n' "$id" ;;
+           *) printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id" ;;
+         esac
+       done"#;
+
+    /// Answers every `tools/call` with 20 image blocks, well past the cap.
+    const FLOODING_SERVER: &str = r#"blocks='{"type":"image","data":"aGk=","mimeType":"image/png"}'
+       i=1
+       while [ $i -lt 20 ]; do
+         blocks="$blocks,"'{"type":"image","data":"aGk=","mimeType":"image/png"}'
+         i=$((i+1))
+       done
+       while read -r line; do
+         id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
+         case "$line" in
+           *tools/call*) printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[%s]}}\n' "$id" "$blocks" ;;
            *) printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id" ;;
          esac
        done"#;

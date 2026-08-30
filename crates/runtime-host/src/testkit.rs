@@ -222,6 +222,7 @@ impl MockTransport {
             stdout: stdout.into(),
             stderr: String::new(),
             exit_code: 0,
+            artifacts: Vec::new(),
         }))
     }
 
@@ -252,6 +253,7 @@ impl MockTransport {
                 stdout: String::new(),
                 stderr: String::new(),
                 exit_code: 0,
+                artifacts: Vec::new(),
             }))
         });
         Self::scripted(
@@ -466,12 +468,14 @@ impl RuntimeTransport for MockTransport {
                     failures: Vec::new(),
                 }))
             }
+            // Answered from the same canned result an ordinary tool call gets,
+            // so a test can hand a plugin MCP call a `ToolOutput` — artifacts
+            // and all. It used to be a hardcoded failure, which made the whole
+            // plugin MCP path untestable through this mock.
             RuntimeInboundMessage::McpInvoke(req) => {
                 Ok(RuntimeOutboundMessage::McpResult(McpInvokeResponse {
                     call_id: req.call_id,
-                    result: ToolResult::Err(ToolError {
-                        reason: "no plugin MCP servers in a mock transport".to_string(),
-                    }),
+                    result: self.result.clone(),
                 }))
             }
             RuntimeInboundMessage::Ping(req) => {
@@ -619,6 +623,7 @@ mod tests {
                 stdout: "one".into(),
                 stderr: String::new(),
                 exit_code: 0,
+                artifacts: Vec::new(),
             },
         ))]));
         assert!(t.invoke("c1", "test-agent", bash("a")).await.is_ok());

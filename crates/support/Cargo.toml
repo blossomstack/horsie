@@ -15,6 +15,7 @@ git = []
 [dependencies]
 horsie-models = { version = "0.5.0", path = "../models" }
 async-trait = { workspace = true }
+base64      = { workspace = true }
 thiserror   = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }

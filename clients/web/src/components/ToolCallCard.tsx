@@ -11,6 +11,7 @@ import type { RenderedToolCall } from "../hooks/useSessionStream";
 import { isAskCall } from "../lib/askUser";
 import { cn } from "../lib/cn";
 import { deniesCall, hookSummary, systemMessage } from "../lib/hookSummary";
+import { ArtifactRow } from "./ArtifactView";
 import { AskUserCard } from "./AskUserCard";
 import { useTranslation } from "react-i18next";
 
@@ -145,7 +146,18 @@ export function ToolCallCard({ call }: { call: RenderedToolCall }) {
               </pre>
             </div>
           )}
-          {!hasOutput && !call.running && (
+          {call.artifacts.length > 0 && (
+            <div data-testid="tool-call-artifacts">
+              <span className="legend">{t("toolCall.artifacts")}</span>
+              <div className="mt-1">
+                <ArtifactRow artifacts={call.artifacts} />
+              </div>
+            </div>
+          )}
+          {/* "Returned nothing" has to count the pictures too: a screenshot
+              tool answers with an artifact and an empty string, and saying
+              nothing came back under a visible image is simply wrong. */}
+          {!hasOutput && call.artifacts.length === 0 && !call.running && (
             <p className="legend">{t("toolCall.returnedNothing")}</p>
           )}
           {call.hooks.length > 0 && (

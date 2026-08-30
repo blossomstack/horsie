@@ -24,19 +24,57 @@ pub type SharedProviderRegistry = Arc<RwLock<HashMap<String, ModelEntry>>>;
 pub struct ModelEntry {
     pub provider: Arc<dyn LlmProvider>,
     pub context_window: Option<u32>,
+    /// This model can be shown images.
+    pub supports_images: bool,
+    /// This model can be shown documents (PDFs). Separate from
+    /// `supports_images` because they are separate capabilities on both wires
+    /// horsie speaks; see `settings.ModelView`.
+    pub supports_documents: bool,
 }
 
 impl ModelEntry {
     /// A model with no declared window, so sessions on it never compact
     /// automatically. What a test wants unless it is testing compaction — a
     /// budget would otherwise change how many provider calls a run makes.
+    ///
+    /// Shows no artifacts either, for the same reason: a fixture that has said
+    /// nothing about a model's capabilities has not claimed it has any.
     #[must_use]
     pub fn provider_only(provider: Arc<dyn LlmProvider>) -> Self {
         Self {
             provider,
             context_window: None,
+            supports_images: false,
+            supports_documents: false,
         }
     }
+
+    /// Whether a session on this model may be handed artifact bytes at all.
+    ///
+    /// One answer from two flags, because the source it feeds carries one
+    /// boolean: what it gates is whether bytes are loaded, and a model that
+    /// takes either kind needs them loaded. Splitting the source is what would
+    /// let this split, and nothing needs that yet.
+    #[must_use]
+    pub fn shows_artifacts(&self) -> bool {
+        self.supports_images || self.supports_documents
+    }
+}
+
+/// Whether the model behind `alias` may be shown artifacts, as far as the live
+/// registry knows.
+///
+/// `false` for an alias with no entry: that is a session whose model horsie has
+/// no provider for, which fails at the provider lookup a moment later — and
+/// until it does, claiming a capability for a model that is not there would be
+/// a guess.
+#[must_use]
+pub fn model_shows_artifacts(registry: &SharedProviderRegistry, alias: &str) -> bool {
+    registry
+        .read()
+        .ok()
+        .and_then(|reg| reg.get(alias).map(ModelEntry::shows_artifacts))
+        .unwrap_or(false)
 }
 
 /// Runtime vendors keyed by name, behind a shared lock so a settings edit can
@@ -511,11 +549,40 @@ pub struct ServerDeps {
     /// Resolves selected plugin bundles to fetchable refs and mints capability
     /// tokens at provisioning; `None` when no plugin library is wired.
     pub plugins: Option<Arc<dyn crate::plugins::PluginProvisioner>>,
+    /// The images and documents this session's messages carry. `None` in a
+    /// test deployment with no artifact service, which shows the model
+    /// nothing rather than failing a turn.
+    pub artifacts: Option<Arc<crate::artifacts::ArtifactService>>,
+    /// Which project this session belongs to, for scoping artifact reads.
+    pub project: crate::projects::ProjectId,
     /// Reads and writes the agent's long-term memories, and renders the index
     /// injected into the system prompt; `None` when no memory service is wired
     /// (tests). A session that names spaces with no service configured gets no
     /// memory tools.
     pub memory: Option<Arc<crate::memory::MemoryService>>,
+}
+
+impl ServerDeps {
+    /// The artifact source an agent running on `model` gets, or `None` when
+    /// this deployment stores no artifacts at all.
+    ///
+    /// The one construction site of a source, so that resolving `model`'s
+    /// capabilities is done once here rather than at every spawn. What the
+    /// gate then does lives in `ProjectArtifacts`: a model that can see
+    /// neither images nor documents gets a source that resolves nothing, and
+    /// every provider renders the withheld placeholder without being told.
+    #[must_use]
+    pub fn artifact_source(
+        &self,
+        model: &str,
+    ) -> Option<Arc<dyn horsie_agentcore::ArtifactSource>> {
+        let service = self.artifacts.as_ref()?;
+        Some(Arc::new(crate::artifacts::source::ProjectArtifacts::new(
+            service.clone(),
+            self.project.clone(),
+            model_shows_artifacts(&self.provider_registry, model),
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -754,5 +821,121 @@ mod tests {
         assert_eq!(status_kind(&s), SessionStatusKind::Unrecoverable);
         assert_eq!(status_reason(&s).as_deref(), Some("gone"));
         assert_eq!(status_reason(&SessionStatus::Idle), None);
+    }
+
+    // ── the vision gate ──────────────────────────────────────────────────
+
+    /// Deps over a real artifact service, with `entry` registered as "m" —
+    /// the model every agent fixture here runs on.
+    async fn deps_with_model(entry: ModelEntry) -> (ServerDeps, String) {
+        let db = crate::db::testing::db().await;
+        let service = Arc::new(crate::artifacts::ArtifactService::in_database(db));
+        let project = crate::projects::ProjectId::new("p-test");
+        let stored = service
+            .put(&project, png(), Some("shot.png".into()))
+            .await
+            .expect("stored");
+
+        let mut models = HashMap::new();
+        models.insert("m".to_string(), entry);
+        let vendors: RuntimeVendorMap = Arc::new(RwLock::new(HashMap::new()));
+        let deps = ServerDeps {
+            runtimes: crate::runtime_manager::test_runtime_manager(&vendors),
+            provider_registry: Arc::new(RwLock::new(models)),
+            vendors,
+            github_tokens: None,
+            mcp: None,
+            plugins: None,
+            artifacts: Some(service),
+            project,
+            memory: None,
+        };
+        (deps, stored.id)
+    }
+
+    /// The smallest thing the artifact service will accept as an image: it
+    /// sniffs the bytes, so three arbitrary ones are rejected rather than
+    /// stored.
+    fn png() -> Vec<u8> {
+        vec![
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00,
+        ]
+    }
+
+    fn entry_that(supports_images: bool, supports_documents: bool) -> ModelEntry {
+        ModelEntry {
+            provider: horsie_agentcore::testkit::MockProvider::text("ok"),
+            context_window: None,
+            supports_images,
+            supports_documents,
+        }
+    }
+
+    /// The gate, end to end from the model's configuration: a model that
+    /// claims neither capability gets a source that hands a provider nothing,
+    /// so the placeholder is all any provider below can render.
+    #[tokio::test]
+    async fn a_model_that_claims_nothing_gets_a_source_that_resolves_nothing() {
+        let (deps, id) = deps_with_model(entry_that(false, false)).await;
+
+        let source = deps.artifact_source("m").expect("a source exists");
+
+        assert!(
+            source.resolve(&[id]).await.is_empty(),
+            "a text-only model must be handed no bytes at all"
+        );
+    }
+
+    /// And the other direction, which is what makes the test above mean
+    /// something: with the flag set, the same bytes do arrive.
+    #[tokio::test]
+    async fn a_model_that_supports_images_gets_the_bytes() {
+        let (deps, id) = deps_with_model(entry_that(true, false)).await;
+
+        let source = deps.artifact_source("m").expect("a source exists");
+
+        assert!(
+            source
+                .resolve(std::slice::from_ref(&id))
+                .await
+                .contains_key(&id),
+            "a model that can see must be handed its artifact"
+        );
+    }
+
+    /// Documents alone are enough: the source carries one boolean, and what it
+    /// gates is whether bytes are loaded at all.
+    #[tokio::test]
+    async fn documents_alone_open_the_gate() {
+        let (deps, id) = deps_with_model(entry_that(false, true)).await;
+
+        let source = deps.artifact_source("m").expect("a source exists");
+
+        assert!(!source.resolve(&[id]).await.is_empty());
+    }
+
+    /// A model the registry has never heard of claims nothing. It fails at the
+    /// provider lookup moments later; until then, guessing a capability for it
+    /// would be the guess that shows an image to something that cannot take
+    /// one.
+    #[tokio::test]
+    async fn an_unregistered_model_shows_nothing() {
+        let (deps, id) = deps_with_model(entry_that(true, true)).await;
+
+        let source = deps.artifact_source("who?").expect("a source exists");
+
+        assert!(source.resolve(&[id]).await.is_empty());
+    }
+
+    /// A deployment with no artifact service has no source to hand out, which
+    /// is not the same as a gated one — and must not become one by accident.
+    #[tokio::test]
+    async fn a_deployment_without_artifacts_has_no_source() {
+        let (mut deps, _) = deps_with_model(entry_that(true, true)).await;
+        deps.artifacts = None;
+
+        assert!(deps.artifact_source("m").is_none());
     }
 }

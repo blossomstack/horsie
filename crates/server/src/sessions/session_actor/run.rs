@@ -195,6 +195,8 @@ impl SessionActor {
                 item: Incoming::User {
                     id: format!("step:{index}:{attempt}"),
                     text: input.clone(),
+                    // A workflow step's input is text the definition wrote.
+                    artifacts: Vec::new(),
                 },
                 ack: None,
             }))

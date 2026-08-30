@@ -197,6 +197,13 @@ const zhHans: typeof en = {
       "本会话约有 {{used}} 个 token，而一次压缩会原样保留最近的 {{retain}} 个 —— 因此之前没有可折叠的内容。强行压缩只会用真实消息换取一份摘要，去腾出并不紧缺的空间。",
   },
 
+  artifact: {
+    untitled: "未命名文件",
+    openFull: "查看原始尺寸",
+    download: "下载",
+    close: "关闭",
+  },
+
   composer: {
     ariaLabel: "给智能体发消息",
     idlePlaceholder: "给智能体发消息…",
@@ -206,6 +213,15 @@ const zhHans: typeof en = {
     stopTitle: "停止本轮 —— 已排队的消息会保留",
     send: "发送消息",
     sendTitle: "发送 —— Enter 发送，Shift+Enter 换行",
+    attach: "添加附件",
+    attachTitle: "添加图片或 PDF 文件",
+    attachUnavailable: "此处不支持添加附件。",
+    attachRefused: "只能添加 PNG、JPEG、GIF、WebP 和 PDF 文件。",
+    attachPending: "请等待附件上传完成",
+    uploading: "正在上传",
+    uploadFailed: "上传失败",
+    removeAttachment: "移除此附件",
+    pastedName: "粘贴的文件",
   },
 
   turnActions: {
@@ -313,6 +329,7 @@ const zhHans: typeof en = {
     returnedNothing: "没有返回内容",
     pluginHooks: "插件钩子",
     blockedBy: "被 {{plugin}} 阻止",
+    artifacts: "文件",
   },
 
   transcript: {
@@ -496,6 +513,8 @@ const zhHans: typeof en = {
     needModel: "请选择一个模型或智能体后开始。",
     needEnvironment: "请选择一个环境后开始。",
     needGithub: "请连接 GitHub 以使用这些仓库。",
+    attachmentsUnsupported:
+      "工作流运行与智能体调用暂不支持附件。请移除附件，或改为开始一个普通会话。",
   },
 
   tools: {
@@ -981,6 +1000,8 @@ const zhHans: typeof en = {
     defaultEffort: "默认强度",
     defaultEffortOptional: "默认思考强度（可选）",
     forcedTools: "固定工具选择时禁用思考",
+    supportsImages: "可以接收图片",
+    supportsDocuments: "可以接收文档（PDF）",
     forcedToolsHint:
       "适用于在开启思考时拒绝强制 <mono>tool_choice</mono> 的后端 —— DeepSeek 会返回 400“Thinking mode does not support this tool_choice”。",
     addCard: "添加模型卡",
@@ -1184,6 +1205,8 @@ const zhHans: typeof en = {
     wireDialect: "协议方言",
     forcedToolsHint:
       "DeepSeek 必需，它在开启思考时会拒绝强制的工具选择。必须调用交接工具的子智能体将在不思考的情况下运行。",
+    visionHint:
+      "只有能够接收附件的模型才会加载附件内容。两项都未勾选的模型只会被告知附件已被略过，而不会收到它读不了的字节。",
   },
 
   integrations: {

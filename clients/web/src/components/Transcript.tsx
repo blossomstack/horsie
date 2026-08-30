@@ -10,6 +10,7 @@ import type {
   TranscriptItem,
 } from "../hooks/useSessionStream";
 import { buildSegments, type Segment } from "../lib/transcriptSegments";
+import { ArtifactRow } from "./ArtifactView";
 import { CompactionDivider } from "./CompactionDivider";
 import { CompactionNotice } from "./CompactionNotice";
 import { SubSessionMarker } from "./SubSessionMarker";
@@ -87,6 +88,8 @@ function SegmentView({
       );
     case "ask":
       return <ToolCallCard call={segment.call} />;
+    case "artifacts":
+      return <ArtifactRow artifacts={segment.artifacts} />;
     case "pulse":
       return (
         <div className="pt-0.5" data-testid="pulse">
@@ -169,7 +172,7 @@ function UserTurn({ msg }: { msg: RenderedMessage }) {
       data-entry-ids={msg.id}
       data-queued={msg.queued ? "true" : undefined}
       actions={
-        settled ? (
+        settled && msg.text ? (
           <TurnActions atMs={msg.createdAtMs} plainText={msg.text} />
         ) : undefined
       }
@@ -178,9 +181,15 @@ function UserTurn({ msg }: { msg: RenderedMessage }) {
           viewport and pushes the reply you came back for off screen. Only
           when it actually overflows — a "More" under three lines would be
           chrome advertising a job it does not have. */}
-      <CollapsibleText className="rounded-[var(--radius-control)] bg-raised px-3.5 py-2.5 text-[0.9375rem] leading-relaxed break-words whitespace-pre-wrap text-legend">
-        {msg.text}
-      </CollapsibleText>
+      {/* Above the bubble, so an attachment and the sentence about it read in
+          the order they were composed. Rendered even with no text at all: a
+          picture on its own is a message. */}
+      <ArtifactRow artifacts={msg.artifacts} />
+      {msg.text && (
+        <CollapsibleText className="rounded-[var(--radius-control)] bg-raised px-3.5 py-2.5 text-[0.9375rem] leading-relaxed break-words whitespace-pre-wrap text-legend">
+          {msg.text}
+        </CollapsibleText>
+      )}
       {msg.queued && (
         <div className="legend" data-testid="queued-marker">
           {t("transcript.queued")}
@@ -267,9 +276,14 @@ export function groupTurns(items: TranscriptItem[]): TurnGroup[] {
           text: "",
           thinking: [],
           toolCalls: [],
+          // Left to the user bubble below, which is where they were attached.
+          artifacts: [],
         });
       }
-      if (m.text) turns.push({ kind: "user", msg: m });
+      // Artifacts count as something said: an attachment with no text is a
+      // message, and dropping it here left the picture nowhere on screen.
+      if (m.text || m.artifacts.length > 0)
+        turns.push({ kind: "user", msg: m });
       continue;
     }
     intoAssistant(m);

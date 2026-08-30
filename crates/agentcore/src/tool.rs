@@ -24,9 +24,52 @@ pub struct ToolSpec {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ToolOutcome {
     /// An ordinary result: it goes back to the model and the run continues.
-    Result(Value),
+    Result(ToolValue),
     /// The run ends here.
     StopRun,
+}
+
+/// What an ordinary tool call answered with.
+///
+/// A struct rather than a bare `Value` because a tool can produce something
+/// that is not text — a screenshot, a rendered PDF — and that has to reach both
+/// the transcript and the model. `artifacts` are already-stored references: a
+/// toolbox that produces bytes stores them itself, inside its own `execute`,
+/// which is why nothing below this point ever handles raw bytes.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ToolValue {
+    pub value: Value,
+    pub artifacts: Vec<horsie_models::agent::ArtifactRef>,
+}
+
+impl ToolValue {
+    #[must_use]
+    pub fn new(value: Value) -> Self {
+        Self {
+            value,
+            artifacts: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_artifacts(value: Value, artifacts: Vec<horsie_models::agent::ArtifactRef>) -> Self {
+        Self { value, artifacts }
+    }
+}
+
+impl From<Value> for ToolValue {
+    fn from(value: Value) -> Self {
+        Self::new(value)
+    }
+}
+
+impl ToolOutcome {
+    /// An ordinary result carrying no artifacts — what almost every tool
+    /// returns.
+    #[must_use]
+    pub fn result(value: impl Into<Value>) -> Self {
+        Self::Result(ToolValue::new(value.into()))
+    }
 }
 
 #[cfg(any(test, feature = "test-util"))]
@@ -36,7 +79,7 @@ impl ToolOutcome {
     /// which never end a run. Panics on [`ToolOutcome::StopRun`].
     pub fn expect_value(self) -> Value {
         match self {
-            Self::Result(v) => v,
+            Self::Result(v) => v.value,
             Self::StopRun => panic!("expected a value, got a call that ended the run"),
         }
     }
@@ -44,7 +87,7 @@ impl ToolOutcome {
 
 impl From<Value> for ToolOutcome {
     fn from(value: Value) -> Self {
-        Self::Result(value)
+        Self::Result(ToolValue::new(value))
     }
 }
 
@@ -179,7 +222,7 @@ mod tests {
     async fn toolbox_impl_routes_by_name_and_wraps_the_result() {
         let tb = ToolboxImpl::new().add(EchoTool);
         let result = tb.execute("echo", json!({"x": 1}), "tc1").await.unwrap();
-        assert_eq!(result, ToolOutcome::Result(json!({"x": 1})));
+        assert_eq!(result, ToolOutcome::result(json!({"x": 1})));
     }
 
     #[tokio::test]

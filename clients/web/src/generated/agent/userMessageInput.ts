@@ -1,4 +1,5 @@
 
+import { ArtifactRef } from './artifactRef';
 import { SubAgentResultPart } from './subAgentResultPart';
 /**
  * New user message — starts a new turn
@@ -14,4 +15,9 @@ export interface UserMessageInput {
    * Finished subagents' results delivered with this turn.
    */
   subagentResults: SubAgentResultPart[];
+  /**
+   * What the person attached. Defaulted for the same durability reason as
+   * `ToolResultPart.artifacts` — this type is journaled.
+   */
+  artifacts: ArtifactRef[];
 }

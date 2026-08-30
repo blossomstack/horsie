@@ -197,6 +197,13 @@ const zhHant: typeof en = {
       "本工作階段約有 {{used}} 個 token，而一次壓縮會原樣保留最近的 {{retain}} 個 —— 因此之前沒有可摺疊的內容。硬要壓縮只會拿真實訊息換一份摘要，去騰出並不緊缺的空間。",
   },
 
+  artifact: {
+    untitled: "未命名檔案",
+    openFull: "檢視原始尺寸",
+    download: "下載",
+    close: "關閉",
+  },
+
   composer: {
     ariaLabel: "傳訊息給智慧代理",
     idlePlaceholder: "傳訊息給智慧代理…",
@@ -206,6 +213,15 @@ const zhHant: typeof en = {
     stopTitle: "停止本輪 —— 已排入佇列的訊息會保留",
     send: "傳送訊息",
     sendTitle: "傳送 —— Enter 傳送，Shift+Enter 換行",
+    attach: "加入附件",
+    attachTitle: "加入圖片或 PDF 檔案",
+    attachUnavailable: "此處不支援加入附件。",
+    attachRefused: "只能加入 PNG、JPEG、GIF、WebP 與 PDF 檔案。",
+    attachPending: "請等待附件上傳完成",
+    uploading: "正在上傳",
+    uploadFailed: "上傳失敗",
+    removeAttachment: "移除此附件",
+    pastedName: "貼上的檔案",
   },
 
   turnActions: {
@@ -313,6 +329,7 @@ const zhHant: typeof en = {
     returnedNothing: "沒有回傳內容",
     pluginHooks: "外掛掛鉤",
     blockedBy: "被 {{plugin}} 阻擋",
+    artifacts: "檔案",
   },
 
   transcript: {
@@ -494,6 +511,8 @@ const zhHant: typeof en = {
     needModel: "請先選擇一個模型或智慧代理再開始。",
     needEnvironment: "請先選擇一個環境再開始。",
     needGithub: "請連接 GitHub 以使用這些儲存庫。",
+    attachmentsUnsupported:
+      "工作流程執行與智慧代理呼叫暫不支援附件。請移除附件，或改為開始一個一般工作階段。",
   },
 
   tools: {
@@ -978,6 +997,8 @@ const zhHant: typeof en = {
     defaultEffort: "預設強度",
     defaultEffortOptional: "預設思考強度（選填）",
     forcedTools: "固定工具選擇時停用思考",
+    supportsImages: "可以接收圖片",
+    supportsDocuments: "可以接收文件（PDF）",
     forcedToolsHint:
       "適用於在開啟思考時拒絕強制 <mono>tool_choice</mono> 的後端 —— DeepSeek 會回傳 400「Thinking mode does not support this tool_choice」。",
     addCard: "新增模型卡",
@@ -1187,6 +1208,8 @@ const zhHant: typeof en = {
     wireDialect: "傳輸協定方言",
     forcedToolsHint:
       "DeepSeek 必需，它在開啟思考時會拒絕強制的工具選擇。必須呼叫交接工具的子代理將在不思考的情況下執行。",
+    visionHint:
+      "只有能夠接收附件的模型才會載入附件內容。兩項都未勾選的模型只會被告知附件已被略過，而不會收到它讀不了的位元組。",
   },
 
   integrations: {

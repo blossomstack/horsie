@@ -392,6 +392,7 @@ impl agent::Message {
                 tool_call_id,
                 output: output.into(),
                 is_error,
+                artifacts: Vec::new(),
             })],
             created_at_ms,
             started_at_ms: None,
@@ -416,12 +417,38 @@ impl agent::SubAgentResultPart {
     }
 }
 
+impl agent::ArtifactRef {
+    /// What a provider is told when it cannot be shown this artifact.
+    ///
+    /// Reached when the session's model has no vision capability. Saying so in
+    /// the transcript is what keeps the conversation coherent: a model that
+    /// simply never sees the image answers a question about nothing, where one
+    /// told an image was withheld can say it cannot see it.
+    ///
+    /// One definition rather than three, so the three provider serializers
+    /// cannot drift apart on the wording.
+    #[must_use]
+    pub fn omitted_text(&self) -> String {
+        let what = match self.kind {
+            agent::ArtifactKind::Image(_) => "image",
+            agent::ArtifactKind::Document(_) => "document",
+        };
+        match &self.filename {
+            Some(name) => {
+                format!("[{what} \"{name}\" omitted — this model cannot read it]")
+            }
+            None => format!("[{what} omitted — this model cannot read it]"),
+        }
+    }
+}
+
 impl agent::AgentInput {
     pub fn user_message(id: impl Into<String>, text: impl Into<String>) -> Self {
         Self::UserMessage(agent::UserMessageInput {
             id: id.into(),
             text: text.into(),
             subagent_results: Vec::new(),
+            artifacts: Vec::new(),
         })
     }
 
@@ -431,11 +458,13 @@ impl agent::AgentInput {
         id: impl Into<String>,
         text: impl Into<String>,
         subagent_results: Vec<agent::SubAgentResultPart>,
+        artifacts: Vec<agent::ArtifactRef>,
     ) -> Self {
         Self::UserMessage(agent::UserMessageInput {
             id: id.into(),
             text: text.into(),
             subagent_results,
+            artifacts,
         })
     }
 
@@ -448,6 +477,7 @@ impl agent::AgentInput {
             tool_call_id: tool_call_id.into(),
             output: output.into(),
             is_error,
+            artifacts: Vec::new(),
         })
     }
 
@@ -485,6 +515,9 @@ impl agent::AgentInput {
                         text: u.text.clone(),
                     }));
                 }
+                parts.extend(u.artifacts.iter().cloned().map(|artifact| {
+                    agent::ContentPart::Artifact(agent::ArtifactPart { artifact })
+                }));
                 parts.extend(
                     u.subagent_results
                         .iter()
@@ -506,6 +539,7 @@ impl agent::AgentInput {
                     tool_call_id: t.tool_call_id.clone(),
                     output: t.output.clone(),
                     is_error: t.is_error,
+                    artifacts: t.artifacts.clone(),
                 })],
                 created_at_ms,
                 started_at_ms: None,
@@ -524,6 +558,7 @@ impl agent::AgentInput {
                             tool_call_id: r.tool_call_id.clone(),
                             output: r.output.clone(),
                             is_error: r.is_error,
+                            artifacts: r.artifacts.clone(),
                         })
                     })
                     .collect(),
@@ -830,6 +865,7 @@ mod tests {
             "m1",
             "keep going",
             vec![result_part("audit")],
+            Vec::new(),
         );
         let msg = input.to_message(0);
         assert_eq!(msg.parts.len(), 2);
@@ -843,8 +879,12 @@ mod tests {
     /// noise — Anthropic rejects it — so the part is omitted, not blanked.
     #[test]
     fn an_empty_user_text_produces_no_text_part() {
-        let input =
-            agent::AgentInput::user_message_with_results("m1", "", vec![result_part("audit")]);
+        let input = agent::AgentInput::user_message_with_results(
+            "m1",
+            "",
+            vec![result_part("audit")],
+            Vec::new(),
+        );
         let msg = input.to_message(0);
         assert_eq!(msg.parts.len(), 1);
         assert!(matches!(

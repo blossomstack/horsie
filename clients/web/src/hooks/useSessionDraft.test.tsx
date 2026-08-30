@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { ApiRequestError } from "../api/client";
 import type {
   AgentView,
+  ArtifactRef,
   EnvironmentView,
   GitHubStatus,
   MemorySpaceView,
@@ -170,6 +171,7 @@ function storeDraft(draft: Partial<DraftPayload>) {
     memorySpaces: [],
     tools: null,
     thinkingEffort: "",
+    artifacts: [],
     ...draft,
   };
   localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(full));
@@ -237,6 +239,71 @@ describe("useSessionDraft persistence", () => {
     act(() => result.current.setModel("opus"));
     const stored = JSON.parse(localStorage.getItem(DRAFT_STORAGE_KEY)!) as DraftPayload;
     expect(stored.model).toBe("opus");
+  });
+});
+
+describe("useSessionDraft create request", () => {
+  const shot: ArtifactRef = {
+    id: "sha-1",
+    mediaType: "image/png",
+    byteSize: 1234,
+    kind: { kind: "Image", value: { width: 8, height: 6 } },
+    filename: "shot.png",
+  };
+
+  // A session is created *with* its first message, so what was attached to
+  // that message has this one call to travel in — there is no create-only
+  // shape and no second call to attach to afterwards.
+  it("carries the first message's attachments", async () => {
+    storeDraft({ environment: runtime("local"), model: "opus" });
+    const { result } = render(makeClient());
+    await waitFor(() => expect(result.current.model).toBe("opus"));
+    const body = result.current.buildRequest("what is in this?", [shot]);
+    expect(body.message).toBe("what is in this?");
+    expect(body.artifacts).toEqual([shot]);
+  });
+
+  // Always sent, even empty: one shape for the server to read, the same rule
+  // `sessions.send` follows.
+  it("sends an empty list when nothing is attached", async () => {
+    storeDraft({ environment: runtime("local"), model: "opus" });
+    const { result } = render(makeClient());
+    await waitFor(() => expect(result.current.model).toBe("opus"));
+    expect(result.current.buildRequest("just talking", []).artifacts).toEqual([]);
+  });
+
+  // A reload that keeps what you typed and drops what you attached is the more
+  // annoying half of losing both, so the refs live in the stored draft. Only
+  // refs — the bytes are already on the server.
+  it("remembers attachments across a reload", async () => {
+    storeDraft({ environment: runtime("local"), model: "opus" });
+    const first = render(makeClient());
+    await waitFor(() => expect(first.result.current.model).toBe("opus"));
+
+    act(() => first.result.current.setArtifacts([shot]));
+    await waitFor(() =>
+      expect(first.result.current.artifacts).toEqual([shot]),
+    );
+
+    // A second mount reads localStorage afresh — this is the reload.
+    const second = render(makeClient());
+    await waitFor(() => expect(second.result.current.artifacts).toEqual([shot]));
+  });
+
+  it("forgets them once they have been sent", async () => {
+    storeDraft({ environment: runtime("local"), model: "opus" });
+    const { result } = render(makeClient());
+    await waitFor(() => expect(result.current.model).toBe("opus"));
+
+    act(() => result.current.setArtifacts([shot]));
+    await waitFor(() => expect(result.current.artifacts).toEqual([shot]));
+
+    // What the composer reports after a send.
+    act(() => result.current.setArtifacts([]));
+    await waitFor(() => expect(result.current.artifacts).toEqual([]));
+
+    const remounted = render(makeClient());
+    await waitFor(() => expect(remounted.result.current.artifacts).toEqual([]));
   });
 });
 

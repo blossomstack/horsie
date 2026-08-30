@@ -43,6 +43,7 @@ describe("Transcript user turn", () => {
       thinking: [],
       toolCalls: [],
       subagentResults: [],
+      artifacts: [],
       createdAtMs: 1_000,
     };
     render(

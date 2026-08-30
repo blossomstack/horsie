@@ -161,11 +161,11 @@ impl Toolbox for MemoryToolbox {
         tool_call_id: &str,
     ) -> Result<ToolOutcome, ToolCallError> {
         match name {
-            LOAD => self.load(input).await.map(ToolOutcome::Result),
-            CREATE => self.create(input).await.map(ToolOutcome::Result),
-            UPDATE => self.update(input).await.map(ToolOutcome::Result),
-            DELETE => self.delete(input).await.map(ToolOutcome::Result),
-            LIST => self.list(input).await.map(ToolOutcome::Result),
+            LOAD => self.load(input).await.map(ToolOutcome::from),
+            CREATE => self.create(input).await.map(ToolOutcome::from),
+            UPDATE => self.update(input).await.map(ToolOutcome::from),
+            DELETE => self.delete(input).await.map(ToolOutcome::from),
+            LIST => self.list(input).await.map(ToolOutcome::from),
             _ => self.inner.execute(name, input, tool_call_id).await,
         }
     }

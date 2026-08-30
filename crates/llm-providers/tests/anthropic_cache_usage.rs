@@ -107,6 +107,7 @@ async fn usage_for(
         parts: vec![ContentPart::Text(TextPart { text: "hi".into() })],
     }];
     let request = CompletionRequest {
+        artifacts: horsie_agentcore::ArtifactBytes::empty(),
         messages: &messages,
         system: None,
         tools: vec![],

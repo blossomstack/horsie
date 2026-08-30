@@ -6,11 +6,55 @@
 //! agent's toolbox next to the runtime tools, MCP calls execute in the server
 //! process and never reach the sandbox.
 
+use crate::artifacts::ArtifactService;
+use crate::projects::ProjectId;
 use async_trait::async_trait;
-use horsie_agentcore::{ToolCallError, ToolOutcome, ToolSpec, Toolbox};
-use horsie_support::mcp::{McpClient, McpError, McpToolDef};
+use horsie_agentcore::{ToolCallError, ToolOutcome, ToolSpec, ToolValue, Toolbox};
+use horsie_models::agent::ArtifactRef;
+use horsie_support::mcp::{McpClient, McpError, McpImage, McpToolDef};
 use serde_json::Value;
 use std::sync::Arc;
+
+/// Where a toolbox puts the bytes a tool produced: one project's artifact
+/// store.
+///
+/// A pair rather than two parameters, because a service without the project it
+/// is storing into cannot be used and the two always travel together. It is
+/// also the only thing a toolbox is given — it can store bytes and read nothing
+/// back, which is the whole of what a tool result needs.
+#[derive(Clone)]
+pub struct ArtifactSink {
+    service: Arc<ArtifactService>,
+    project: ProjectId,
+}
+
+impl ArtifactSink {
+    #[must_use]
+    pub fn new(service: Arc<ArtifactService>, project: ProjectId) -> Self {
+        Self { service, project }
+    }
+
+    /// Store every blob, keeping the ones that made it.
+    ///
+    /// A blob that will not store is logged and skipped rather than failing the
+    /// call: losing a screenshot is much better than losing the whole result,
+    /// and the text beside it is usually the part the model was going to act
+    /// on. The service refuses anything that is not an image or a PDF, so a
+    /// tool answering with some other binary loses only that block.
+    async fn store(&self, blobs: impl IntoIterator<Item = Vec<u8>>) -> Vec<ArtifactRef> {
+        let mut refs = Vec::new();
+        for bytes in blobs {
+            match self.service.put(&self.project, bytes, None).await {
+                Ok(r) => refs.push(r),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "an MCP tool result's artifact could not be stored; keeping the text"
+                ),
+            }
+        }
+        refs
+    }
+}
 
 /// A configured MCP server whose tools are not in this turn's toolbox, and why.
 ///
@@ -152,6 +196,13 @@ impl Toolbox for CompositeToolbox {
 pub struct PluginMcpToolbox {
     client: horsie_runtime_host::RuntimeClient,
     tools: Vec<horsie_models::runtime::PluginMcpTool>,
+    /// Where the runtime's bytes are stored. The runtime has no database, so it
+    /// ships raw bytes and this is what turns them into references.
+    ///
+    /// `None` only where there is no project to store into — a harness that
+    /// wired an agent without services. Such a toolbox keeps the text and drops
+    /// the bytes, which is what it did before any of this existed.
+    artifacts: Option<ArtifactSink>,
 }
 
 impl PluginMcpToolbox {
@@ -161,8 +212,13 @@ impl PluginMcpToolbox {
     pub fn new(
         client: horsie_runtime_host::RuntimeClient,
         tools: Vec<horsie_models::runtime::PluginMcpTool>,
+        artifacts: Option<ArtifactSink>,
     ) -> Self {
-        Self { client, tools }
+        Self {
+            client,
+            tools,
+            artifacts,
+        }
     }
 }
 
@@ -194,11 +250,22 @@ impl Toolbox for PluginMcpToolbox {
                 "no plugin MCP tool named '{name}'"
             )));
         }
-        self.client
+        let output = self
+            .client
             .mcp_invoke(tool_call_id, name, input.to_string())
             .await
-            .map(|text| ToolOutcome::Result(Value::String(text)))
-            .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))
+            .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?;
+        let refs = match (&self.artifacts, output.artifacts.is_empty()) {
+            (Some(sink), false) => {
+                sink.store(output.artifacts.into_iter().map(Vec::from))
+                    .await
+            }
+            _ => Vec::new(),
+        };
+        Ok(ToolOutcome::Result(ToolValue::with_artifacts(
+            Value::String(output.stdout),
+            refs,
+        )))
     }
 }
 
@@ -209,23 +276,36 @@ pub struct McpToolbox {
     server: String,
     client: Arc<McpClient>,
     tools: Vec<McpToolDef>,
+    /// Where an image block's bytes go. No runtime hop here: the client is in
+    /// this process, so the bytes are already in hand when the call returns.
+    artifacts: ArtifactSink,
 }
 
 impl McpToolbox {
     /// Build from an already-fetched tool list (see [`McpToolbox::connect`]).
-    pub fn new(server: String, client: Arc<McpClient>, tools: Vec<McpToolDef>) -> Self {
+    pub fn new(
+        server: String,
+        client: Arc<McpClient>,
+        tools: Vec<McpToolDef>,
+        artifacts: ArtifactSink,
+    ) -> Self {
         Self {
             server,
             client,
             tools,
+            artifacts,
         }
     }
 
     /// Connect: `initialize` + `tools/list`, capturing the advertised tools.
-    pub async fn connect(server: String, client: Arc<McpClient>) -> Result<Self, McpError> {
+    pub async fn connect(
+        server: String,
+        client: Arc<McpClient>,
+        artifacts: ArtifactSink,
+    ) -> Result<Self, McpError> {
         client.initialize().await?;
         let tools = client.list_tools().await?;
-        Ok(Self::new(server, client, tools))
+        Ok(Self::new(server, client, tools, artifacts))
     }
 
     fn prefix(&self) -> String {
@@ -262,7 +342,16 @@ impl Toolbox for McpToolbox {
         })?;
         match self.client.call_tool(tool, input).await {
             Ok(outcome) if outcome.is_error => Err(ToolCallError::ExecutionFailed(outcome.text)),
-            Ok(outcome) => Ok(ToolOutcome::Result(Value::String(outcome.text))),
+            Ok(outcome) => {
+                let refs = self
+                    .artifacts
+                    .store(outcome.images.into_iter().map(|McpImage(b)| b))
+                    .await;
+                Ok(ToolOutcome::Result(ToolValue::with_artifacts(
+                    Value::String(outcome.text),
+                    refs,
+                )))
+            }
             Err(e) => Err(ToolCallError::ExecutionFailed(e.to_string())),
         }
     }
@@ -280,6 +369,30 @@ mod tests {
     use horsie_support::mcp::McpTransport;
     use serde_json::json;
     use std::collections::HashMap;
+
+    /// A sink over a real database. The `Db` is returned so the caller holds it
+    /// open for the length of the test.
+    async fn sink() -> (ArtifactSink, crate::db::Db) {
+        let db = crate::db::testing::db().await;
+        let service = Arc::new(crate::artifacts::ArtifactService::in_database(db.clone()));
+        (ArtifactSink::new(service, ProjectId::new("p1")), db)
+    }
+
+    /// A real 1x1 PNG — the artifact service decides what bytes are from the
+    /// bytes, so a test that wants a stored image has to hand it a real one.
+    fn png() -> Vec<u8> {
+        vec![
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00,
+        ]
+    }
+
+    /// `data` for an MCP image block.
+    fn b64(bytes: &[u8]) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
 
     /// A discovered tool list becomes specs the agent can call, with the
     /// server's own JSON Schema carried through.
@@ -306,6 +419,7 @@ mod tests {
                     input_schema: "not json".into(),
                 },
             ],
+            None,
         );
         let specs = tb.specs();
         assert_eq!(specs[0].name, "mcp__docs__search");
@@ -322,7 +436,7 @@ mod tests {
             horsie_runtime_host::testkit::MockTransport::ok(""),
             "agent",
         );
-        let tb = PluginMcpToolbox::new(client, Vec::new());
+        let tb = PluginMcpToolbox::new(client, Vec::new(), None);
         let err = tb
             .execute("mcp__docs__search", json!({}), "tc1")
             .await
@@ -350,7 +464,7 @@ mod tests {
             _input: Value,
             _tool_call_id: &str,
         ) -> Result<ToolOutcome, ToolCallError> {
-            Ok(ToolOutcome::Result(Value::String(format!("ran {name}"))))
+            Ok(ToolOutcome::result(Value::String(format!("ran {name}"))))
         }
     }
 
@@ -394,7 +508,7 @@ mod tests {
         assert_eq!(names, vec!["alpha", "beta"]);
         assert_eq!(
             tb.execute("beta", json!({}), "tc1").await.unwrap(),
-            ToolOutcome::Result(json!("ran beta"))
+            ToolOutcome::result(json!("ran beta"))
         );
         assert!(matches!(
             tb.execute("gamma", json!({}), "tc1").await,
@@ -461,7 +575,10 @@ mod tests {
                 json!({ "content": [ { "type": "text", "text": "PR #7 opened" } ], "isError": false }),
             ),
         ]);
-        let tb = McpToolbox::connect("github".into(), client).await.unwrap();
+        let (sink, _db) = sink().await;
+        let tb = McpToolbox::connect("github".into(), client, sink)
+            .await
+            .unwrap();
 
         let specs = tb.specs();
         assert_eq!(specs.len(), 1);
@@ -476,7 +593,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(out, ToolOutcome::Result(json!("PR #7 opened")));
+        assert_eq!(out, ToolOutcome::result(json!("PR #7 opened")));
 
         // A name outside this server's namespace is rejected without a call.
         assert!(matches!(
@@ -501,6 +618,7 @@ mod tests {
                 description: Some("the plugin's".into()),
                 input_schema: r#"{"type":"object"}"#.into(),
             }],
+            None,
         ));
         let admin: Arc<dyn Toolbox> = Arc::new(
             McpToolbox::connect(
@@ -518,6 +636,7 @@ mod tests {
                                 "isError": false }),
                     ),
                 ]),
+                sink().await.0,
             )
             .await
             .unwrap(),
@@ -537,8 +656,129 @@ mod tests {
             tb.execute("mcp__github__open_pr", json!({}), "tc1")
                 .await
                 .unwrap(),
-            ToolOutcome::Result(json!("from the admin server"))
+            ToolOutcome::result(json!("from the admin server"))
         );
+    }
+
+    /// The reported bug, on the server-side path: a screenshot tool answers
+    /// with an `image` block and the model used to be handed an empty string.
+    /// The bytes are stored here and the outcome carries the reference.
+    #[tokio::test]
+    async fn an_image_block_becomes_a_stored_artifact_on_the_outcome() {
+        let client = mock_client(vec![
+            ("initialize", json!({})),
+            (
+                "tools/list",
+                json!({ "tools": [ { "name": "screenshot", "inputSchema": { "type": "object" } } ] }),
+            ),
+            (
+                "tools/call",
+                json!({ "content": [
+                    { "type": "text", "text": "here it is" },
+                    { "type": "image", "data": b64(&png()), "mimeType": "image/png" }
+                ] }),
+            ),
+        ]);
+        let (sink, db) = sink().await;
+        let service = sink.service.clone();
+        let tb = McpToolbox::connect("shots".into(), client, sink)
+            .await
+            .unwrap();
+
+        let ToolOutcome::Result(value) = tb
+            .execute("mcp__shots__screenshot", json!({}), "tc1")
+            .await
+            .unwrap()
+        else {
+            panic!("a screenshot does not end the run");
+        };
+        assert_eq!(value.value, json!("here it is"));
+        assert_eq!(value.artifacts.len(), 1);
+        assert_eq!(value.artifacts[0].media_type, "image/png");
+        // Stored, not merely described: the bytes come back out again.
+        assert_eq!(
+            service
+                .get(&ProjectId::new("p1"), &value.artifacts[0].id)
+                .await
+                .unwrap(),
+            png()
+        );
+        drop(db);
+    }
+
+    /// An artifact that will not store costs itself and nothing else. Losing a
+    /// screenshot is much better than losing the whole result — so the text
+    /// still arrives and the call still succeeds.
+    #[tokio::test]
+    async fn an_artifact_that_will_not_store_degrades_to_text() {
+        let client = mock_client(vec![
+            ("initialize", json!({})),
+            (
+                "tools/list",
+                json!({ "tools": [ { "name": "screenshot", "inputSchema": { "type": "object" } } ] }),
+            ),
+            (
+                "tools/call",
+                json!({ "content": [
+                    { "type": "text", "text": "here it is" },
+                    // Claims to be a PNG and is not. The service sniffs the
+                    // bytes and refuses them, which is the failure this covers.
+                    { "type": "image", "data": b64(b"definitely not an image"),
+                      "mimeType": "image/png" }
+                ] }),
+            ),
+        ]);
+        let (sink, _db) = sink().await;
+        let tb = McpToolbox::connect("shots".into(), client, sink)
+            .await
+            .unwrap();
+
+        let ToolOutcome::Result(value) = tb
+            .execute("mcp__shots__screenshot", json!({}), "tc1")
+            .await
+            .unwrap()
+        else {
+            panic!("a failed artifact must not end the run");
+        };
+        assert_eq!(value.value, json!("here it is"));
+        assert!(value.artifacts.is_empty());
+    }
+
+    /// The runtime ships bytes because it has no database; the server is what
+    /// stores them. A plugin MCP screenshot has to survive that hop too.
+    #[tokio::test]
+    async fn a_plugin_mcp_result_stores_the_runtimes_bytes() {
+        let client = horsie_runtime_host::RuntimeClient::detached(
+            horsie_runtime_host::testkit::MockTransport::output(
+                horsie_models::runtime::ToolOutput {
+                    stdout: "here it is".into(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                    artifacts: vec![fluorite::Bytes(png())],
+                },
+            ),
+            "agent",
+        );
+        let (sink, _db) = sink().await;
+        let tb = PluginMcpToolbox::new(
+            client,
+            vec![horsie_models::runtime::PluginMcpTool {
+                name: "mcp__shots__screenshot".into(),
+                description: None,
+                input_schema: r#"{"type":"object"}"#.into(),
+            }],
+            Some(sink),
+        );
+        let ToolOutcome::Result(value) = tb
+            .execute("mcp__shots__screenshot", json!({}), "tc1")
+            .await
+            .unwrap()
+        else {
+            panic!("a screenshot does not end the run");
+        };
+        assert_eq!(value.value, json!("here it is"));
+        assert_eq!(value.artifacts.len(), 1);
+        assert_eq!(value.artifacts[0].media_type, "image/png");
     }
 
     #[tokio::test]
@@ -554,7 +794,10 @@ mod tests {
                 json!({ "content": [ { "type": "text", "text": "kaboom" } ], "isError": true }),
             ),
         ]);
-        let tb = McpToolbox::connect("srv".into(), client).await.unwrap();
+        let (sink, _db) = sink().await;
+        let tb = McpToolbox::connect("srv".into(), client, sink)
+            .await
+            .unwrap();
         match tb.execute("mcp__srv__boom", json!({}), "tc1").await {
             Err(ToolCallError::ExecutionFailed(msg)) => assert_eq!(msg, "kaboom"),
             other => panic!("expected ExecutionFailed, got {other:?}"),

@@ -7,6 +7,7 @@ use session.AnnotationEntry;
 use session.SessionSummary;
 use session.SessionDetail;
 use agent.TaskItem;
+use agent.ArtifactRef;
 use session.UsageView;
 use session.SubAgentView;
 use agent.Usage;
@@ -33,6 +34,15 @@ struct CreateSessionRequest {
     /// The first user message, queued as part of the create. Required and
     /// non-empty.
     message: String,
+    /// What came attached to that first message — images and documents already
+    /// uploaded to this project, named by id. Same shape and same rule as
+    /// `SendMessageRequest.artifacts`: the bytes went up separately, and the
+    /// server re-resolves every id against this project before accepting.
+    ///
+    /// Defaulted, so every client that creates a session with `{"message": ...}`
+    /// alone keeps working.
+    #[default = "[]"]
+    artifacts: Vec<ArtifactRef>,
     /// Where this session runs and what it runs against. Required — a session
     /// that did not say has not chosen, it has been chosen for.
     environment: EnvironmentSpec,
@@ -147,7 +157,20 @@ struct GetAgentResponse { agent: AgentDocument }
 struct CreateSessionResponse { session: SessionSummary }
 struct ListSessionsResponse { sessions: Vec<SessionSummary> }
 struct GetSessionResponse { session: SessionDetail }
-struct SendMessageRequest { text: String }
+/// A message the user is sending, and what they attached to it.
+///
+/// `artifacts` are ids the client already uploaded — the bytes went up
+/// separately, so sending stays a small JSON request and the composer can
+/// show a thumbnail while the turn is still being typed. The server
+/// re-resolves every id against this project before accepting, so a client
+/// cannot name another project's bytes.
+struct SendMessageRequest {
+    text: String,
+    /// Defaulted: every client that predates attachments sends `{"text": ...}`
+    /// alone, and a required field here answers all of them with a 422.
+    #[default = "[]"]
+    artifacts: Vec<ArtifactRef>,
+}
 /// Acknowledges an accepted user message. The id is how a client matches its
 /// optimistic bubble to the queued message the server now owes an answer for.
 ///

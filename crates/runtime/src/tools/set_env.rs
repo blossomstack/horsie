@@ -28,6 +28,7 @@ pub fn exec(state: &RuntimeState, agent: &str, input: SetEnvInput) -> ToolResult
         stdout: format!("{verb} {name}"),
         stderr: String::new(),
         exit_code: 0,
+        artifacts: Vec::new(),
     })
 }
 

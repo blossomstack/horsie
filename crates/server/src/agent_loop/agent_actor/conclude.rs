@@ -424,6 +424,8 @@ impl AgentActor {
                      If the step's work is done, call `{SUBMIT_RESULT_TOOL}` now. If it is \
                      not, carry on working."
                 ),
+                // A nudge is the server talking to the model.
+                artifacts: Vec::new(),
             },
             at_ms: now_ms(),
         };
@@ -615,6 +617,7 @@ mod fence_tests {
     async fn a_report_from_a_superseded_run_is_ignored() {
         let (tx, mut outcomes) = tokio::sync::mpsc::unbounded_channel();
         let ctx = AgentRuntimeContext {
+            artifacts: None,
             context_provider: Arc::new(HangingProvider),
             revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
             parent: Arc::new(OutcomeChannel(tx)),
@@ -640,6 +643,7 @@ mod fence_tests {
                 item: crate::agent_loop::Incoming::User {
                     id: "m5".into(),
                     text: "first".into(),
+                    artifacts: Vec::new(),
                 },
                 ack: None,
             }))
@@ -669,6 +673,7 @@ mod fence_tests {
                 item: crate::agent_loop::Incoming::User {
                     id: "m6".into(),
                     text: "second".into(),
+                    artifacts: Vec::new(),
                 },
                 ack: None,
             }))
@@ -728,6 +733,7 @@ mod fence_tests {
     async fn a_stopped_turn_keeps_the_text_it_had_already_written() {
         let (tx, _outcomes) = tokio::sync::mpsc::unbounded_channel();
         let ctx = AgentRuntimeContext {
+            artifacts: None,
             context_provider: Arc::new(HangingProvider),
             revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
             parent: Arc::new(OutcomeChannel(tx)),
@@ -752,6 +758,7 @@ mod fence_tests {
                 item: crate::agent_loop::Incoming::User {
                     id: "m1".into(),
                     text: "write me an essay".into(),
+                    artifacts: Vec::new(),
                 },
                 ack: None,
             }))
@@ -807,7 +814,8 @@ mod fence_tests {
                         ContentPart::Thinking(_)
                         | ContentPart::ToolCall(_)
                         | ContentPart::ToolResult(_)
-                        | ContentPart::SubAgentResult(_) => None,
+                        | ContentPart::SubAgentResult(_)
+                        | ContentPart::Artifact(_) => None,
                     })
                     .collect();
                 (!text.is_empty()).then_some(text)

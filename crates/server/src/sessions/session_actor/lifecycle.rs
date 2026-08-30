@@ -289,6 +289,7 @@ impl RuntimeLifecycle {
                 // outlives its session is not merely a dead link — an ask among
                 // them offers to resume an agent that no longer exists.
                 actor.forget_inbox().await;
+                actor.release_artifacts().await;
                 let _ = reply.send(());
                 CommandEffect::stop()
             }
@@ -780,6 +781,7 @@ mod tests {
                 agent_id: None,
                 text: "hello".into(),
                 reply: ReplyTo::from_sender(tx),
+                artifacts: Vec::new(),
             }))
             .await
             .unwrap();
@@ -906,6 +908,7 @@ mod tests {
                 agent_id: None,
                 text: "try again".into(),
                 reply: ReplyTo::from_sender(tx),
+                artifacts: Vec::new(),
             }))
             .await
             .unwrap();
@@ -1135,6 +1138,7 @@ mod tests {
                     agent_id: None,
                     text: "go".into(),
                     reply,
+                    artifacts: Vec::new(),
                 })
             })
             .await

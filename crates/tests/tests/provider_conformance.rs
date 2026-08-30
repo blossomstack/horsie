@@ -345,7 +345,7 @@ async fn a_tool_call_with_unparseable_input_is_never_dispatched() {
                     seen.lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .push(name.to_string());
-                    Ok(horsie_agentcore::ToolOutcome::Result(input))
+                    Ok(horsie_agentcore::ToolOutcome::result(input))
                 }),
             );
 
@@ -430,6 +430,7 @@ fn user_history() -> Vec<horsie_agentcore::Message> {
 
 fn request_for(messages: &[horsie_agentcore::Message]) -> horsie_agentcore::CompletionRequest<'_> {
     horsie_agentcore::CompletionRequest {
+        artifacts: horsie_agentcore::ArtifactBytes::empty(),
         messages,
         system: None,
         tools: vec![],

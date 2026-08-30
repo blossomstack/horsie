@@ -444,7 +444,7 @@ impl ConfigStore for DbConfigStore {
         .map_err(|e| e.to_string())?;
 
         sqlx::query(&self.db.q(
-            "INSERT INTO models (project_id, alias, provider, model_id, max_tokens, context_window, thinking_efforts, thinking_effort, thinking_dialect, forced_tools_disable_thinking) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO models (project_id, alias, provider, model_id, max_tokens, context_window, thinking_efforts, thinking_effort, thinking_dialect, forced_tools_disable_thinking, supports_images, supports_documents) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ))
         .bind(self.user.as_str())
         .bind(&alias)
@@ -456,6 +456,8 @@ impl ConfigStore for DbConfigStore {
         .bind(input.thinking_effort.clone())
         .bind(input.thinking_dialect.clone())
         .bind(i64::from(input.forced_tools_disable_thinking.unwrap_or(false)))
+        .bind(i64::from(input.supports_images.unwrap_or(false)))
+        .bind(i64::from(input.supports_documents.unwrap_or(false)))
         .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
@@ -523,6 +525,8 @@ struct ModelRow {
     thinking_effort: Option<String>,
     thinking_dialect: Option<String>,
     forced_tools_disable_thinking: bool,
+    supports_images: bool,
+    supports_documents: bool,
 }
 
 fn default_context_window(model_id: &str) -> Option<u32> {
@@ -623,6 +627,8 @@ fn build_registry(
             crate::sessions::spec::ModelEntry {
                 provider: built,
                 context_window: m.context_window.and_then(|v| u32::try_from(v).ok()),
+                supports_images: m.supports_images,
+                supports_documents: m.supports_documents,
             },
         );
     }
@@ -1020,6 +1026,8 @@ fn model_view(r: &ModelRow) -> ModelView {
         thinking_effort: r.thinking_effort.clone(),
         thinking_dialect: r.thinking_dialect.clone(),
         forced_tools_disable_thinking: Some(r.forced_tools_disable_thinking),
+        supports_images: Some(r.supports_images),
+        supports_documents: Some(r.supports_documents),
     }
 }
 
@@ -1101,7 +1109,7 @@ where
     E: sqlx::Executor<'e, Database = sqlx::Any>,
 {
     let sql = db.q(
-        "SELECT alias, provider, model_id, max_tokens, context_window, thinking_efforts, thinking_effort, thinking_dialect, forced_tools_disable_thinking FROM models WHERE project_id = ? ORDER BY alias",
+        "SELECT alias, provider, model_id, max_tokens, context_window, thinking_efforts, thinking_effort, thinking_dialect, forced_tools_disable_thinking, supports_images, supports_documents FROM models WHERE project_id = ? ORDER BY alias",
     );
     let rows = sqlx::query(&sql).bind(user.as_str()).fetch_all(ex).await?;
     let mut out = Vec::with_capacity(rows.len());
@@ -1109,6 +1117,8 @@ where
         out.push(ModelRow {
             forced_tools_disable_thinking: r.try_get::<i64, _>("forced_tools_disable_thinking")?
                 != 0,
+            supports_images: r.try_get::<i64, _>("supports_images")? != 0,
+            supports_documents: r.try_get::<i64, _>("supports_documents")? != 0,
             alias: r.try_get("alias")?,
             provider: r.try_get("provider")?,
             model_id: r.try_get("model_id")?,
@@ -1263,6 +1273,8 @@ mod tests {
                     thinking_effort: Some("high".into()),
                     thinking_dialect: Some("openai_effort".into()),
                     forced_tools_disable_thinking: Some(true),
+                    supports_images: None,
+                    supports_documents: None,
                 }],
             )
             .await
@@ -1273,6 +1285,76 @@ mod tests {
         assert_eq!(m.forced_tools_disable_thinking, Some(true));
         // The built-in default for a "deepseek" model id is the real window.
         assert_eq!(m.context_window, Some(1_048_576));
+    }
+
+    /// Both flags have to survive the save→read round trip, and reach the
+    /// registry the session actor reads its gate out of — a value that stops
+    /// at the wire view would gate nothing.
+    #[tokio::test]
+    async fn vision_flags_persist_and_reach_the_registry() {
+        let o = open().await;
+        o.store
+            .seed(vec![provider("p", Some("k"))], vec![])
+            .await
+            .expect("provider saved");
+
+        let mut seer = model("seer", "p");
+        seer.supports_images = Some(true);
+        let mut reader = model("reader", "p");
+        reader.supports_documents = Some(true);
+        for m in [seer, reader, model("blind", "p")] {
+            o.store.upsert_model(m).await.expect("model saved");
+        }
+
+        let view = o.store.view().await.expect("view");
+        let of = |alias: &str| {
+            view.models
+                .iter()
+                .find(|m| m.alias == alias)
+                .cloned()
+                .expect("model in view")
+        };
+        assert_eq!(of("seer").supports_images, Some(true));
+        assert_eq!(of("seer").supports_documents, Some(false));
+        assert_eq!(of("reader").supports_images, Some(false));
+        assert_eq!(of("reader").supports_documents, Some(true));
+        assert_eq!(of("blind").supports_images, Some(false));
+        assert_eq!(of("blind").supports_documents, Some(false));
+
+        let reg = o.registry.read().unwrap();
+        assert!(reg["seer"].shows_artifacts(), "images alone are enough");
+        assert!(reg["reader"].shows_artifacts(), "documents alone are too");
+        assert!(!reg["blind"].shows_artifacts());
+    }
+
+    /// A model saved before these columns existed claims nothing, and must
+    /// read as claiming nothing — the safe direction, since showing an image
+    /// to a model that cannot take one fails the turn.
+    #[tokio::test]
+    async fn a_row_written_without_the_flags_reads_as_false() {
+        let o = open().await;
+        o.store
+            .seed(vec![provider("p", Some("k"))], vec![])
+            .await
+            .expect("provider saved");
+
+        // Exactly the columns the pre-0046 INSERT named.
+        sqlx::query(&o.db.q(
+            "INSERT INTO models (project_id, alias, provider, model_id) VALUES (?, 'old', 'p', 'id')",
+        ))
+        .bind("1")
+        .execute(o.db.pool())
+        .await
+        .expect("legacy row");
+
+        let view = o.store.view().await.expect("view");
+        let m = view
+            .models
+            .iter()
+            .find(|m| m.alias == "old")
+            .expect("legacy model is readable at all");
+        assert_eq!(m.supports_images, Some(false));
+        assert_eq!(m.supports_documents, Some(false));
     }
 
     fn provider(name: &str, key: Option<&str>) -> ProviderInput {
@@ -1296,6 +1378,8 @@ mod tests {
             thinking_effort: None,
             thinking_dialect: None,
             forced_tools_disable_thinking: None,
+            supports_images: None,
+            supports_documents: None,
         }
     }
 
@@ -1555,6 +1639,8 @@ mod tests {
                         thinking_effort: None,
                         thinking_dialect: None,
                         forced_tools_disable_thinking: None,
+                        supports_images: None,
+                        supports_documents: None,
                     },
                     ModelInput {
                         alias: "custom".into(),
@@ -1566,6 +1652,8 @@ mod tests {
                         thinking_effort: None,
                         thinking_dialect: None,
                         forced_tools_disable_thinking: None,
+                        supports_images: None,
+                        supports_documents: None,
                     },
                 ],
             )

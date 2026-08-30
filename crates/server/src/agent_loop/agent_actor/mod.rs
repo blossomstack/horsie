@@ -384,6 +384,7 @@ mod tests {
     fn a_turn_boundary_snapshots_only_once_enough_events_have_accrued() {
         let session_id = uuid::Uuid::new_v4();
         let ctx = AgentRuntimeContext {
+            artifacts: None,
             context_provider: Arc::new(StubContext),
             revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
             parent: Arc::new(StubParent),
@@ -466,6 +467,7 @@ mod tests {
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let recorder = Arc::new(Recorder::default());
         let ctx = AgentRuntimeContext {
+            artifacts: None,
             context_provider: Arc::new(NoContext),
             revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
             parent: Arc::new(DeafParent),
@@ -540,6 +542,7 @@ mod interruption_tests {
             .unwrap();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = AgentRuntimeContext {
+            artifacts: None,
             context_provider: Arc::new(HangingContext),
             revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
             parent: Arc::new(OutcomeChannel(tx)),

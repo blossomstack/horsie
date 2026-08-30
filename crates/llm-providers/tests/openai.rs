@@ -39,6 +39,7 @@ impl EventSink for RecordingSink {
 
 fn request(messages: &[Message]) -> CompletionRequest<'_> {
     CompletionRequest {
+        artifacts: horsie_agentcore::ArtifactBytes::empty(),
         messages,
         system: None,
         tools: vec![],
@@ -139,6 +140,7 @@ async fn streams_tool_calls_and_reports_tool_use() {
         })],
     }];
     let request = CompletionRequest {
+        artifacts: horsie_agentcore::ArtifactBytes::empty(),
         messages: &messages,
         system: None,
         tools: vec![horsie_agentcore::ToolSpec {
@@ -295,6 +297,7 @@ async fn streams_responses_tool_calls_and_reports_tool_use() {
         })],
     }];
     let request = CompletionRequest {
+        artifacts: horsie_agentcore::ArtifactBytes::empty(),
         messages: &messages,
         system: None,
         tools: vec![horsie_agentcore::ToolSpec {

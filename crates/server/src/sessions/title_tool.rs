@@ -129,7 +129,7 @@ impl Toolbox for SessionTitleToolbox {
             .await
             .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?
             .map_err(ToolCallError::ExecutionFailed)?;
-        Ok(ToolOutcome::Result(Value::String(format!(
+        Ok(ToolOutcome::result(Value::String(format!(
             "Session title set to \"{title}\"."
         ))))
     }

@@ -1,6 +1,7 @@
 use crate::mcp::error::McpError;
 use crate::mcp::transport::McpTransport;
-use crate::mcp::types::{McpCallOutcome, McpToolDef};
+use crate::mcp::types::{McpCallOutcome, McpImage, McpToolDef};
+use base64::Engine;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -65,8 +66,8 @@ impl McpClient {
         Ok(out)
     }
 
-    /// Call a tool by its MCP name, returning the joined text content and the
-    /// `isError` flag.
+    /// Call a tool by its MCP name, returning the joined text content, the
+    /// images it produced, and the `isError` flag.
     pub async fn call_tool(
         &self,
         name: &str,
@@ -78,27 +79,50 @@ impl McpClient {
             .get("isError")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let (text, images) = extract_content(&result);
         Ok(McpCallOutcome {
             is_error,
-            text: extract_text(&result),
+            text,
+            images,
         })
     }
 }
 
-/// Join the `text` fields of a `tools/call` result's `content[]` blocks.
-fn extract_text(result: &Value) -> String {
+/// Split a `tools/call` result's `content[]` into the text the model reads and
+/// the images the call produced.
+///
+/// `text` blocks are joined exactly as they always were. An `image` block is
+/// `{"type":"image","data":"<base64>","mimeType":"…"}`; its bytes are decoded
+/// here and its claimed `mimeType` is dropped — see [`McpImage`]. A block whose
+/// `data` will not decode is skipped rather than failing the call: a broken
+/// screenshot is worth less than the rest of the result.
+fn extract_content(result: &Value) -> (String, Vec<McpImage>) {
     let Some(content) = result.get("content").and_then(Value::as_array) else {
-        return String::new();
+        return (String::new(), Vec::new());
     };
     let mut parts: Vec<String> = Vec::new();
+    let mut images: Vec<McpImage> = Vec::new();
     for block in content {
-        if block.get("type").and_then(Value::as_str) == Some("text")
-            && let Some(t) = block.get("text").and_then(Value::as_str)
-        {
-            parts.push(t.to_string());
+        match block.get("type").and_then(Value::as_str) {
+            Some("text") => {
+                if let Some(t) = block.get("text").and_then(Value::as_str) {
+                    parts.push(t.to_string());
+                }
+            }
+            Some("image") => {
+                let decoded = block
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok());
+                match decoded {
+                    Some(bytes) if !bytes.is_empty() => images.push(McpImage(bytes)),
+                    _ => tracing::warn!("dropping an MCP image block that would not decode"),
+                }
+            }
+            _ => {}
         }
     }
-    parts.join("\n")
+    (parts.join("\n"), images)
 }
 
 #[cfg(test)]
@@ -187,6 +211,73 @@ mod tests {
         let out = c.call_tool("t", json!({})).await.unwrap();
         assert!(!out.is_error);
         assert_eq!(out.text, "line 1\nline 2");
+        // A text-only result is exactly what it always was.
+        assert!(out.images.is_empty());
+    }
+
+    /// The reported bug: a screenshot tool answers with an `image` block and no
+    /// text, and the model was handed an empty string.
+    #[tokio::test]
+    async fn call_tool_keeps_an_image_block() {
+        let c = client(vec![(
+            "tools/call",
+            json!({ "content": [ { "type": "image", "data": "aGk=", "mimeType": "image/png" } ] }),
+        )]);
+        let out = c.call_tool("t", json!({})).await.unwrap();
+        assert_eq!(out.text, "");
+        assert_eq!(out.images, vec![McpImage(b"hi".to_vec())]);
+    }
+
+    /// A result with both keeps both, each in the server's own order.
+    #[tokio::test]
+    async fn call_tool_keeps_text_and_images_together() {
+        let c = client(vec![(
+            "tools/call",
+            json!({ "content": [
+                { "type": "text", "text": "before" },
+                { "type": "image", "data": "b25l", "mimeType": "image/png" },
+                { "type": "text", "text": "after" },
+                { "type": "image", "data": "dHdv", "mimeType": "image/jpeg" }
+            ] }),
+        )]);
+        let out = c.call_tool("t", json!({})).await.unwrap();
+        assert_eq!(out.text, "before\nafter");
+        assert_eq!(
+            out.images,
+            vec![McpImage(b"one".to_vec()), McpImage(b"two".to_vec())]
+        );
+    }
+
+    /// A block that will not decode costs its own bytes and nothing else — the
+    /// rest of the result still reaches the model.
+    #[tokio::test]
+    async fn an_undecodable_image_block_is_dropped_not_fatal() {
+        let c = client(vec![(
+            "tools/call",
+            json!({ "content": [
+                { "type": "image", "data": "!!! not base64 !!!", "mimeType": "image/png" },
+                { "type": "image", "data": "", "mimeType": "image/png" },
+                { "type": "text", "text": "the page loaded" }
+            ] }),
+        )]);
+        let out = c.call_tool("t", json!({})).await.unwrap();
+        assert_eq!(out.text, "the page loaded");
+        assert!(out.images.is_empty());
+    }
+
+    /// A block type nobody handles is still ignored, and quietly.
+    #[tokio::test]
+    async fn call_tool_ignores_unknown_block_types() {
+        let c = client(vec![(
+            "tools/call",
+            json!({ "content": [
+                { "type": "audio", "data": "aGk=", "mimeType": "audio/wav" },
+                { "type": "text", "text": "only this" }
+            ] }),
+        )]);
+        let out = c.call_tool("t", json!({})).await.unwrap();
+        assert_eq!(out.text, "only this");
+        assert!(out.images.is_empty());
     }
 
     #[tokio::test]

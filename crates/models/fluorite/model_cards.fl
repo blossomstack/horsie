@@ -28,6 +28,12 @@ struct ModelCard {
     /// This backend rejects a pinned `tool_choice` while thinking is enabled,
     /// so thinking is disabled for those requests. Absent means false.
     forced_tools_disable_thinking: Option<bool>,
+    /// This model can be shown images. Absent means false.
+    supports_images: Option<bool>,
+    /// This model can be shown documents (PDFs). Separate from
+    /// `supports_images` because the wires differ per provider and per model.
+    /// Absent means false.
+    supports_documents: Option<bool>,
     created_at: String,
     updated_at: String,
 }
@@ -49,6 +55,12 @@ struct ModelCardInput {
     /// This backend rejects a pinned `tool_choice` while thinking is enabled.
     /// Absent means false.
     forced_tools_disable_thinking: Option<bool>,
+    /// This model can be shown images. Absent means false.
+    supports_images: Option<bool>,
+    /// This model can be shown documents (PDFs). Separate from
+    /// `supports_images` because the wires differ per provider and per model.
+    /// Absent means false.
+    supports_documents: Option<bool>,
 }
 
 /// Update input — `model_id` is immutable (rename = delete + create).
@@ -67,4 +79,10 @@ struct ModelCardUpdate {
     /// This backend rejects a pinned `tool_choice` while thinking is enabled.
     /// Absent means false.
     forced_tools_disable_thinking: Option<bool>,
+    /// This model can be shown images. Absent means false.
+    supports_images: Option<bool>,
+    /// This model can be shown documents (PDFs). Separate from
+    /// `supports_images` because the wires differ per provider and per model.
+    /// Absent means false.
+    supports_documents: Option<bool>,
 }

@@ -1089,6 +1089,12 @@ impl ContextProvider for SessionContextProvider {
                             .push(Arc::new(crate::agent_loop::PluginMcpToolbox::new(
                                 client.clone(),
                                 discovery.tools,
+                                self.services.as_ref().map(|s| {
+                                    crate::agent_loop::ArtifactSink::new(
+                                        s.artifacts.clone(),
+                                        s.project.clone(),
+                                    )
+                                }),
                             )));
                     }
                 }

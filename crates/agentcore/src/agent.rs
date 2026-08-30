@@ -66,6 +66,14 @@ pub struct Agent {
     pub(crate) tool_choice: ToolChoice,
     pub(crate) config: AgentConfig,
     pub(crate) history: Vec<Message>,
+    /// Bytes for the artifacts in `history`, refreshed before every provider
+    /// call. Held across calls so an image already fetched is not fetched
+    /// again for the next iteration of the same run.
+    pub(crate) artifacts: crate::provider::ArtifactBytes,
+    /// Where those bytes come from. `None` means this agent shows the model no
+    /// artifacts at all — the right behaviour for a text-only model, and the
+    /// default for any caller that has not wired one up.
+    pub(crate) artifact_source: Option<Arc<dyn crate::provider::ArtifactSource>>,
     /// Supplies what compaction needs and the agent cannot know. `None` means
     /// this agent never compacts.
     pub(crate) compaction: Option<std::sync::Arc<dyn crate::compaction::CompactionPolicy>>,
@@ -86,6 +94,7 @@ pub struct AgentBuilder {
     tool_choice: ToolChoice,
     config: AgentConfig,
     history: Vec<Message>,
+    artifact_source: Option<Arc<dyn crate::provider::ArtifactSource>>,
     compaction: Option<std::sync::Arc<dyn crate::compaction::CompactionPolicy>>,
     last_context_tokens: u32,
 }
@@ -104,6 +113,7 @@ impl AgentBuilder {
             tool_choice: ToolChoice::Auto,
             config: AgentConfig::default(),
             history: Vec::new(),
+            artifact_source: None,
             compaction: None,
             last_context_tokens: 0,
         }
@@ -156,6 +166,15 @@ impl AgentBuilder {
         self
     }
 
+    /// Where this agent fetches artifact bytes from. Left unset, the agent
+    /// shows the model no artifacts at all — which is exactly right for a
+    /// text-only model, and the safe default everywhere else.
+    #[must_use]
+    pub fn artifact_source(mut self, source: Arc<dyn crate::provider::ArtifactSource>) -> Self {
+        self.artifact_source = Some(source);
+        self
+    }
+
     pub fn build(self) -> Result<Agent, AgentBuildError> {
         if self.config.nudge_threshold >= self.config.stuck_threshold {
             return Err(AgentBuildError::InvalidConfig {
@@ -172,10 +191,39 @@ impl AgentBuilder {
             tool_choice: self.tool_choice,
             config: self.config,
             history: self.history,
+            artifacts: crate::provider::ArtifactBytes::default(),
+            artifact_source: self.artifact_source,
             compaction: self.compaction,
             last_context_tokens: self.last_context_tokens,
         })
     }
+}
+
+/// Every artifact id the messages reference, in first-seen order.
+///
+/// Both places one can appear: a part of its own (what a person attached) and
+/// the artifacts hanging off a tool result (what a tool produced).
+fn artifact_ids(messages: &[Message]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut ids = Vec::new();
+    for message in messages {
+        for part in &message.parts {
+            let from_part: &[String] = &match part {
+                ContentPart::Artifact(a) => vec![a.artifact.id.clone()],
+                ContentPart::ToolResult(r) => r.artifacts.iter().map(|a| a.id.clone()).collect(),
+                ContentPart::Text(_)
+                | ContentPart::ToolCall(_)
+                | ContentPart::Thinking(_)
+                | ContentPart::SubAgentResult(_) => Vec::new(),
+            };
+            for id in from_part {
+                if seen.insert(id.clone()) {
+                    ids.push(id.clone());
+                }
+            }
+        }
+    }
+    ids
 }
 
 fn extract_tool_calls(parts: &[ContentPart]) -> Vec<(String, String, Value)> {
@@ -186,7 +234,8 @@ fn extract_tool_calls(parts: &[ContentPart]) -> Vec<(String, String, Value)> {
             ContentPart::Text(_)
             | ContentPart::ToolResult(_)
             | ContentPart::Thinking(_)
-            | ContentPart::SubAgentResult(_) => None,
+            | ContentPart::SubAgentResult(_)
+            | ContentPart::Artifact(_) => None,
         })
         .collect()
 }
@@ -199,7 +248,8 @@ fn extract_text(parts: &[ContentPart]) -> String {
             ContentPart::ToolCall(_)
             | ContentPart::ToolResult(_)
             | ContentPart::Thinking(_)
-            | ContentPart::SubAgentResult(_) => None,
+            | ContentPart::SubAgentResult(_)
+            | ContentPart::Artifact(_) => None,
         })
         .collect::<Vec<_>>()
         .join("")
@@ -250,6 +300,26 @@ impl RunAccounting {
 }
 
 impl Agent {
+    /// Fetch bytes for any artifact in `history` we do not already hold.
+    ///
+    /// Only the missing ones: within a run the same image stays in the prompt
+    /// window across every iteration, so re-resolving each time would turn one
+    /// upload into a fetch per tool call.
+    async fn hydrate_artifacts(&mut self) {
+        let Some(source) = self.artifact_source.clone() else {
+            return;
+        };
+        let wanted: Vec<String> = artifact_ids(&self.history)
+            .into_iter()
+            .filter(|id| self.artifacts.get(id).is_none())
+            .collect();
+        if wanted.is_empty() {
+            return;
+        }
+        let fetched = source.resolve(&wanted).await;
+        self.artifacts.extend(fetched);
+    }
+
     /// `conversation_id` names the conversation these turns belong to. It is a
     /// constructor argument rather than an optional setter on purpose: an
     /// `Agent` is rebuilt for every run, so any default would hand a *different*
@@ -351,9 +421,15 @@ impl Agent {
             // turn boundary, so "compact between turns" needs no second seam.
             self.maybe_compact(self.last_context_tokens, events).await;
 
+            // Refresh before building the request, not once per turn: a tool
+            // that just produced a screenshot has already appended it to
+            // `history`, and this is the call that must show it.
+            self.hydrate_artifacts().await;
+
             let tools = self.toolbox.specs();
             let request = CompletionRequest {
                 messages: &self.history,
+                artifacts: &self.artifacts,
                 system: if self.system_prompt.is_empty() {
                     None
                 } else {
@@ -492,6 +568,8 @@ impl Agent {
                             tool_call_id: tool_call_id.clone(),
                             output: "You have called this tool with identical arguments multiple times. Please try a different approach.".to_string(),
                             is_error: false,
+                            // A nudge is the server talking, not the tool.
+                            artifacts: Vec::new(),
                         })],
                         created_at_ms: now_ms(),
                         started_at_ms: None,
@@ -566,27 +644,30 @@ impl Agent {
                 }))
                 .await?;
 
-            let (output, is_error) = match toolbox.execute(name, input.clone(), tool_call_id).await
-            {
-                // A string result is forwarded verbatim; re-encoding it as JSON
-                // would wrap it in quotes and escape every newline, wasting
-                // tokens and hurting readability. Non-string values are rendered
-                // as compact JSON.
-                Ok(ToolOutcome::Result(v)) => (
-                    v.as_str()
-                        .map(str::to_string)
-                        .unwrap_or_else(|| v.to_string()),
-                    false,
-                ),
-                Ok(ToolOutcome::StopRun) => {
-                    return Ok(Dispatched::Stopped(StoppedCall {
-                        tool: name.clone(),
-                        tool_call_id: tool_call_id.clone(),
-                        input: input.clone(),
-                    }));
-                }
-                Err(e) => (e.to_string(), true),
-            };
+            let (output, is_error, artifacts) =
+                match toolbox.execute(name, input.clone(), tool_call_id).await {
+                    // A string result is forwarded verbatim; re-encoding it as
+                    // JSON would wrap it in quotes and escape every newline,
+                    // wasting tokens and hurting readability. Non-string values
+                    // are rendered as compact JSON.
+                    Ok(ToolOutcome::Result(v)) => (
+                        v.value
+                            .as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| v.value.to_string()),
+                        false,
+                        v.artifacts,
+                    ),
+                    Ok(ToolOutcome::StopRun) => {
+                        return Ok(Dispatched::Stopped(StoppedCall {
+                            tool: name.clone(),
+                            tool_call_id: tool_call_id.clone(),
+                            input: input.clone(),
+                        }));
+                    }
+                    // An error produced no artifacts by definition.
+                    Err(e) => (e.to_string(), true, Vec::new()),
+                };
 
             // One reading of the clock for both the event and the message it
             // becomes, so the journal and the in-memory history agree.
@@ -608,6 +689,7 @@ impl Agent {
                     tool_call_id: tool_call_id.clone(),
                     output,
                     is_error,
+                    artifacts,
                 })],
                 created_at_ms: finished_ms,
                 started_at_ms: None,
@@ -1195,7 +1277,7 @@ mod tests {
                 if name == stopper {
                     Ok(ToolOutcome::StopRun)
                 } else {
-                    Ok(ToolOutcome::Result(json!("done")))
+                    Ok(ToolOutcome::result(json!("done")))
                 }
             }),
         )
@@ -1871,7 +1953,7 @@ mod tests {
                 input_schema: json!({ "type": "object" }),
             }],
             Arc::new(|_, _| {
-                Ok(ToolOutcome::Result(Value::String(
+                Ok(ToolOutcome::result(Value::String(
                     "line1\nline2".to_string(),
                 )))
             }),
@@ -1933,7 +2015,7 @@ mod tests {
                 self.timed_out
                     .store(true, std::sync::atomic::Ordering::SeqCst);
             }
-            Ok(ToolOutcome::Result(input))
+            Ok(ToolOutcome::result(input))
         }
     }
 

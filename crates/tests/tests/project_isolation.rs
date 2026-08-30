@@ -125,6 +125,8 @@ async fn model_cards_are_isolated() {
         thinking_dialect: None,
         base_url: None,
         forced_tools_disable_thinking: None,
+        supports_images: None,
+        supports_documents: None,
     };
     mine.insert(&card("mine")).await.unwrap();
 

@@ -174,6 +174,9 @@ pub async fn reply(
                 id: row.session_id.clone(),
                 agent_id: Some(row.agent_id.clone()),
                 text: text.to_string(),
+                // An inbox reply is text the person typed into the inbox,
+                // which has no attachment surface of its own.
+                artifacts: Vec::new(),
                 reply,
             })
             .await?

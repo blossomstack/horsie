@@ -52,7 +52,7 @@ impl Toolbox for TaskListToolbox {
             .await
             .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?;
         result
-            .map(|text| ToolOutcome::Result(Value::String(text)))
+            .map(|text| ToolOutcome::result(Value::String(text)))
             .map_err(ToolCallError::InvalidInput)
     }
 }

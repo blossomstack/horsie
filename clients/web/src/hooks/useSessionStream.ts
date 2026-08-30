@@ -5,6 +5,7 @@ import {
   Role,
   SessionStatusKind,
   type AgentLogEntry,
+  type ArtifactRef,
   type ContentPart,
   type HookRecord,
   type Message,
@@ -30,6 +31,10 @@ export interface RenderedToolCall {
   running: boolean;
   endedAtMs?: number;
   hooks: HookRecord[];
+  /** What the result carried besides text — a screenshot, a generated PDF.
+   * Empty for a call still in flight and for every result written before
+   * artifacts existed. */
+  artifacts: ArtifactRef[];
 }
 
 export interface RenderedSubAgent {
@@ -48,6 +53,8 @@ export interface RenderedMessage {
   thinking: string[];
   toolCalls: RenderedToolCall[];
   subagentResults: RenderedSubAgent[];
+  /** Images and documents this message carries, in the order it carries them. */
+  artifacts: ArtifactRef[];
   createdAtMs?: number;
   startedAtMs?: number;
   optimistic?: boolean;
@@ -132,7 +139,7 @@ interface State {
   /** Local echoes of messages this tab sent, shown until the server's own
    * account of them arrives. `serverId` is what the send was acknowledged
    * with, which is also how the echo learns it can go. */
-  optimistic: { id: string; text: string; serverId?: string }[];
+  optimistic: { id: string; text: string; artifacts: ArtifactRef[]; serverId?: string }[];
   connected: boolean;
   /** Whether older entries exist before the oldest one held.
    *
@@ -168,7 +175,7 @@ type Action =
   | { kind: "frame"; frame: MessageFrame }
   | { kind: "prepend"; page: MessagesPage }
   | { kind: "loading-more"; value: boolean }
-  | { kind: "optimistic"; id: string; text: string }
+  | { kind: "optimistic"; id: string; text: string; artifacts: ArtifactRef[] }
   | { kind: "remove-optimistic"; id: string }
   | { kind: "ack-optimistic"; id: string; serverId: string }
   | { kind: "doc-tasks"; tasks: TaskItem[]; asOfSeq: number };
@@ -233,7 +240,10 @@ function reducer(state: State, action: Action): State {
     case "optimistic":
       return {
         ...state,
-        optimistic: [...state.optimistic, { id: action.id, text: action.text }],
+        optimistic: [
+          ...state.optimistic,
+          { id: action.id, text: action.text, artifacts: action.artifacts },
+        ],
       };
     case "remove-optimistic":
       return {
@@ -466,6 +476,15 @@ function thinkingOf(parts: ContentPart[]): string[] {
     .map((p) => p.value.text);
 }
 
+function artifactsOf(parts: ContentPart[]): ArtifactRef[] {
+  return parts
+    .filter(
+      (p): p is Extract<ContentPart, { type: "Artifact" }> =>
+        p.type === "Artifact",
+    )
+    .map((p) => p.value.artifact);
+}
+
 function subAgentResultsOf(parts: ContentPart[]): RenderedSubAgent[] {
   return parts
     .filter(
@@ -509,7 +528,10 @@ export function transcriptItems(
 ): TranscriptItem[] {
   // Tool results and hook records, keyed by the call they answer, so a call
   // can be resolved wherever it appears.
-  const results = new Map<string, { output: string; isError: boolean; atMs: number }>();
+  const results = new Map<
+    string,
+    { output: string; isError: boolean; atMs: number; artifacts: ArtifactRef[] }
+  >();
   const hooks = new Map<string, HookRecord[]>();
   for (const entry of entries) {
     if (entry.body.type === "Llm" && entry.body.value.role === Role.Tool) {
@@ -519,6 +541,10 @@ export function transcriptItems(
             output: part.value.output,
             isError: part.value.isError,
             atMs: entry.atMs,
+            // Defaulted rather than trusted: this field post-dates the
+            // journal, so a replayed result written before it has no key here
+            // at all.
+            artifacts: part.value.artifacts ?? [],
           });
         }
       }
@@ -545,6 +571,7 @@ export function transcriptItems(
       // draws it the same way one that watched it start does.
       running: result === undefined && running,
       hooks: hooks.get(tc.id) ?? [],
+      artifacts: result?.artifacts ?? [],
     };
   };
 
@@ -562,6 +589,7 @@ export function transcriptItems(
         resolveTool({ id: p.value.id, name: p.value.name, input: p.value.input }),
       ),
     subagentResults: subAgentResultsOf(m.parts),
+    artifacts: artifactsOf(m.parts),
     createdAtMs: m.createdAtMs,
     startedAtMs: m.startedAtMs ?? undefined,
   });
@@ -651,7 +679,7 @@ export function useSessionStream(
   agentId: string = MAIN_AGENT,
 ): {
   stream: SessionStream;
-  addOptimisticUser: (text: string) => string;
+  addOptimisticUser: (text: string, artifacts?: ArtifactRef[]) => string;
   removeOptimisticUser: (id: string) => void;
   ackOptimisticUser: (id: string, serverId: string) => void;
   loadMore: () => void;
@@ -731,9 +759,9 @@ export function useSessionStream(
       .catch(() => dispatch({ kind: "loading-more", value: false }));
   }, [sessionId, agentId]);
 
-  const addOptimisticUser = (text: string) => {
+  const addOptimisticUser = (text: string, artifacts: ArtifactRef[] = []) => {
     const id = `optim-${optimisticSeq++}`;
-    dispatch({ kind: "optimistic", id, text });
+    dispatch({ kind: "optimistic", id, text, artifacts });
     return id;
   };
   const removeOptimisticUser = (id: string) =>
@@ -759,6 +787,7 @@ export function useSessionStream(
           thinking: [],
           toolCalls: [],
           subagentResults: [],
+          artifacts: [],
           queued: true,
         },
       });
@@ -773,6 +802,7 @@ export function useSessionStream(
           thinking: [],
           toolCalls: [],
           subagentResults: [],
+          artifacts: opt.artifacts,
           optimistic: true,
         },
       });

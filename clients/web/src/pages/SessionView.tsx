@@ -11,7 +11,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiRequestError, MAIN_AGENT, api } from "../api/client";
 import { subSessionReadyToOpen } from "../lib/subSessionTree";
-import { SessionStatusKind, TaskStatus } from "../api/types";
+import { SessionStatusKind, TaskStatus, type ArtifactRef } from "../api/types";
 import { AskAnswerProvider } from "../components/AskUserCard";
 import { Composer } from "../components/Composer";
 import { RailToggle } from "../components/rail";
@@ -360,15 +360,19 @@ export function SessionView() {
     navigate(`/sessions/${id}/agents/${pendingSubSession}`);
   }, [pendingSubSession, detail?.subSessions, id, navigate]);
 
-  const handleSend = async (sessionId: string, text: string) => {
+  const handleSend = async (
+    sessionId: string,
+    text: string,
+    artifacts: ArtifactRef[],
+  ) => {
     setSendError(null);
     // Echo the message immediately — a live session's SSE push for this same
     // message can arrive before this request resolves, so the echo must exist
     // *before* the request goes out or the real message beats it and the
     // echo is left stuck as an unmatched duplicate.
-    const optimisticId = addOptimisticUser(text);
+    const optimisticId = addOptimisticUser(text, artifacts);
     try {
-      const ack = await send.mutateAsync({ id: sessionId, text, agentId });
+      const ack = await send.mutateAsync({ id: sessionId, text, agentId, artifacts });
       // From here the server owns the message: the echo is handed its
       // server-side id so the queue can take it over without duplicating it.
       ackOptimisticUser(optimisticId, ack.messageId);
@@ -1120,7 +1124,7 @@ export function SessionView() {
               status={status}
               busy={send.isPending}
               entries={entries}
-              onSend={(text) => handleSend(id, text)}
+              onSend={(text, artifacts) => handleSend(id, text, artifacts)}
               onStop={handleStop}
             />
           )}
