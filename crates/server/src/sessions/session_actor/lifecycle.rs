@@ -285,6 +285,10 @@ impl RuntimeLifecycle {
                 // than no entry, because every search that hits it costs the
                 // reader a call to discover the session is gone.
                 actor.forget_agent_runs().await;
+                // Same reasoning, one step stronger: an inbox message that
+                // outlives its session is not merely a dead link — an ask among
+                // them offers to resume an agent that no longer exists.
+                actor.forget_inbox().await;
                 actor.release_artifacts().await;
                 let _ = reply.send(());
                 CommandEffect::stop()

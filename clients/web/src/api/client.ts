@@ -22,6 +22,9 @@ import type {
   GitHubBranchList,
   GitHubRepoList,
   GitHubStatus,
+  InboxListResponse,
+  InboxMessageIds,
+  InboxReplyRequest,
   ListSessionsResponse,
   LoginRequest,
   InstallOutcome,
@@ -222,6 +225,11 @@ async function send<T>(url: string, init?: RequestInit): Promise<T> {
 /** The path segment naming a session's primary agent, as opposed to a
  * subagent's uuid. Mirrors the server's own spelling. */
 export const MAIN_AGENT = "main";
+
+/** Which slice of the inbox to read, spelled as the server's `state` parameter
+ * spells it. An unknown value is refused there rather than widened to
+ * everything, so this is a closed set on purpose. */
+export type InboxScope = "all" | "open" | "unread";
 
 export const api = {
   health: (): Promise<{ ok: boolean }> => unscoped("/health"),
@@ -435,6 +443,36 @@ export const api = {
       request(`/sessions/${encodeURIComponent(id)}/annotations`, {
         method: "PUT",
         body: JSON.stringify(body),
+      }),
+  },
+
+  inbox: {
+    /** A page of the inbox, newest first, with the counts a badge needs. */
+    list: (state: InboxScope = "all"): Promise<InboxListResponse> =>
+      request(`/inbox?state=${state}`),
+
+    /** Note that these have been opened. */
+    markRead: (ids: string[]): Promise<Ack> =>
+      request("/inbox/read", {
+        method: "POST",
+        body: JSON.stringify({ ids } satisfies InboxMessageIds),
+      }),
+
+    /** Remove messages. The server declines any question still holding an
+     * agent first, so nothing is left parked with its row gone. */
+    remove: (ids: string[]): Promise<Ack> =>
+      request("/inbox/delete", {
+        method: "POST",
+        body: JSON.stringify({ ids } satisfies InboxMessageIds),
+      }),
+
+    /** Answer a parked question, or say something to the agent behind a
+     * notice. The message's own kind decides which, so the caller does not
+     * restate what the server already knows. */
+    reply: (id: string, text: string): Promise<Ack> =>
+      request(`/inbox/${encodeURIComponent(id)}/reply`, {
+        method: "POST",
+        body: JSON.stringify({ text } satisfies InboxReplyRequest),
       }),
   },
 

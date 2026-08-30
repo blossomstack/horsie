@@ -10,6 +10,7 @@ mod chatgpt;
 pub mod error;
 pub(crate) mod github;
 pub(crate) mod handlers;
+pub(crate) mod inbox;
 mod mcp;
 mod memory;
 pub(crate) mod messages;
@@ -346,6 +347,10 @@ fn scoped() -> Router<AppState> {
             "/sessions/{id}/messages",
             post(handlers::send_message).get(messages::read_messages),
         )
+        .route("/inbox", get(inbox::list))
+        .route("/inbox/read", post(inbox::mark_read))
+        .route("/inbox/delete", post(inbox::delete))
+        .route("/inbox/{id}/reply", post(inbox::reply))
         .route("/events", get(sse::global_events))
         .route(
             "/config/model-providers/{name}/chatgpt",

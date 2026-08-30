@@ -6,6 +6,7 @@ import {
 } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { api } from "../api/client";
+import { inboxKeys } from "./useInbox";
 import { deriveTitle } from "../lib/format";
 import type {
   ArtifactRef,
@@ -86,6 +87,11 @@ export function useGlobalSessionFeed() {
     es.onmessage = (e: MessageEvent<string>) => {
       try {
         applySessionList(client, JSON.parse(e.data) as ListSessionsResponse);
+        // The inbox has no feed of its own: a frame is published when a
+        // session's state moves, which is exactly when an agent has just
+        // parked on a question or said something. Cheaper than a second
+        // stream, and it never fires when nothing happened.
+        void client.invalidateQueries({ queryKey: inboxKeys.all });
       } catch (err) {
         console.error("failed to parse the session list", err);
       }

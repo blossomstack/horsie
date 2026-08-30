@@ -62,6 +62,7 @@ pub const SCOPED_TABLES: &[&str] = &[
     "runtime_vendors",
     "agent_runs",
     "entity_revisions",
+    "inbox_messages",
     "artifacts",
     "artifact_uses",
 ];

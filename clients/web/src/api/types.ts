@@ -9,6 +9,7 @@ export * from "../generated/runtime_vendor";
 export * from "../generated/executor";
 export * from "../generated/github";
 export * from "../generated/hooks";
+export * from "../generated/inbox";
 export * from "../generated/mcp";
 export * from "../generated/projects";
 export * from "../generated/memory";

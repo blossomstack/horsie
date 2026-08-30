@@ -1,0 +1,109 @@
+/// The user's inbox: what agents have addressed to the person steering them.
+///
+/// Two kinds today, and the union is what keeps a third from arriving as a
+/// nullable field on the other two. A **notice** is something an agent said
+/// while it kept working; an **ask** is a question it is parked on, and until
+/// that one is resolved the agent it belongs to is doing nothing at all.
+///
+/// Project-wide rather than per session, because that is the whole point: a
+/// question you have to open a session to notice is a question nobody answers.
+package inbox;
+
+/// What a message is, and what only that kind carries.
+///
+/// A union rather than a kind field plus optionals, so "an ask with no
+/// question" and "a notice with a tool call id" cannot be written down.
+#[type_tag = "kind"]
+union InboxMessageBody {
+    Notice(NoticeBody),
+    Ask(AskBody),
+}
+
+/// An agent told you something and carried on. Nothing is waiting on you.
+struct NoticeBody {
+    /// Markdown, as the agent wrote it.
+    body: String,
+}
+
+/// An agent asked you something and stopped until it has an answer.
+struct AskBody {
+    question: String,
+    /// Suggested answers. The person may always reply in their own words, so
+    /// these are never a constraint — the same contract `ask_user` states to
+    /// the model.
+    choices: Vec<String>,
+    /// Whether several of `choices` may be picked at once. Meaningless without
+    /// them.
+    multiple: bool,
+    /// The parked `tool_use` this answers. It is the address an answer is sent
+    /// to, and it is what makes an ask row idempotent to re-assert: one row per
+    /// dangling call, however many times the projection runs.
+    tool_call_id: String,
+}
+
+/// What has become of a message.
+///
+/// `Open` is the only state that can still hold an agent, and only for an ask.
+/// The three others are all terminal and differ in what the agent was told,
+/// which is the thing a person re-reading their inbox actually wants to know.
+enum InboxState {
+    /// Nothing has been done with it.
+    Open,
+    /// You answered the question, or replied to the notice. Answering anywhere
+    /// lands here — the session page and the inbox send the same command.
+    Answered,
+    /// You declined the question. The agent was told nobody would answer and
+    /// resumed without one.
+    Declined,
+    /// Never answered. An ask abandoned by a later message in its session, or
+    /// a notice archived without a reply.
+    Closed,
+}
+
+/// One message, with everything needed to render and act on it without a
+/// second request.
+struct InboxMessageView {
+    id: String,
+    body: InboxMessageBody,
+    state: InboxState,
+    /// Where it came from, and where "open the session" goes. `agent_id` is
+    /// `"main"` or an agent uuid — the same vocabulary every agent-scoped route
+    /// speaks, so it is usable as an address without translation.
+    session_id: String,
+    agent_id: String,
+    /// A one-line summary for the list row. Set by the agent on a notice;
+    /// derived from the question on an ask.
+    title: String,
+    created_at: u64,
+    /// When it was first opened. Absent means unread, which is what the badge
+    /// counts.
+    read_at: Option<u64>,
+}
+
+/// The inbox, as `GET /api/inbox` answers it.
+struct InboxListResponse {
+    /// Newest first.
+    messages: Vec<InboxMessageView>,
+    /// Unread across the whole inbox, not just this page — a badge that only
+    /// counted the page would under-report the moment the list was paginated.
+    unread: u32,
+    /// Asks still `Open`, across the whole inbox. Distinct from `unread` and
+    /// worth its own number: an unread notice costs nothing, an open ask is an
+    /// agent that has stopped.
+    open_asks: u32,
+}
+
+/// Which messages to act on. Every mutation takes a set, because the list is
+/// the place these are used and selecting several there is the ordinary case.
+struct InboxMessageIds {
+    ids: Vec<String>,
+}
+
+/// A reply typed into the inbox.
+///
+/// One shape for both kinds: on an ask it becomes the answer to the parked
+/// call, on a notice it becomes an ordinary message to that agent. The kind is
+/// on the message, so the caller does not restate it and cannot get it wrong.
+struct InboxReplyRequest {
+    text: String,
+}

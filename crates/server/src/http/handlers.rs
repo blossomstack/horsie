@@ -264,6 +264,11 @@ pub async fn answer_asks(
             text: a.text,
         })
         .collect();
+    let answered: Vec<String> = answers.iter().map(|a| a.tool_call_id.clone()).collect();
+    let agent_id = agent
+        .aid
+        .clone()
+        .unwrap_or_else(|| crate::sessions::session_actor::MAIN_AGENT_ID.to_string());
     ask(&state, |reply| SessionSupervisorCommand::Answer {
         id: id.clone(),
         agent_id: agent.aid,
@@ -272,6 +277,11 @@ pub async fn answer_asks(
     })
     .await?
     .map_err(|e| Api::unprocessable(e.to_string()))?;
+    // Only once the agent has taken them. This is the one door every answer
+    // comes through — the session page, the inbox, and anything that offers to
+    // answer later — so the inbox learns about all of them here rather than
+    // each page remembering to tell it.
+    crate::http::inbox::note_answered(&state, &id, &agent_id, &answered).await;
     Ok((StatusCode::ACCEPTED, Json(Ack {})))
 }
 

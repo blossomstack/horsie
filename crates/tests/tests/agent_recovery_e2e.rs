@@ -332,6 +332,8 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
                 asks: vec![horsie_server::agent_loop::AskedQuestion {
                     tool_call_id: Some("ask-1".into()),
                     question: "which commands?".into(),
+                    choices: Vec::new(),
+                    multiple: false,
                 }],
                 at_ms: 0,
             },

@@ -3,7 +3,7 @@ title: Workflows
 description: Chain agents into a graph of steps that share one workspace and branch on each step's result.
 kind: how-to
 sidebar:
-  order: 7
+  order: 8
 ---
 
 A **workflow** is a graph of steps. Each step runs one of your agent presets

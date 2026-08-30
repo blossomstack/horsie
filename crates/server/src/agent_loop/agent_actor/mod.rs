@@ -616,6 +616,8 @@ mod interruption_tests {
                 asks: vec![crate::agent_loop::AskedQuestion {
                     tool_call_id: Some("call-1".into()),
                     question: "which one?".into(),
+                    choices: Vec::new(),
+                    multiple: false,
                 }],
                 at_ms: 1,
             },

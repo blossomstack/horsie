@@ -521,6 +521,8 @@ mod tests {
         AskedQuestion {
             tool_call_id: Some(id.to_string()),
             question: question.to_string(),
+            choices: Vec::new(),
+            multiple: false,
         }
     }
 

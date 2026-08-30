@@ -233,6 +233,15 @@ pub struct SessionActor {
     /// in its life. Comparing against this is what turns "write the roster on
     /// every persisted batch" into those two writes.
     last_indexed_runs: Vec<crate::agent_runs::AgentRunRow>,
+    /// Which of this session's agents were parked on questions the last time
+    /// the projection looked, so leaving that state can be *noticed*.
+    ///
+    /// The transition is the whole signal. An inbox row is written when the
+    /// agent parks and has to be settled when it stops being parked, and only
+    /// a before-and-after can say which agents those are — a snapshot of who is
+    /// awaiting input now cannot distinguish "still parked" from "was never
+    /// parked".
+    last_awaiting_input: Vec<String>,
     /// The last index write this actor spawned, so the next one can queue
     /// behind it.
     ///
@@ -309,6 +318,7 @@ impl SessionActor {
             last_reported: None,
             last_reported_sub_sessions: Vec::new(),
             last_indexed_runs: Vec::new(),
+            last_awaiting_input: Vec::new(),
             indexing: None,
         }
     }
@@ -659,6 +669,161 @@ impl SessionActor {
             .await
         {
             tracing::warn!(error = %e, session = %self.id, "failed to drop agent runs");
+        }
+    }
+
+    /// Put an agent's newly-parked questions in the person's inbox.
+    ///
+    /// Off the mailbox and behind whatever else this actor queued, like every
+    /// other index write: the inbox is a read model and the session is not, so
+    /// making a park wait for a row to land trades the thing that matters for
+    /// the thing that does not. Idempotent at the store, so a replay writes
+    /// nothing twice.
+    fn index_inbox_asks(&mut self, agent: uuid::Uuid, asks: &[crate::agent_loop::AskedQuestion]) {
+        let agent_id = match agent == self.id {
+            true => MAIN_AGENT_ID.to_string(),
+            false => agent.to_string(),
+        };
+        let rows = ask_rows(&self.id.to_string(), &agent_id, asks);
+        if rows.is_empty() {
+            return;
+        }
+        let Some(services) = self.services.clone() else {
+            return;
+        };
+        self.spawn_index_write(async move {
+            services
+                .user_inbox
+                .record_asks(&rows, crate::user_inbox::now_ms_i64())
+                .await
+        });
+    }
+
+    /// The agents this session currently has parked on questions.
+    ///
+    /// Addressed the way a route addresses them — `"main"` or a uuid — because
+    /// that is what an inbox row holds, and a set compared in one vocabulary
+    /// and written in another agrees with itself only by luck.
+    fn awaiting_input_agents(&self, state: &SessionState) -> Vec<String> {
+        let mut awaiting: Vec<String> = self
+            .agent_roster(state)
+            .into_iter()
+            .filter(|entry| entry.status == AgentStatus::AwaitingInput)
+            .map(|entry| entry.id)
+            .collect();
+        // A workflow step is not in that list even when it is the thing that
+        // asked. `apply_asked` parks the *run* for a step — the step stays
+        // `Running`, because it is still the current one and the answer resumes
+        // it — so the roster, which reports each agent's own status, is right
+        // and silent about it. The agent holding the question has to be read
+        // off the run instead.
+        if state.status() == SessionStatus::AwaitingInput
+            && let Some(step) = state.forest.current_root_step_agent()
+        {
+            let step = step.to_string();
+            if !awaiting.contains(&step) {
+                awaiting.push(step);
+            }
+        }
+        awaiting
+    }
+
+    /// Settle the inbox rows of every agent that has just stopped waiting.
+    ///
+    /// The counterpart to the row written when the agent parked. It closes and
+    /// never names an outcome, because the outcome is not a fact this end
+    /// holds: what the session can see is that the agent moved on, which is
+    /// exactly `Closed` — "settled, reason unknown". The one path that *does*
+    /// know is the answer handler, and its mark is allowed to land either side
+    /// of this one (see `settle_agent_asks`).
+    ///
+    /// This is what catches the case nothing else names: a person who typed a
+    /// new message instead of answering. The agent is resumed with a "not
+    /// answered" result for every parked call and carries on; without this the
+    /// inbox would still be offering to answer a question that no longer holds
+    /// anything.
+    fn settle_departed_asks(&mut self, state: &SessionState) {
+        let awaiting = self.awaiting_input_agents(state);
+        if awaiting == self.last_awaiting_input {
+            return;
+        }
+        let departed: Vec<String> = self
+            .last_awaiting_input
+            .iter()
+            .filter(|id| !awaiting.contains(id))
+            .cloned()
+            .collect();
+        self.last_awaiting_input = awaiting;
+        if departed.is_empty() {
+            return;
+        }
+        let Some(services) = self.services.clone() else {
+            return;
+        };
+        let session = self.id.to_string();
+        self.spawn_index_write(async move {
+            for agent in departed {
+                services
+                    .user_inbox
+                    .settle_agent_asks(
+                        &session,
+                        &agent,
+                        &[],
+                        horsie_models::inbox::InboxState::Closed,
+                        crate::user_inbox::now_ms_i64(),
+                    )
+                    .await?;
+            }
+            Ok(())
+        });
+    }
+
+    /// Make the inbox agree with this session's own state.
+    ///
+    /// Runs once at load, and closes what the incremental writes could not: a
+    /// row still `Open` against an agent that stopped waiting while nothing was
+    /// watching.
+    ///
+    /// Derived from the roster alone — no agent is asked anything. Reading a
+    /// parked agent's questions would mean resolving it, and resolving a
+    /// subagent or a sub session *spawns* it, so a reconcile that did the
+    /// thorough thing would wake every parked agent this session hosts on every
+    /// single load. A session that cannot go quiet never offloads, and that is
+    /// a much larger fault than the one it would be fixing.
+    fn reconcile_inbox(&mut self, state: &SessionState) {
+        let awaiting = self.awaiting_input_agents(state);
+        self.last_awaiting_input = awaiting.clone();
+        let Some(services) = self.services.clone() else {
+            return;
+        };
+        let session = self.id.to_string();
+        self.spawn_index_write(async move {
+            services
+                .user_inbox
+                .reconcile_session(&session, &awaiting, crate::user_inbox::now_ms_i64())
+                .await
+        });
+    }
+
+    /// Drop this session's inbox messages, because the session is going.
+    ///
+    /// Awaited, like `forget_agent_runs` and for the same reason: the actor
+    /// stops immediately after, and a message offering to answer a question in
+    /// a session that no longer exists is worse than no message.
+    async fn forget_inbox(&mut self) {
+        self.last_awaiting_input.clear();
+        if let Some(previous) = self.indexing.take() {
+            let _ = previous.await;
+        }
+        let Some(services) = self.services.clone() else {
+            return;
+        };
+        if let Err(e) = services
+            .user_inbox
+            .forget_session(&self.id.to_string())
+            .await
+        {
+            tracing::warn!(error = %e, session = %self.id, "failed to drop inbox messages");
         }
     }
 
@@ -1272,6 +1437,16 @@ impl SessionActor {
         outcome: AgentOutcome,
         ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
+        // Peeked before the split, which deliberately discards the questions:
+        // `TurnEnd` is the session's smaller vocabulary and the questions belong
+        // to the agent that asked them. This is the one moment the session sees
+        // their text, and the inbox needs it — so it is taken here rather than
+        // by widening a type whose whole point is to be narrow.
+        let asked = if let AgentOutcome::Asked { agent, asks } = &outcome {
+            Some((*agent, asks.clone()))
+        } else {
+            None
+        };
         let (who, end) = match TurnEnd::split(outcome) {
             Ok(pair) => pair,
             // Usage is banked for every agent alike, and always: the tokens
@@ -1324,7 +1499,17 @@ impl SessionActor {
         // One lookup: the entry that hosts the agent says what its outcome
         // means. No ordering between registries to get right, because there is
         // one registry.
-        match self.agent_key_of(state, who) {
+        let key = self.agent_key_of(state, who);
+        if let Some((agent, asks)) = asked {
+            // Everything but a subagent. A subagent has no user to ask — its
+            // `Asked` is turned into a failure below — so a row for one would
+            // be an inbox entry offering to unblock something that is already
+            // finished, and nothing would ever settle it.
+            if !matches!(key, Some(AgentKey::Sub(_))) {
+                self.index_inbox_asks(agent, &asks);
+            }
+        }
+        match key {
             Some(AgentKey::Main) => self.on_main_outcome(state, end, ctx).await,
             Some(AgentKey::Step(_)) => match state.forest.step_of_agent(who) {
                 Some((run, index)) => self.on_step_outcome(state, run, index, who, end, ctx).await,
@@ -1503,6 +1688,7 @@ impl EventSourcedActor for SessionActor {
         self.report_sub_sessions(state).await;
         self.report_status(state).await;
         self.index_agent_runs(state);
+        self.settle_departed_asks(state);
     }
 
     /// Every command arrives addressed to a session, and this is the one place
@@ -1577,7 +1763,33 @@ impl EventSourcedActor for SessionActor {
         // what lets `agent_roster` resolve a preset at all. Reconciling before
         // it would file every agent this session hosts as ad-hoc.
         self.reconcile_agent_runs(state);
+        self.reconcile_inbox(state);
     }
+}
+
+/// One inbox row per answerable question.
+///
+/// Questions with no `tool_call_id` are dropped rather than stored: that is a
+/// pre-#62 journal, where the call id was never recorded, and an inbox row is
+/// an offer to answer. Without the id there is nothing to send an answer to, so
+/// the row could only ever be a button that fails.
+fn ask_rows(
+    session_id: &str,
+    agent_id: &str,
+    asks: &[crate::agent_loop::AskedQuestion],
+) -> Vec<crate::user_inbox::AskRow> {
+    asks.iter()
+        .filter_map(|ask| {
+            Some(crate::user_inbox::AskRow {
+                session_id: session_id.to_string(),
+                agent_id: agent_id.to_string(),
+                question: ask.question.clone(),
+                choices: ask.choices.clone(),
+                multiple: ask.multiple,
+                tool_call_id: ask.tool_call_id.clone()?,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

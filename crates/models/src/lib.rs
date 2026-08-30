@@ -252,6 +252,11 @@ pub mod tools {
     include!(concat!(env!("OUT_DIR"), "/tools/mod.rs"));
 }
 
+#[allow(clippy::doc_markdown, clippy::too_many_arguments)]
+pub mod inbox {
+    include!(concat!(env!("OUT_DIR"), "/inbox/mod.rs"));
+}
+
 /// The bearer a runtime presents on its dial-back, minted by whoever spawned it
 /// for that runtime's id alone.
 ///

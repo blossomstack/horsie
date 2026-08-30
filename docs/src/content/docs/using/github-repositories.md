@@ -3,7 +3,7 @@ title: GitHub repositories
 description: Connect a GitHub App so sessions can check out real repositories, and optionally expose GitHub's own tools.
 kind: how-to
 sidebar:
-  order: 3
+  order: 4
 ---
 
 Connect a GitHub App once, and sessions can be launched against real
