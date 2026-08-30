@@ -486,8 +486,26 @@ mod tests {
         drop(session);
 
         // What a crash between the persist and the table write leaves behind.
-        runs.forget_session(&id.to_string()).await.unwrap();
-        assert!(listing().await.is_empty());
+        //
+        // Retried until it holds, because `drop(session)` does not drain the
+        // actor's index-write chain: a `record` still in flight lands after the
+        // delete and puts back the row it was about to remove — the same race
+        // `forget_agent_runs` drains for in production. This is the test's
+        // precondition rather than its assertion, so establishing it properly
+        // is the point; a single delete makes the run a coin flip on a loaded
+        // machine.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            runs.forget_session(&id.to_string()).await.unwrap();
+            if listing().await.is_empty() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "an index write kept resurrecting the row this test needs gone"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
 
         f.node.restart().await;
         let _revived = f.start(id, actor_spec_fixture()).await;

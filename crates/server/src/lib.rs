@@ -11,6 +11,7 @@ pub mod control;
 pub mod db;
 pub mod environments;
 mod error;
+pub mod event_log;
 pub mod github;
 pub mod http;
 mod ids;
