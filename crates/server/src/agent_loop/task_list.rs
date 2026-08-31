@@ -236,14 +236,37 @@ fn task_texts(input: &Value) -> Result<Vec<String>, ToolCallError> {
             "'tasks' must not be empty".to_string(),
         ));
     }
-    tasks
-        .iter()
-        .map(|v| {
-            v.as_str().map(str::to_string).ok_or_else(|| {
-                ToolCallError::InvalidInput("'tasks' entries must be strings".to_string())
-            })
-        })
-        .collect()
+    tasks.iter().map(task_text).collect()
+}
+
+/// One `tasks` entry, accepted in either form a model reaches for: the bare
+/// string (`"write tests"`) or the object it tends to send once it assumes a
+/// task carries status (`{"text": "write tests", "status": "in_progress"}`).
+///
+/// Only the text is taken. A freshly created or inserted task is always
+/// `Pending`, so any `status` on the object is ignored by design rather than
+/// half-honored — the sole way to move a task is `update_status`. `content` is
+/// accepted as an alias for `text`, since that is the field name the record
+/// itself uses.
+fn task_text(v: &Value) -> Result<String, ToolCallError> {
+    if let Some(s) = v.as_str() {
+        return Ok(s.to_string());
+    }
+    if let Some(obj) = v.as_object() {
+        return obj
+            .get("text")
+            .or_else(|| obj.get("content"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                ToolCallError::InvalidInput(
+                    "'tasks' object entries need a string 'text' field".to_string(),
+                )
+            });
+    }
+    Err(ToolCallError::InvalidInput(
+        "'tasks' entries must be a string or a {\"text\": ...} object".to_string(),
+    ))
 }
 
 fn task_ids(input: &Value) -> Result<Vec<u32>, ToolCallError> {
@@ -303,7 +326,7 @@ pub fn task_list_tool_spec() -> ToolSpec {
                 "tasks": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Task text, in order. Required for 'create' and 'insert'."
+                    "description": "Task texts, in order — one plain string per task. Required for 'create' and 'insert'."
                 },
                 "position": {
                     "type": "integer",
@@ -347,6 +370,19 @@ mod tests {
         TaskListAction::from_input(&json)
     }
 
+    fn parse_create(json: Value) -> TaskListAction {
+        let action = parse(json).unwrap();
+        assert!(matches!(action, TaskListAction::Create { .. }));
+        action
+    }
+
+    fn create_tasks(json: Value) -> Vec<String> {
+        match parse_create(json) {
+            TaskListAction::Create { tasks } => tasks,
+            other => panic!("expected create action, got {other:?}"),
+        }
+    }
+
     #[test]
     fn create_replaces_list_with_pending_tasks() {
         let mut state = TaskListState::default();
@@ -361,6 +397,62 @@ mod tests {
     fn create_rejects_empty_tasks() {
         let err = parse(json!({"action": "create", "tasks": []})).unwrap_err();
         assert!(matches!(err, ToolCallError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn create_accepts_object_form_and_takes_text() {
+        // A model that assumes tasks carry status sends {text, status}; we take
+        // the text and ignore the status (create always starts Pending).
+        let tasks = create_tasks(
+            json!({"action": "create", "tasks": [{"text": "a", "status": "in_progress"}]}),
+        );
+        assert_eq!(tasks, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn create_accepts_mixed_string_and_object_entries() {
+        let tasks = create_tasks(json!({"action": "create", "tasks": ["a", {"text": "b"}]}));
+        assert_eq!(tasks, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn create_accepts_content_as_text_alias() {
+        let tasks = create_tasks(json!({"action": "create", "tasks": [{"content": "a"}]}));
+        assert_eq!(tasks, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn create_object_status_does_not_leak_into_task() {
+        // The object's status is ignored: the created task is Pending, not
+        // in_progress.
+        let mut state = TaskListState::default();
+        state
+            .apply(parse_create(
+                json!({"action": "create", "tasks": [{"text": "a", "status": "completed"}]}),
+            ))
+            .unwrap();
+        assert!(state.render().contains("[ ] 1. a"));
+    }
+
+    #[test]
+    fn create_rejects_object_without_text() {
+        let err =
+            parse(json!({"action": "create", "tasks": [{"status": "pending"}]})).unwrap_err();
+        assert!(matches!(err, ToolCallError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn create_rejects_non_string_non_object_entry() {
+        let err = parse(json!({"action": "create", "tasks": [42]})).unwrap_err();
+        assert!(matches!(err, ToolCallError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn insert_accepts_object_form() {
+        match parse(json!({"action": "insert", "tasks": [{"text": "a"}]})).unwrap() {
+            TaskListAction::Insert { tasks, .. } => assert_eq!(tasks, vec!["a".to_string()]),
+            other => panic!("expected insert action, got {other:?}"),
+        }
     }
 
     #[test]
