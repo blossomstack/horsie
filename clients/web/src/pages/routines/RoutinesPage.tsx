@@ -7,11 +7,17 @@ import { RosterRow } from "../../components/RosterRow";
 import { relativeTime } from "../../lib/format";
 import { askConfirm } from "../../lib/confirm";
 import { describeSchedule } from "../../lib/schedule";
-import { targetOf } from "../../lib/routineTarget";
 import { useDeleteRoutine, useRoutines } from "../../hooks/useRoutines";
 import { RoutineDetail } from "./RoutineDetail";
+import { RoutineEditPage } from "./RoutineEditPage";
 
-export function RoutinesPage() {
+/**
+ * The roster, and beside it whichever routine is selected — read, or being
+ * edited. `editing` is set by the `new` and `:name/edit` routes: the form is
+ * the same width as the readout it replaces, so choosing another routine is
+ * still one click away while you fill it in.
+ */
+export function RoutinesPage({ editing }: { editing?: boolean }) {
   const { t } = useTranslation();
   const { name } = useParams<{ name: string }>();
   const { data: routines, isLoading, isError } = useRoutines();
@@ -47,7 +53,9 @@ export function RoutinesPage() {
         </button>
       }
       detail={
-        name ? (
+        editing ? (
+          <RoutineEditPage />
+        ) : name ? (
           <RoutineDetail name={name} onDelete={() => void remove(name)} />
         ) : (
           <NothingSelected>{t("routines.pickOne")}</NothingSelected>
@@ -79,19 +87,9 @@ export function RoutinesPage() {
             key={r.name}
             to={`/routines/${encodeURIComponent(r.name)}`}
             name={r.name}
-            meta={`${targetOf(r.target).name} · ${scheduleLine(r)}`}
             description={r.description}
             selected={r.name === name}
-            facts={
-              <>
-                {r.lastRunAtMs !== undefined && (
-                  <span className="legend">ran {relativeTime(r.lastRunAtMs)}</span>
-                )}
-                {r.lastError && (
-                  <span className="legend text-red-ink">{r.lastError}</span>
-                )}
-              </>
-            }
+            meta={scheduleLine(r)}
             testId="routine-row"
             nameAttr={{ "data-routine-name": r.name }}
             deleteLabel={t("common.deleteNamed", { name: r.name })}

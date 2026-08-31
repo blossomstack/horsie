@@ -61,12 +61,14 @@ function renderPage() {
 }
 
 describe("RoutinesPage", () => {
-  it("renders one row per routine with its agent and schedule", async () => {
+  // The schedule is the one fact a routine's row keeps: what it runs is in the
+  // panel, but *when it next runs* is the thing you scan a roster of timers for.
+  it("renders one row per routine with its schedule", async () => {
     const { findAllByTestId } = renderPage();
     const rows = await findAllByTestId("routine-row");
     expect(rows).toHaveLength(2);
     expect(rows[0].textContent).toContain("nightly");
-    expect(rows[0].textContent).toContain("reviewer");
+    expect(rows[0].textContent).not.toContain("reviewer");
     expect(rows[0].textContent).toContain("every 1h");
     // Not "next just now": a future timestamp used to fall into the
     // "less than 45 seconds ago" branch of a past-only formatter.

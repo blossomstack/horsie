@@ -3,7 +3,6 @@ import { Trans, useTranslation } from "react-i18next";
 import { useNavigate, useParams } from "react-router-dom";
 import { ListDetail, NothingSelected } from "../../components/ListDetail";
 import { RosterRow } from "../../components/RosterRow";
-import { relativeTime } from "../../lib/format";
 import { askConfirm } from "../../lib/confirm";
 import { useDeleteWorkflow, useWorkflows } from "../../hooks/useWorkflows";
 import { WorkflowDetail } from "./WorkflowDetail";
@@ -68,10 +67,8 @@ export function WorkflowsPage() {
             key={w.name}
             to={`/workflows/${encodeURIComponent(w.name)}`}
             name={w.name}
-            meta={t("workflows.rowMeta", { count: w.steps.length, start: w.start })}
             description={w.description}
             selected={w.name === name}
-            aside={relativeTime(Number(w.updatedAt) * 1000)}
             testId="workflow-row"
             nameAttr={{ "data-workflow-name": w.name }}
             deleteLabel={t("common.deleteNamed", { name: w.name })}

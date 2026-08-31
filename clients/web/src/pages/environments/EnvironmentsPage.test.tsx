@@ -57,15 +57,16 @@ function renderPage() {
 }
 
 describe("EnvironmentsPage", () => {
-  it("renders one row per environment with its vendor and description", async () => {
+  it("renders one row per environment: the name and the description, and no more", async () => {
     const { findAllByTestId } = renderPage();
     const rows = await findAllByTestId("environment-row");
     expect(rows).toHaveLength(2);
     expect(rows[0].textContent).toContain("staging");
-    expect(rows[0].textContent).toContain("fly");
     expect(rows[0].textContent).toContain("staging description");
-    expect(rows[0].textContent).toContain("1 repos");
-    expect(rows[1].textContent).toContain("docker");
+    // The vendor and the counts read in the panel, not on every row.
+    expect(rows[0].textContent).not.toContain("fly");
+    expect(rows[0].textContent).not.toContain("repos");
+    expect(rows[1].textContent).toContain("prod");
   });
 
   it("deletes the named environment once the confirm is accepted", async () => {

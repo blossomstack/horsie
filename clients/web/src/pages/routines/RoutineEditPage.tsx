@@ -1,7 +1,6 @@
 import { RowLabel } from "../settings/fields";
 import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { RailToggle } from "../../components/rail";
 import { ApiRequestError } from "../../api/client";
 import type { RoutineInput, RoutineSchedule, RoutineView } from "../../api/types";
 import { Weekday } from "../../api/types";
@@ -86,6 +85,10 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
   const create = useCreateRoutine();
   const update = useUpdateRoutine();
   const navigate = useNavigate();
+  // Cancel and save both land back on the panel this was opened from,
+  // rather than on the roster with nothing selected.
+  const back = () =>
+    navigate(initial ? `/routines/${encodeURIComponent(initial.name)}` : "/routines");
   const { data: agents } = useAgents();
   const { data: workflows } = useWorkflows();
 
@@ -263,22 +266,21 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
 
   return (
     <div className="flex h-full flex-col" data-testid="routine-edit-page">
-      <div className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
-        <RailToggle />
+      <div className="flex h-[var(--header-h)] shrink-0 items-center gap-2 bar-scroll px-6">
         <h1 className="page-title min-w-0 flex-1 truncate">
           {editing
             ? t("agentEdit.editTitle", { name: initial.name })
             : t("routines.new")}
         </h1>
         <button
-          className="key key-blank"
-          onClick={() => navigate("/routines")}
+          className="key key-blank key-sm"
+          onClick={back}
           data-testid="cancel-routine-button"
         >
           {t("common.cancel")}
         </button>
         <button
-          className="key key-go"
+          className="key key-go key-sm"
           disabled={!canSave}
           onClick={handleSave}
           data-testid="save-routine-button"
@@ -287,7 +289,7 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
         </button>
       </div>
       <div className="flex-1 overflow-y-auto px-6 py-4">
-        <div className="mx-auto w-full max-w-3xl space-y-4">
+        <div className="w-full space-y-4">
           <label className="block">
 <RowLabel>{t("memoryPage.name")}</RowLabel>
             <input

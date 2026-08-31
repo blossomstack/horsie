@@ -85,7 +85,10 @@ test("Q2: a routine is created, run, and its run is listed only under it", async
   await page.getByTestId("routines-link").click();
   const row = page.locator('[data-testid="routine-row"][data-routine-name="e2e-routine"]');
   await expect(row).toContainText("from e2e");
-  await expect(row).toContainText("e2e-routine-agent");
+  // The schedule is the one fact the row keeps. What the routine runs is in
+  // the panel beside it, which is where the detail below is read.
+  await expect(row).toContainText("manually");
+  await expect(row).not.toContainText("e2e-routine-agent");
   await row.getByRole("link").click();
   await page.getByTestId("routine-run-row").first().click();
   await page.waitForURL(/\/sessions\/[0-9a-f-]+$/);
