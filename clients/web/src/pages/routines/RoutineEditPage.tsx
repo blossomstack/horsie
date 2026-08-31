@@ -357,9 +357,6 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
                     </option>
                   ))}
                 </select>
-                <span className="mt-1 block text-[0.6875rem] text-faint">
-                  {t("routineEdit.agentHint")}
-                </span>
               </label>
             ) : (
               <label className="block">
@@ -376,9 +373,6 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
                     </option>
                   ))}
                 </select>
-                <span className="mt-1 block text-[0.6875rem] text-faint">
-                  {t("routineEdit.workflowHint")}
-                </span>
               </label>
             )}
           </div>
@@ -395,9 +389,6 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
             >
               {environmentPicker.body}
             </PopoverMenu>
-            <span className="mt-1 block text-[0.6875rem] text-faint">
-{t("routineEdit.environmentHint")}
-            </span>
           </div>
 
           <label className="block">

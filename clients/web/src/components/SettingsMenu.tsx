@@ -69,13 +69,8 @@ export function SettingsMenu({ disabled }: { disabled?: boolean } = {}) {
               >
                 {values[def.key] && <Check size={11} strokeWidth={3} />}
               </span>
-              <span className="min-w-0">
-                <span className="block text-[0.8125rem] text-legend">
-                  {t(`ui.${def.key}.label`)}
-                </span>
-                <span className="mt-0.5 block text-xs leading-snug text-faint">
-                  {t(`ui.${def.key}.description`)}
-                </span>
+              <span className="min-w-0 text-[0.8125rem] text-legend">
+                {t(`ui.${def.key}.label`)}
               </span>
             </button>
           ))}

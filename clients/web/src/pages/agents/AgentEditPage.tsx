@@ -131,9 +131,6 @@ function AgentForm({ initial }: { initial?: AgentView }) {
                   onChange={(e) => setDescription(e.target.value)}
                   data-testid="agent-description-input"
                 />
-                <p className="mt-1 text-xs text-faint">
-{t("agentEdit.descriptionHint")}
-                </p>
               </label>
               {/* The full width of the grid: it is a textarea sharing a row
                   with two single-line inputs, and at one column it rendered the
@@ -153,17 +150,11 @@ function AgentForm({ initial }: { initial?: AgentView }) {
                   onChange={(e) => setInstructions(e.target.value)}
                   data-testid="agent-instructions-input"
                 />
-                <p className="mt-1 text-xs text-faint">
-{t("agentEdit.instructionsHint")}
-                </p>
               </label>
             </div>
 
             <div className="pt-4">
-              <h2 className="section-title">{t("agentEdit.configuration")}</h2>
-              <p className="mb-3 mt-1.5 max-w-prose text-xs leading-relaxed text-faint">
-{t("agentEdit.configurationHint")}
-              </p>
+              <h2 className="section-title mb-3">{t("agentEdit.configuration")}</h2>
               <ConfigFields draft={draft} />
               {/* "Let this agent manage this horsie server" was a checkbox
                   here. It is now the Horsie group in the Tools picker above:
@@ -185,12 +176,7 @@ function AgentForm({ initial }: { initial?: AgentView }) {
                   onChange={(e) => draft.setTunable(e.target.checked)}
                   data-testid="agent-tunable"
                 />
-                <span>
-                  {t("agentEdit.tunable")}
-                  <span className="mt-1 block max-w-prose text-xs leading-relaxed text-faint">
-                    {t("agentEdit.tunableHint")}
-                  </span>
-                </span>
+                <span>{t("agentEdit.tunable")}</span>
               </label>
             </div>
           </section>

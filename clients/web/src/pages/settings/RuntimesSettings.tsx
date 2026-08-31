@@ -184,7 +184,6 @@ export function RuntimesSettings() {
   return (
     <SettingsPage
         title={t("settingsNav.runtimes")}
-        desc={t("runtimesPage.desc")}
         saving={update.isPending}
         saved={update.isSuccess && !update.isPending}
     >
@@ -196,7 +195,6 @@ export function RuntimesSettings() {
 
         <Section
           title={t("runtimesPage.vendors")}
-          desc={t("runtimesPage.vendorsDesc")}
           empty={
             rows.length === 0 && !absentDefault && !adding
               ? t("runtimesPage.empty")

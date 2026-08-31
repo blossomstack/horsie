@@ -54,13 +54,11 @@ export function MemorySettings() {
   return (
     <SettingsPage
         title={t("settingsNav.memory")}
-        desc={t("memoryPage.desc")}
     >
           <section className="section">
             <SectionHeading
               icon={<FolderPlus size={15} className="mt-0.5 text-faint" />}
               title={t("memoryPage.spaces")}
-              subtitle={t("memoryPage.spacesDesc")}
             />
 
             <div className="grid grid-cols-[1fr_auto] gap-3">
@@ -131,7 +129,6 @@ export function MemorySettings() {
                   ? t("memoryPage.memoriesIn", { space: active })
                   : t("memoryPage.memories")
               }
-              subtitle={t("memoryPage.memoriesDesc")}
             />
 
             {!active ? (
@@ -304,7 +301,7 @@ function NewMemoryForm({
         </label>
         <label className="block">
           <span className="mb-1 block text-[0.6875rem] font-semibold text-dim">
-            Description (one line, shown to the agent)
+            {t("memoryPage.description")}
           </span>
           <input
             className="field"
@@ -477,14 +474,14 @@ function SectionHeading({
 }: {
   icon: ReactNode;
   title: string;
-  subtitle: string;
+  subtitle?: string;
 }) {
   return (
     <div className="mb-3 flex items-start gap-2">
       {icon}
       <div>
         <h2 className="section-title">{title}</h2>
-        <p className="mt-0.5 text-xs text-faint">{subtitle}</p>
+        {subtitle && <p className="mt-0.5 text-xs text-faint">{subtitle}</p>}
       </div>
     </div>
   );

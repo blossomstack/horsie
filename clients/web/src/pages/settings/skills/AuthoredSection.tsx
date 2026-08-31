@@ -205,9 +205,6 @@ export function AuthoredSection({
         <PenLine size={15} className="mt-0.5 text-faint" />
         <div>
           <h2 className="section-title">{t("authored.title")}</h2>
-          <p className="mt-0.5 text-xs text-faint">
-{t("authored.desc")}
-          </p>
         </div>
       </div>
 

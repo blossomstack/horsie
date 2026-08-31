@@ -389,9 +389,6 @@ function WorkflowEditor() {
                   onChange={(e) => setMaxSteps(e.target.value)}
                   data-testid="workflow-max-steps"
                 />
-                <span className="mt-1 block text-xs text-faint">
-{t("workflowEdit.stepBudgetHint")}
-                </span>
               </label>
               <label className="block">
                 <span className="section-title">{t("workflowEdit.startsAt")}</span>

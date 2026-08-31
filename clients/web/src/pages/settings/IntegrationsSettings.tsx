@@ -45,7 +45,6 @@ export function IntegrationsSettings() {
   return (
     <SettingsPage
         title={t("settingsNav.integrations")}
-        desc={t("integrations.desc")}
     >
           {isLoading && (
             <div className="py-16 text-center text-sm text-faint">
@@ -103,9 +102,6 @@ function GithubSection() {
         <GitBranch size={15} className="mt-0.5 text-faint" />
         <div>
           <h2 className="section-title">{t("integrations.github")}</h2>
-          <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-faint">
-{t("integrations.githubDesc")}
-          </p>
         </div>
       </div>
 
@@ -228,9 +224,6 @@ function GithubMcpToggle() {
           <p className="text-sm font-medium text-legend">
             {t("integrations.githubTools")}
           </p>
-          <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-faint">
-{t("integrations.githubToolsDesc")}
-          </p>
         </div>
         {gh ? (
           <button
@@ -325,18 +318,6 @@ function McpSection() {
           <Boxes size={15} className="mt-0.5 text-faint" />
           <div>
             <h2 className="section-title">{t("channel.mcpServers2")}</h2>
-            <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-faint">
-              {/* The pattern rides in the component, not in `values`: Trans
-                  HTML-escapes an interpolated value so it cannot be mistaken
-                  for markup, and this one is all angle brackets — the page
-                  read `mcp__&lt;name&gt;__&lt;tool&gt;`. A
-                  self-closing <mono/> in the sentence marks where it goes and
-                  keeps the placement translatable. */}
-              <Trans
-                i18nKey="integrations.mcpDesc"
-                components={{ mono: <code>{"mcp__<name>__<tool>"}</code> }}
-              />
-            </p>
           </div>
         </div>
         <button

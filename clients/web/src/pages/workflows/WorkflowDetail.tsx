@@ -6,7 +6,7 @@ import { relativeTime } from "../../lib/format";
 import { renderFilter } from "./stepDraft";
 import { ReadError } from "../../components/ReadError";
 import { useWorkflow, useWorkflowRuns } from "../../hooks/useWorkflows";
-import { Trans, useTranslation } from "react-i18next";
+import { useTranslation } from "react-i18next";
 
 /**
  * A workflow, beside the roster: the graph it will run, and the runs it has had.
@@ -86,13 +86,6 @@ export function WorkflowDetail({
 
         <section className="section">
           <h2 className="legend">{t("workflows.graph")}</h2>
-          <p className="mt-1 text-xs text-faint">
-            <Trans
-              i18nKey="workflows.graphBlurb"
-              values={{ start: workflow.start }}
-              components={{ step: <span className="text-dim" /> }}
-            />
-          </p>
           <div className="mt-3 overflow-auto">
             <WorkflowGraph nodes={nodes} edges={edges} start={workflow.start} />
           </div>

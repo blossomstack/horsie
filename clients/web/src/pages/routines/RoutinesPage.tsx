@@ -71,15 +71,15 @@ export function RoutinesPage({ editing }: { editing?: boolean }) {
         </p>
       )}
       {routines && routines.length === 0 && (
-        <section className="section m-1" data-testid="routines-empty">
-          <h2 className="legend">{t("routines.rosterTitle")}</h2>
-          <p className="mt-3 text-sm leading-relaxed text-dim">
-            <Trans
-              i18nKey="routines.rosterBlurb"
-              components={{ key: <span className="text-legend" /> }}
-            />
-          </p>
-        </section>
+        <p
+          className="px-2.5 py-6 text-sm text-faint"
+          data-testid="routines-empty"
+        >
+          <Trans
+            i18nKey="routines.rosterEmpty"
+            components={{ key: <span className="text-legend" /> }}
+          />
+        </p>
       )}
       <div className="list-divided">
         {(routines ?? []).map((r) => (

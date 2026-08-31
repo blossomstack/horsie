@@ -103,7 +103,6 @@ export function GithubAppPage() {
   return (
     <SettingsPage
         title={t("adminNav.githubApp")}
-        desc={t("githubApp.desc")}
         dirty={dirty}
         saved={saved}
         saving={save.isPending}
@@ -120,7 +119,6 @@ export function GithubAppPage() {
     >
         <Section
           title={t("githubApp.credentials")}
-          desc={t("githubApp.credentialsDesc")}
         >
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <TextField
@@ -155,7 +153,6 @@ export function GithubAppPage() {
                 touch();
               }}
               invalid={appIdError}
-              hint={t("githubApp.appIdHint")}
               testId="github-app-id"
             />
             {/* A textarea, not an <input type="password">. Chrome collapses

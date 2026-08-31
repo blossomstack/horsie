@@ -183,7 +183,7 @@ export function AccountSettings() {
 
   if (!status?.enabled) {
     return (
-      <SettingsPage title={t("settingsNav.account")} desc={t("account.desc")}>
+      <SettingsPage title={t("settingsNav.account")}>
           <p
             data-testid="account-disabled"
             className="section  text-sm text-dim"
@@ -198,7 +198,7 @@ export function AccountSettings() {
     change.error instanceof ApiRequestError ? change.error.message : null;
 
   return (
-    <SettingsPage title={t("settingsNav.account")} desc={t("account.desc")}>
+    <SettingsPage title={t("settingsNav.account")}>
         {status.mustChangePassword && (
           <p
             data-testid="account-must-change"

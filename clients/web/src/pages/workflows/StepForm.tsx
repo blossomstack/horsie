@@ -169,11 +169,6 @@ export function StepForm({
 
       <section className="section">
         <h2 className="legend">{t("stepForm.fields")}</h2>
-        <p className="mt-1 text-xs text-faint">
-          Extra values this step returns, beyond its outcome and the markdown
-          summary every step writes. A description is required: an undocumented
-          field is one the model fills in by guessing.
-        </p>
         <div className="mt-3 space-y-2">
           {step.fields.map((f, fi) => (
             <div key={fi} className="flex items-center gap-2">
@@ -266,12 +261,7 @@ export function StepForm({
             onChange={(e) => onChange({ interactive: e.target.checked })}
             data-testid="step-interactive"
           />
-          <span>
-            <span className="section-title">{t("stepForm.canAsk")}</span>
-            <span className="mt-1 block text-xs text-faint">
-{t("stepForm.canAskHint")}
-            </span>
-          </span>
+          <span className="section-title">{t("stepForm.canAsk")}</span>
         </label>
       </section>
 
@@ -406,9 +396,6 @@ export function StepForm({
             />
           </label>
         </div>
-        <p className="text-xs text-faint">
-{t("stepForm.limitsHint")}
-        </p>
       </section>
     </div>
   );

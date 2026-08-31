@@ -265,11 +265,7 @@ export function VendorForm({
           />
 {t("vendorForm.volumesHint")}
         </label>
-      ) : (
-        <p className="mt-3 text-xs leading-relaxed text-faint">
-{t("vendorForm.velosNoVolumes")}
-        </p>
-      )}
+      ) : null}
       {/* Beside the button that caused it. This sat at the top of the pane,
         which put it 389px above the viewport while SAVE was 542px below — so a
         rejected save looked like a button that did nothing. */}

@@ -23,7 +23,8 @@ export function SettingsHeader({
   onDiscard,
 }: {
   title: string;
-  desc: string;
+  /** Only where the title alone leaves something the page cannot show. */
+  desc?: string;
   dirty?: boolean;
   saved?: boolean;
   saving?: boolean;
@@ -57,9 +58,11 @@ export function SettingsHeader({
           <h1 className="page-title">
             {title}
           </h1>
-          <p className="mt-0.5 max-w-prose text-xs leading-relaxed text-faint">
-            {desc}
-          </p>
+          {desc && (
+            <p className="mt-0.5 max-w-prose text-xs leading-relaxed text-faint">
+              {desc}
+            </p>
+          )}
         </div>
         {(onSave || saving || showSaved) && (
           <div className="flex items-center gap-2">
