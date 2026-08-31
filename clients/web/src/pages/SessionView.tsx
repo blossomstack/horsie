@@ -4,14 +4,22 @@ import {
   CircleAlert,
   ListTodo,
   MessageSquareText,
+  Square,
   Trash2,
   Waypoints,
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiRequestError, MAIN_AGENT, api } from "../api/client";
 import { subSessionReadyToOpen } from "../lib/subSessionTree";
-import { SessionStatusKind, TaskStatus, type ArtifactRef } from "../api/types";
+import {
+  SessionStatusKind,
+  TaskStatus,
+  type ArtifactRef,
+  type StepRunView,
+  type WorkflowRunGraph,
+} from "../api/types";
 import { AskAnswerProvider } from "../components/AskUserCard";
 import { Composer } from "../components/Composer";
 import { RailToggle } from "../components/rail";
@@ -27,7 +35,8 @@ import { StatusLamp } from "../components/StatusBadge";
 import { TaskListPanel } from "../components/TaskListPanel";
 import { Transcript } from "../components/Transcript";
 import { TranscriptSpine } from "../components/TranscriptSpine";
-import { WorkflowRunView } from "./workflows/WorkflowRunView";
+import { formatOutput, retryUnavailable } from "./workflows/runGraph";
+import { useRetryStep, useWorkflowRun } from "../hooks/useWorkflows";
 import { askConfirm } from "../lib/confirm";
 import { usePersistentState } from "../hooks/usePersistentState";
 import { transcriptItems, useSessionStream } from "../hooks/useSessionStream";
@@ -35,6 +44,7 @@ import type { TranscriptItem } from "../hooks/useSessionStream";
 import { useEntryCatalog } from "../hooks/useEntryCatalog";
 import { useUiSettings } from "../hooks/useUiSettings";
 import {
+  qk,
   useDeleteSession,
   useDeleteAgent,
   useAnswerAsks,
@@ -46,8 +56,14 @@ import {
 import { cn } from "../lib/cn";
 import { sessionTitle } from "../lib/format";
 import { buildTimeline } from "../lib/timeline";
-import { isRunNode, layoutAgentTree } from "../lib/agentTree";
-import { progressionLabel, showsProgression, statusMeta } from "../lib/status";
+import { layoutAgentTree } from "../lib/agentTree";
+import { isSessionsOwnPage } from "../lib/sessionRoute";
+import {
+  progressionLabel,
+  settled,
+  showsProgression,
+  statusMeta,
+} from "../lib/status";
 import { Trans, useTranslation } from "react-i18next";
 
 type SessionViewId = "transcript" | "timeline" | "graph";
@@ -148,21 +164,70 @@ function SessionUnavailable({ id, error }: { id: string; error: unknown }) {
   );
 }
 
+/**
+ * Where one agent sits in a run's log, if it is a step of one.
+ *
+ * The roster knows agent ids; a retry names a position in the run log. Only
+ * the run's graph holds both, so this is the join — and its absence is what
+ * says "this agent is not a workflow step", which is what decides whether a
+ * Retry key is offered at all.
+ */
+function stepIndexOf(
+  graph: WorkflowRunGraph | undefined,
+  agentId: string,
+): { index: number; step: string } | undefined {
+  for (const node of graph?.nodes ?? []) {
+    const run = node.runs.find((r) => r.agentId === agentId);
+    if (run) return { index: run.index, step: node.step };
+  }
+  return undefined;
+}
+
+/** The execution one agent *is*, for the rule that decides whether retrying it
+ * would race a step already writing the workspace. */
+function stepRunOf(
+  graph: WorkflowRunGraph | undefined,
+  agentId: string,
+): StepRunView | undefined {
+  for (const node of graph?.nodes ?? []) {
+    const run = node.runs.find((r) => r.agentId === agentId);
+    if (run) return run;
+  }
+  return undefined;
+}
+
 export function SessionView() {
   const { t } = useTranslation();
   const { id, agentId } = useParams<{ id: string; agentId?: string }>();
   const navigate = useNavigate();
   const { data: detail, isLoading, isError, error } = useSession(id);
+  /**
+   * Whether this page *is* a run, rather than a session that started one.
+   *
+   * A run used to have a page of its own, with its own header, its own
+   * two-column layout and its own controls — a second session UI that had to
+   * be kept in step with this one by hand, and drifted. It is a session: the
+   * only true differences are that the graph it opens in is the *definition's*
+   * graph rather than its agents' lineage, and that it has no transcript of
+   * its own to fall back to. Both are said here rather than by a fork.
+   */
+  const isRun = !!detail?.workflow;
+  /** A run's page, as opposed to one of its steps opened from it. */
+  const runPage = isRun && !agentId;
   // The session's own bundles decide what `/` and `@` offer.
   const entries = useEntryCatalog(detail?.plugins);
+  // No stream for a run: it has no `main` agent to read, so the connection
+  // would carry nothing — and an open reader renews a session's idle clock,
+  // so a run page left open would pin a finished run resident for as long as
+  // the tab lived.
   const {
     stream,
     addOptimisticUser,
     removeOptimisticUser,
     ackOptimisticUser,
     loadMore,
-  } = useSessionStream(id, agentId ?? MAIN_AGENT);
-  const { data: mainAgent } = useAgent(id, agentId ?? MAIN_AGENT);
+  } = useSessionStream(runPage ? undefined : id, agentId ?? MAIN_AGENT);
+  const { data: mainAgent } = useAgent(runPage ? undefined : id, agentId ?? MAIN_AGENT);
   const send = useSendMessage();
   const answerAsks = useAnswerAsks();
   const stop = useStopAgent();
@@ -224,14 +289,23 @@ export function SessionView() {
   // from the main agent, with the whole roster hanging off it — so on a
   // subagent's page they showed the wrong thing over the right transcript.
   // Both are now drawn of whichever run the page is on.
-  const view: SessionViewId = fresh
-    ? "transcript"
-    : (VIEWS.find((v) => v.id === asked)?.id ?? lastView);
+  // A run has no transcript and no agent timeline of its own: it *is* its
+  // steps, and each of those has both. So on a run's own page the graph is the
+  // only view there is — it opens there whatever was remembered, and the other
+  // two keys are disabled rather than hidden, because a run that showed one
+  // key where every session shows three reads as a different kind of thing.
+  // Open a step and all three come back, scoped to that step.
+  const view: SessionViewId = runPage
+    ? "graph"
+    : fresh
+      ? "transcript"
+      : (VIEWS.find((v) => v.id === asked)?.id ?? lastView);
   const timelineOpen = view === "timeline";
   const graphOpen = view === "graph";
   /** Whether anything has taken the pane from the transcript. */
   const overlayOpen = timelineOpen || graphOpen;
   const showView = (next: SessionViewId) => {
+    if (runPage) return;
     setLastView(next);
     setSearchParams(
       (prev) => {
@@ -246,7 +320,7 @@ export function SessionView() {
   // A remembered view still has to reach the URL, or the page would show one
   // thing and the link in the address bar would promise another.
   useEffect(() => {
-    if (asked === view || view === "transcript") return;
+    if (runPage || asked === view || view === "transcript") return;
     setSearchParams(
       (prev) => {
         const params = new URLSearchParams(prev);
@@ -273,11 +347,18 @@ export function SessionView() {
     ? (detail.name?.trim() || detail.workflow)
     : undefined;
 
-  /** The session's own agent, whose page is the session's page. */
-  const mainAgentId =
-    detail?.agents?.find((a) => !a.parent && a.depth === 0)?.id ??
-    detail?.agents?.[0]?.id ??
-    MAIN_AGENT;
+
+  /** The session's own agent, whose page is the session's page.
+   *
+   * A run has none: it *is* its steps, and `agents` lists one entry per step
+   * execution — the first of which is rooted and at depth 0 and would be read
+   * as the session's own agent. Opening the start step then routed to the
+   * run's page instead of the step's, which is the page it was asked for. */
+  const mainAgentId = isRun
+    ? undefined
+    : (detail?.agents?.find((a) => !a.parent && a.depth === 0)?.id ??
+      detail?.agents?.[0]?.id ??
+      MAIN_AGENT);
 
   /**
    * Leave a structural view for one run's transcript.
@@ -300,7 +381,12 @@ export function SessionView() {
     // The run node is the session — and a workflow run's session page is its
     // graph, not a transcript, which is the one place worth landing from a
     // step. `RUN_ROOT` is not an agent, so it has no page of its own.
-    const own = agent === mainAgentId || agent === MAIN_AGENT || isRunNode(agent);
+    const own = isSessionsOwnPage({
+      agent,
+      isRun,
+      mainAgentId,
+      mainAgentAlias: MAIN_AGENT,
+    });
     navigate(own ? `/sessions/${id}` : `/sessions/${id}/agents/${agent}`);
   };
 
@@ -432,7 +518,39 @@ export function SessionView() {
   // `undefined` only until the session document arrives. The server always has
   // a status — it keeps a durable copy — so this is the client not knowing yet,
   // not the server having nothing to say.
-  const status = stream.liveStatus ?? detail?.status ?? undefined;
+  //
+  // A run is the exception: its stream is scoped to `main`, and a run has no
+  // main agent — each step is a turn on a different one. So the stream sees a
+  // turn begin and never sees one end, and `liveStatus` sticks on `Running`
+  // for the life of the page. The session document is the only thing that
+  // knows a run has finished, so on a run's page it is the only thing asked.
+  const status =
+    (runPage ? detail?.status : (stream.liveStatus ?? detail?.status)) ??
+    undefined;
+
+  const { data: runGraph } = useWorkflowRun(runPage ? id : undefined, status);
+  const retry = useRetryStep(id ?? "");
+  // One more read when a run settles.
+  //
+  // The poll above stops on the settled status — but that status arrives by
+  // being *pushed*: the global feed patches a session's summary straight into
+  // this cache without fetching. So the news that the run has finished is what
+  // cancels the fetch that would have collected its final steps, and a run
+  // that finished fast left the graph reading "no agents recorded".
+  //
+  // The same shape `useWorkflowRun` uses for the same reason, where it is
+  // expressed by keying the query on the status.
+  const client = useQueryClient();
+  useEffect(() => {
+    if (!runPage || !id || !status || !settled(status)) return;
+    void client.invalidateQueries({ queryKey: qk.session(id) });
+  }, [runPage, id, status, client]);
+
+  const retryStep = async (index: number, step: string) => {
+    if (!(await askConfirm(t("run.confirmRetry", { step }), t("run.retry")))) return;
+    retry.mutate(index);
+  };
+
   const terminal =
     status === SessionStatusKind.Unrecoverable
       ? (stream.statusReason ?? detail?.lastError ?? "This session cannot run again.")
@@ -513,8 +631,8 @@ export function SessionView() {
   );
 
   /** The selected agent, resolved against both rosters. */
-  const selectedAgent = useMemo(
-    () =>
+  const selectedAgent = useMemo(() => {
+    const agent =
       selection?.kind === "agent"
         ? selectAgent(
             selection.id,
@@ -523,9 +641,30 @@ export function SessionView() {
             detail?.name,
             workflowRunTitle,
           )
-        : null,
-    [selection, detail?.agents, detail?.subSessions, detail?.name, workflowRunTitle],
-  );
+        : null;
+    // A run's result and its failure are the run node's own, and the panel
+    // already has a place for both — it is where every step's result reads.
+    // They used to be a banner above the graph, which is chrome no other
+    // session has: the run's page stopped looking like a session's the moment
+    // it grew a section of its own. The roster cannot supply them (a run's
+    // output is in its graph, not in its agents), so they are attached here.
+    if (!agent || agent.kind !== "run" || !runGraph) return agent;
+    return {
+      ...agent,
+      output:
+        runGraph.output === undefined || runGraph.output === null
+          ? undefined
+          : formatOutput(runGraph.output),
+      error: runGraph.error,
+    };
+  }, [
+    selection,
+    detail?.agents,
+    detail?.subSessions,
+    detail?.name,
+    workflowRunTitle,
+    runGraph,
+  ]);
 
   /** The selected entry's message. Found in what is loaded rather than
    *  fetched: the timeline only draws bars for entries it was handed, so a
@@ -710,19 +849,6 @@ export function SessionView() {
   // "for stopping a turn you have scrolled away from", which was never a real
   // case: the composer is pinned to the bottom of the pane and never scrolls.
 
-  // A run has no single session, so the graph is its page. Opening one of
-  // its steps routes back here with an agent id, and falls through to the
-  // transcript below — the same view, scoped to that agent.
-  if (id && detail?.workflow && !agentId) {
-    return (
-      <WorkflowRunView
-        sessionId={id}
-        onStop={handleStop}
-        onDelete={handleDelete}
-      />
-    );
-  }
-
   return (
     <AskAnswerProvider
       value={{
@@ -780,33 +906,40 @@ export function SessionView() {
                     is a setting like the others — it was the only view you
                     reached by un-pressing something, which said "off" where it
                     meant "prose". */}
-                {VIEWS.map((v) => (
-                  <button
-                    key={v.id}
-                    type="button"
-                    role="radio"
-                    aria-checked={view === v.id}
-                    className={cn(
-                      "key-icon shrink-0 !h-7 !w-7",
-                      // A recessed trough with one key standing proud of it:
-                      // the selected view is a raised key, not a tinted one.
-                      view === v.id
-                        ? "!bg-panel !text-legend shadow-[var(--float)]"
-                        : "hover:!bg-raised",
-                    )}
-                    onClick={() => showView(v.id)}
-                    title={v.title}
-                    aria-label={v.label}
-                    data-testid={v.testId}
-                  >
-                    <v.icon size={15} aria-hidden />
-                  </button>
-                ))}
+                {VIEWS.map((v) => {
+                  // Only the graph reads a run. The other two would be a
+                  // transcript and a timeline of nothing — a run has no agent
+                  // of its own — so they say why rather than showing empty.
+                  const off = runPage && v.id !== "graph";
+                  return (
+                    <button
+                      key={v.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={view === v.id}
+                      disabled={off}
+                      className={cn(
+                        "key-icon shrink-0 !h-7 !w-7",
+                        // A recessed trough with one key standing proud of it:
+                        // the selected view is a raised key, not a tinted one.
+                        view === v.id
+                          ? "!bg-panel !text-legend shadow-[var(--float)]"
+                          : "hover:!bg-raised",
+                      )}
+                      onClick={() => showView(v.id)}
+                      title={off ? t("run.noRunTranscript") : v.title}
+                      aria-label={off ? t("run.noRunTranscript") : v.label}
+                      data-testid={v.testId}
+                    >
+                      <v.icon size={15} aria-hidden />
+                    </button>
+                  );
+                })}
             </div>
             {/* Durability is the product's whole differentiator, so a dropped
                 feed is a first-class state on the panel — not a transcript
                 that quietly stops moving while the lamp still says Running. */}
-            {!stream.connected && (
+            {!runPage && !stream.connected && (
               <span
                 className="flex shrink-0 items-center gap-2 text-live-ink"
                 data-testid="session-reconnecting"
@@ -1098,9 +1231,33 @@ export function SessionView() {
           {!overlayOpen && detail && mainAgent && (
             <SessionConfigBar mode="locked" detail={detail} agent={mainAgent} />
           )}
-          {/* A workflow step takes no messages — the definition drives it — so
-              it gets the stop control without the send one. */}
-          {overlayOpen ? null : agentId && detail?.workflow ? (
+          {/* A run takes no messages either — the definition drives every step
+              — so its bar is the step bar's shape: what the page is, and the
+              one control that acts on it. It sits below the graph rather than
+              in the header because that is where a session's controls are, and
+              a run is a session. */}
+          {runPage ? (
+            <div
+              className="bar-scroll flex items-center gap-3 px-4 py-2"
+              data-testid="run-bar"
+            >
+              <span className="text-xs text-faint">{t("run.runHint")}</span>
+              {/* Only while something can still change on its own. A settled
+                  run is moved by a retry, which is on the step. */}
+              {!settled(status ?? SessionStatusKind.Idle) && (
+                <button
+                  className="key key-stop ml-auto key-sm"
+                  onClick={handleStop}
+                  data-testid="run-stop"
+                >
+                  <Square size={13} />
+                  {t("run.interrupt")}
+                </button>
+              )}
+            </div>
+          ) : /* A workflow step takes no messages — the definition drives it —
+                 so it gets the stop control without the send one. */
+          overlayOpen ? null : agentId && detail?.workflow ? (
             <div className="bar-scroll flex items-center gap-3 px-4 py-2">
               <span className="text-xs text-faint">
 {t("session.workflowStepHint")}
@@ -1146,6 +1303,23 @@ export function SessionView() {
                 : undefined
             }
             deleting={delAgent.isPending}
+            // A workflow step is the one agent that can be run again: the
+            // definition still says what it was for. `stepIndex` is the run
+            // log's position, which only the run's graph knows — the roster
+            // has agent ids and nothing else.
+            onRetry={
+              stepIndexOf(runGraph, selectedAgent.id) === undefined
+                ? undefined
+                : (agentId) => {
+                    const at = stepIndexOf(runGraph, agentId);
+                    if (at) void retryStep(at.index, at.step);
+                  }
+            }
+            retryBlocked={retryUnavailable(
+              status ?? SessionStatusKind.Idle,
+              retry.isPending,
+              stepRunOf(runGraph, selectedAgent.id),
+            )}
           />
         ) : overlayOpen && selectedEntry ? (
           <EntryInfoPanel

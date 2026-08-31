@@ -139,27 +139,43 @@ test("T3: Run hands the workflow to the new-session page, which starts it", asyn
   await input.press("Enter");
   await page.waitForURL(/\/sessions\/[0-9a-f-]+$/);
 
-  // A run opens on its graph rather than on a transcript.
-  await expect(page.getByTestId("workflow-run-view")).toBeVisible();
-  await expect(page.getByTestId("workflow-node-start")).toBeVisible();
-  await expect(page.getByTestId("run-status")).toBeVisible();
+  // A run opens on its graph rather than on a transcript — the same session
+  // page every other session gets, with the graph holding the pane. The other
+  // two views are offered and disabled: a run has no transcript of its own.
+  await expect(page.getByTestId("graph-toggle")).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
+  await expect(page.getByTestId("transcript-toggle")).toBeDisabled();
+  await expect(page.getByTestId("timeline-toggle")).toBeDisabled();
+  await expect(page.getByTestId("status-badge")).toBeVisible();
 
   // It runs to completion by itself: creating it is what starts it, and each
   // step's plain text is its output.
-  await expect(page.getByTestId("run-status")).toHaveAttribute(
+  await expect(page.getByTestId("status-badge")).toHaveAttribute(
     "data-status",
     "Finished",
     { timeout: 30_000 },
   );
-  // The result. It was on the wire from the first release and rendered nowhere,
-  // so the one thing a finished run produced was reachable only by opening its
-  // last step.
-  await expect(page.getByTestId("run-output")).toContainText("goodbye");
+  // The run's result, where every agent's result reads: in the panel, on the
+  // run's own node. It used to be a banner above the graph, which is a section
+  // no other session has — the page stopped looking like a session page the
+  // moment it grew one.
+  await page.locator('[data-testid^="agent-node-run:"]').click();
+  await expect(page.getByTestId("agent-panel")).toContainText("goodbye");
+  await page.getByTestId("agent-panel-collapse").click();
 
   // A step's own page is reached from its node, and that is where its
   // transcript is.
-  await page.getByTestId("workflow-node-start").click();
-  await page.getByTestId("open-step").first().click();
+  // The same graph, the same panel, the same key every other session's agents
+  // get: a node is selected, the agent panel opens beside it, and its Open key
+  // goes to that agent's transcript.
+  await page
+    .locator('[data-testid^="agent-node-"][data-kind="step"]')
+    .first()
+    .click();
+  await expect(page.getByTestId("agent-panel")).toBeVisible();
+  await page.getByTestId("agent-panel-open").click();
   await page.waitForURL(/\/sessions\/[0-9a-f-]+\/agents\/[0-9a-f-]+$/);
   // A step that is over says so. It used to read `RUNNING` for ever — through
   // reloads and cold tabs — with INTERRUPT still offered, because a step's
@@ -241,14 +257,19 @@ test("T4: a step's question and its answer stand in the step's transcript", asyn
   await input.press("Enter");
   await page.waitForURL(/\/sessions\/[0-9a-f-]+$/);
 
-  // The run page says which step is blocked and hands you to it; the question
-  // itself lives in that step's own transcript.
-  await expect(page.getByTestId("run-status")).toHaveAttribute(
+  // A parked run says so the way every session does — its status — and the
+  // step that is waiting lights up in the graph. The question itself lives in
+  // that step's own transcript, which its node opens.
+  await expect(page.getByTestId("status-badge")).toHaveAttribute(
     "data-status",
     "AwaitingInput",
     { timeout: 30_000 },
   );
-  await page.getByTestId("open-parked-step").click();
+  await page
+    .locator('[data-testid^="agent-node-"][data-kind="step"]')
+    .first()
+    .click();
+  await page.getByTestId("agent-panel-open").click();
   await page.waitForURL(/\/sessions\/[0-9a-f-]+\/agents\/[0-9a-f-]+$/);
 
   // Standalone and answerable, with the tool call that preceded it still there.
@@ -327,13 +348,16 @@ test("T5: a run's steps are drawn as the sequence they are, under the run", asyn
   await input.fill("run it");
   await input.press("Enter");
   await page.waitForURL(/\/sessions\/[0-9a-f-]+$/);
-  await expect(page.getByTestId("run-status")).toHaveAttribute("data-status", "Finished", {
+  await expect(page.getByTestId("status-badge")).toHaveAttribute("data-status", "Finished", {
     timeout: 30_000,
   });
 
   // A step's own page is where the two session views are offered.
-  await page.getByTestId("workflow-node-gather").click();
-  await page.getByTestId("open-step").first().click();
+  await page
+    .locator('[data-testid^="agent-node-"][data-kind="step"]')
+    .first()
+    .click();
+  await page.getByTestId("agent-panel-open").click();
   await page.waitForURL(/\/sessions\/[0-9a-f-]+\/agents\/[0-9a-f-]+$/);
 
   // The graph: the run, then its executions in the order they ran.
