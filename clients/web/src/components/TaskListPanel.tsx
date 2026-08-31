@@ -57,10 +57,7 @@ export function TaskListPanel({
       closeTestId="task-list-collapse"
     >
         {tasks.length === 0 ? (
-          <p
-            className="px-3 py-6 text-center text-xs leading-relaxed text-faint"
-            data-testid="task-list-empty"
-          >
+          <p className="empty text-center" data-testid="task-list-empty">
 {t("taskList.empty")}
           </p>
         ) : (

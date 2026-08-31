@@ -86,7 +86,7 @@ export type ConfigMode = "edit" | "frozen";
 function optionClass(selected: boolean, frozen = false): string {
   return cn(
     "flex w-full items-center gap-2 rounded-[var(--radius-chip)] px-2 py-1.5 text-left text-sm",
-    selected ? "bg-accent-quiet text-legend" : frozen ? "" : "hover:bg-raised",
+    selected ? "is-selected" : frozen ? "" : "hover:bg-raised",
   );
 }
 
@@ -477,16 +477,16 @@ function ToolsBody({
   return (
     <div className="space-y-0.5" data-testid="tools-body" data-filter={filter}>
       <div className="flex flex-wrap items-center gap-1 px-2 pt-0.5 pb-1">
-        <span className="flex overflow-hidden rounded-[var(--radius-chip)] bg-raised">
+        <span className="segmented">
           {filters.map((f) => (
             <button
               key={f.key}
               type="button"
-              className={cn(
-                "px-1.5 py-0.5 text-[0.6875rem]",
-                filter === f.key ? "bg-legend/10 text-legend" : "text-dim hover:text-legend",
-              )}
-              aria-pressed={filter === f.key}
+              className="px-1.5 py-0.5 text-[0.6875rem]"
+              // A view switcher, so it says which segment is shown rather than
+              // which button is held: `aria-pressed` on three mutually
+              // exclusive buttons claims three independent toggles.
+              aria-selected={filter === f.key}
               data-testid={`tool-filter-${f.key}`}
               onClick={() => setFilter(f.key)}
             >

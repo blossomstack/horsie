@@ -35,19 +35,17 @@ export function MutationErrors() {
       {errors.map((e) => (
         <div
           key={e.id}
-          className="panel pointer-events-auto flex w-full max-w-3xl items-start gap-3 border-red bg-red-quiet px-3 py-2.5"
+          className="notice notice-fault pointer-events-auto w-full max-w-3xl"
           data-testid="mutation-error"
         >
-          <div className="min-w-0 flex-1">
+          <div className="notice-body">
             {/* Never colour alone: the word says it failed even where the red
               does not read. */}
-            <h2 className="legend text-red-ink">{t("mutationErrors.failed")}</h2>
-            <p className="mt-1 text-sm leading-relaxed break-words text-red-ink">
-              {e.message}
-            </p>
+            <h2 className="legend text-current">{t("mutationErrors.failed")}</h2>
+            <p className="mt-1 break-words text-current">{e.message}</p>
           </div>
           <button
-            className="key key-flat shrink-0"
+            className="key-icon shrink-0"
             onClick={() => dismissMutationError(e.id)}
             aria-label={t("common.dismiss")}
             data-testid="mutation-error-dismiss"

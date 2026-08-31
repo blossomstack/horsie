@@ -113,7 +113,7 @@ export function NewSessionView() {
           <div className="mx-auto w-full max-w-[54rem] px-4 pb-3 sm:px-6">
             <div
               data-testid="session-error"
-              className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink"
+              className="notice notice-fault"
             >
               {error}
             </div>

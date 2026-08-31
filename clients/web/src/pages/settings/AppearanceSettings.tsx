@@ -114,9 +114,10 @@ export function AppearanceSettings() {
                 data-testid={`skin-option-${s}`}
                 className={cn(
                   "flex flex-col gap-2 rounded-[var(--radius-control)] p-2.5 text-left transition-colors",
-                  // Selection is a fill and a tick, like every other selected
-                  // thing in the build — not a ring around the card.
-                  skin === s ? "bg-raised" : "hover:bg-raised",
+                  // A chosen card reads the same as every other chosen thing.
+                  // It used to wear the hover fill, so the card you had picked
+                  // and the card you were merely pointing at were one picture.
+                  skin === s ? "is-selected" : "hover:bg-raised",
                 )}
               >
                 <SkinSwatch skin={s} mode={mode} />
@@ -136,8 +137,12 @@ export function AppearanceSettings() {
         <Section
           title={t("appearance.modeTitle")}
         >
+          {/* One of three views of the same thing, so it is a segmented
+              control. These were rows of `key-go` keys: the accent is the
+              control that COMMITS, and choosing how bright the interface is
+              commits nothing. */}
           <div
-            className="flex flex-wrap gap-2"
+            className="segmented"
             role="radiogroup"
             aria-label={t("appearance.modeGroup")}
           >
@@ -149,7 +154,7 @@ export function AppearanceSettings() {
                 aria-checked={choice === m.id}
                 onClick={() => setChoice(m.id)}
                 data-testid={`mode-option-${m.id}`}
-                className={cn("key", choice === m.id ? "key-go" : "key-blank")}
+                className="inline-flex items-center gap-1.5"
               >
                 <m.icon size={13} aria-hidden />
                 {t(m.labelKey)}
@@ -170,7 +175,7 @@ export function AppearanceSettings() {
           title={t("appearance.languageTitle")}
         >
           <div
-            className="flex flex-wrap gap-2"
+            className="segmented flex-wrap"
             role="radiogroup"
             aria-label={t("appearance.languageGroup")}
           >
@@ -183,10 +188,7 @@ export function AppearanceSettings() {
                 onClick={() => setLocale(option.id)}
                 data-testid={`locale-option-${option.id}`}
                 title={option.note}
-                className={cn(
-                  "key",
-                  localeChoice === option.id ? "key-go" : "key-blank",
-                )}
+                className="inline-flex items-center gap-1.5"
               >
                 {option.id === "system" && <Globe size={13} aria-hidden />}
                 {option.name}
@@ -204,7 +206,7 @@ export function AppearanceSettings() {
           title={t("appearance.textSizeTitle")}
         >
           <div
-            className="flex flex-wrap gap-2"
+            className="segmented"
             role="radiogroup"
             aria-label={t("appearance.textSizeGroup")}
           >
@@ -217,7 +219,6 @@ export function AppearanceSettings() {
                 onClick={() => setTextSize(size)}
                 data-testid={`text-size-option-${size}`}
                 title={t(`appearance.textSize.${size}.blurb`)}
-                className={cn("key", textSize === size ? "key-go" : "key-blank")}
               >
                 {t(`appearance.textSize.${size}.name`)}
               </button>
@@ -238,7 +239,7 @@ export function AppearanceSettings() {
               data-testid="setting-toggle"
               data-key={def.key}
               data-checked={values[def.key]}
-              className="flex w-full items-start gap-2.5 rounded-[var(--radius-control)] bg-raised px-3 py-2.5 text-left shadow-[inset_0_0_0_1px_var(--rule)] transition-colors hover:bg-raised"
+              className="row w-full items-start px-3 py-2.5 text-left"
             >
               <span
                 aria-hidden

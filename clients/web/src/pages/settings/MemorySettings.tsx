@@ -218,7 +218,7 @@ function SpaceRow({
         // build. Amber is reserved for a measured, live value — this row is
         // neither, and it only ever looked grey because a `border-color`
         // utility could not win the cascade.
-        active && "bg-accent-quiet",
+        active && "is-selected",
       )}
     >
       <button
@@ -497,7 +497,7 @@ function ErrorNote({
   if (!error) return null;
   const message = error instanceof ApiRequestError ? error.message : fallback;
   return (
-    <div className="mt-3 rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
+    <div className="notice notice-fault mt-3">
       {message}
     </div>
   );

@@ -66,10 +66,7 @@ export function ListDetail({
  */
 export function NothingSelected({ children }: { children: ReactNode }) {
   return (
-    <p
-      className="px-6 py-8 text-sm text-faint"
-      data-testid="nothing-selected"
-    >
+    <p className="empty" data-testid="nothing-selected">
       {children}
     </p>
   );

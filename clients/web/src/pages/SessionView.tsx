@@ -894,8 +894,10 @@ export function SessionView() {
                 no way into either structural one — you had to go back to the
                 session first, which is the navigation the graph exists to
                 replace. */}
+            {/* The trough with one key standing proud of it was the shared
+                segmented control, hand-rolled here before there was one. */}
             <div
-              className="flex shrink-0 items-center gap-0.5 rounded-[var(--radius-control)] bg-screen p-0.5"
+              className="segmented shrink-0"
               role="radiogroup"
               aria-label={t("session.view")}
               data-testid="view-switch"
@@ -918,14 +920,7 @@ export function SessionView() {
                       role="radio"
                       aria-checked={view === v.id}
                       disabled={off}
-                      className={cn(
-                        "key-icon shrink-0 !h-7 !w-7",
-                        // A recessed trough with one key standing proud of it:
-                        // the selected view is a raised key, not a tinted one.
-                        view === v.id
-                          ? "!bg-panel !text-legend shadow-[var(--float)]"
-                          : "hover:!bg-raised",
-                      )}
+                      className="inline-flex h-7 w-7 shrink-0 items-center justify-center px-0"
                       onClick={() => showView(v.id)}
                       title={off ? t("run.noRunTranscript") : v.title}
                       aria-label={off ? t("run.noRunTranscript") : v.label}
@@ -975,12 +970,13 @@ export function SessionView() {
               <button
                 className={cn(
                   "key-icon",
-                  // Three states have to stay apart, and `bg-raised` is
-                  // already what hover paints: a plan exists (ring + full
-                  // ink), the panel is open (filled), hovered (filled).
+                  // Three states have to stay apart. That a plan EXISTS is a
+                  // ring and full ink; that the panel is OPEN is the wash
+                  // and the edge every held key wears, off `aria-pressed`
+                  // below; hover is the neutral fill. None of the three is
+                  // written out here any more.
                   tasks.length > 0 &&
                     "!text-legend shadow-[inset_0_0_0_1px_var(--rule-strong)]",
-                  tasksOpen && "bg-raised !text-legend",
                 )}
                 disabled={overlayOpen}
                 onClick={() => setTasksOpen(!tasksOpen)}
@@ -1166,7 +1162,7 @@ export function SessionView() {
             <div className="mx-auto w-full max-w-[54rem] px-4 sm:px-6">
               <div
                 data-testid="session-error"
-                className="flex items-start gap-2 rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink"
+                className="notice notice-fault"
               >
                 <CircleAlert size={16} className="mt-0.5 shrink-0" />
                 <span>{sendError ?? stream.streamError}</span>
@@ -1196,14 +1192,14 @@ export function SessionView() {
             <div className="mx-auto w-full max-w-[54rem] px-4 sm:px-6">
               <div
                 data-testid="session-terminal"
-                className="flex items-start gap-2 rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink"
+                className="notice notice-fault"
               >
                 <CircleAlert size={16} className="mt-0.5 shrink-0" />
-                <div className="min-w-0">
+                <div className="notice-body">
                   <p>{t("session.terminal", { reason: terminal })}</p>
                   <button
                     type="button"
-                    className="key key-flat mt-2 !text-red-ink hover:!bg-red-quiet"
+                    className="key key-flat mt-2"
                     onClick={() => navigate("/")}
                     data-testid="session-terminal-new"
                   >

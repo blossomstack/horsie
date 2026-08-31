@@ -136,7 +136,7 @@ export function Section({
       </div>
       <div className="space-y-2">
         {empty && (
-          <p className="screen break-words px-3 py-4 text-center text-sm text-faint">
+          <p className="empty screen break-words text-center">
             {empty}
           </p>
         )}
@@ -171,7 +171,6 @@ export function RowAction({
       className={cn(
         "key-icon !h-7 !w-7 shrink-0",
         danger && "hover:!bg-red-quiet hover:!text-red-ink",
-        pressed && "bg-raised text-legend",
       )}
       onClick={onClick}
       disabled={disabled}
@@ -235,7 +234,7 @@ export function ListRow({
     <div
       className={cn(
         "-mx-1.5 px-1.5 transition-colors hover:bg-raised",
-        active && "bg-accent-quiet",
+        active && "is-selected",
       )}
       data-testid={testId}
       data-active={active ? "true" : undefined}
@@ -325,7 +324,7 @@ export function TextField({
       <label className="block">
         <RowLabel>{label}</RowLabel>
         <input
-          className={cn("field field-mono", invalid && "border-red")}
+          className="field field-mono"
           type={type}
           value={value}
           onChange={(e) => onChange(e.target.value)}
@@ -367,7 +366,7 @@ export function TextAreaField({
       <label className="block">
         <RowLabel>{label}</RowLabel>
         <textarea
-          className={cn("field field-mono", invalid && "border-red")}
+          className="field field-mono"
           rows={rows}
           value={value}
           onChange={(e) => onChange(e.target.value)}

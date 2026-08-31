@@ -568,7 +568,7 @@ function ModelCardEditor({
       </div>
 
       {error && (
-        <div className="mt-3 rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
+        <div className="notice notice-fault mt-3">
           {error}
         </div>
       )}

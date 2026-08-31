@@ -157,6 +157,12 @@
    * a lamp that commits nothing. */
   --attention: oklch(0.72 0.16 42);
 
+  /* The scrim behind the drawer on a narrow screen. It was a literal in
+   * `SessionsLayout` — on hue 255, the cool world's neutral, so on Paper it
+   * dimmed a warm room with a cold sheet. A colour at a call site is a seam
+   * variable that was never declared. */
+  --scrim: oklch(0.1 0.01 62 / 0.62);
+
   --red: oklch(0.618 0.212 26);
   --red-ink: oklch(0.732 0.178 26);
   --red-quiet: oklch(0.322 0.088 26);
@@ -220,6 +226,10 @@
 
   --attention: oklch(0.508 0.176 36);
 
+  /* Still a DARK wash in the light exposure: a scrim's job is to take the
+   * page back, and a pale one over bone takes nothing back. */
+  --scrim: oklch(0.28 0.02 62 / 0.38);
+
   --red: oklch(0.512 0.198 26);
   --red-ink: oklch(0.492 0.198 26);
   --red-quiet: oklch(0.948 0.036 26);
@@ -263,6 +273,7 @@
   --color-select-edge: var(--select-edge);
   --color-pressed: var(--pressed);
   --color-attention: var(--attention);
+  --color-scrim: var(--scrim);
   --color-live: var(--live);
   --color-live-ink: var(--live-ink);
   --color-live-quiet: var(--live-quiet);
@@ -689,7 +700,8 @@
   .key-blank:active:not(:disabled),
   .key-flat:active:not(:disabled),
   .key-icon:active:not(:disabled),
-  .key-icon[aria-expanded="true"] {
+  .key-icon[aria-expanded="true"],
+  .row[aria-expanded="true"] {
     background: var(--pressed);
     color: var(--legend);
   }
@@ -703,7 +715,8 @@
    * still holding its value, and that is the louder of the two facts. */
   .key[aria-pressed="true"],
   .key-icon[aria-pressed="true"],
-  .key-icon[data-marked="true"] {
+  .key-icon[data-marked="true"],
+  a[aria-current="page"].key-icon {
     background: var(--accent-quiet);
     color: var(--legend);
     box-shadow: inset 0 -2px 0 var(--select-edge);
@@ -902,6 +915,24 @@
   }
   .row:hover {
     background: var(--panel-raised);
+  }
+  /* A row that is a DESTINATION rather than a thing: a rail entry, a nav
+   * entry. It is quiet until you reach for it, because a rail of ten
+   * full-strength names is a rail with no hierarchy in it. A roster row is
+   * the opposite — its name IS the item — so it stays at full ink.
+   *
+   * The five files that carried `isActive ? … : "text-dim hover:text-legend"`
+   * were each re-deriving this from React. It is a resting state, and a
+   * resting state belongs to the stylesheet. */
+  .row-quiet {
+    color: var(--legend-dim);
+  }
+  .row-quiet:hover,
+  .row-quiet.is-selected,
+  .row-quiet[data-active="true"],
+  .row-quiet[aria-selected="true"],
+  .row-quiet[aria-current="page"] {
+    color: var(--legend);
   }
   /* SELECTION, said once.
    *

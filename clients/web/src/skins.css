@@ -68,6 +68,8 @@
    * on screen, and lime cannot also mean "act". */
   --attention: oklch(0.828 0.135 82);
 
+  --scrim: oklch(0.08 0.008 250 / 0.62);
+
   --red: oklch(0.622 0.216 25);
   --red-ink: oklch(0.728 0.182 25);
   --red-quiet: oklch(0.298 0.088 25);
@@ -132,6 +134,8 @@
   --live-quiet: oklch(0.948 0.042 82);
 
   --attention: oklch(0.478 0.11 70);
+
+  --scrim: oklch(0.24 0.012 250 / 0.38);
 
   --red: oklch(0.518 0.208 25);
   --red-ink: oklch(0.498 0.204 25);

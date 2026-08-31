@@ -122,19 +122,12 @@ export function SessionRow({
         data-testid="session-row"
         data-session-id={s.id}
         title={`${title} — ${meta.hint}`}
-        className={({ isActive }) =>
-          cn(
-            // Room for the menu so a long title never runs under it. Always,
-            // now that the menu is always there.
-            "flex items-start gap-2.5 rounded-[var(--radius-control)] py-2 pl-2.5 pr-9 transition-colors",
-            // The raised fill is the whole cue. The ring that used to sit on
-            // top of it drew a that competed with the sub session rails
-            // beneath for the same job.
-            isActive
-              ? "bg-accent-quiet text-legend"
-              : "text-dim hover:bg-raised hover:text-legend",
-          )
-        }
+        // Rest, hover, selected and selected-under-the-pointer are all
+        // `.row`'s business now — `aria-current="page"`, which NavLink sets
+        // on the active link, is what the stylesheet reads. The only thing
+        // left here is the room the hover menu needs so a long title never
+        // runs under it.
+        className="row row-quiet items-start py-2 pl-2.5 pr-9"
       >
         <StatusDot status={s.status} className="mt-[7px]" />
         <span className="min-w-0 flex-1">

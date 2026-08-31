@@ -229,8 +229,12 @@ function WorkflowEditor() {
                   className={cn(
                     "group flex shrink-0 items-center gap-1 rounded-[var(--radius-control)] pr-1 transition-colors md:shrink",
                     dragging === i && "opacity-50",
+                    // The chosen step reads like every other chosen thing;
+                    // it used to wear the hover fill plus a ring, so the step
+                    // you had opened and the one under the pointer differed
+                    // only by a hairline.
                     isSelected(selected, s.id) && !visualizing
-                      ? "bg-raised shadow-[inset_0_0_0_1px_var(--rule-strong)]"
+                      ? "is-selected"
                       : "hover:bg-raised",
                   )}
                   data-testid="step-row"
@@ -303,10 +307,9 @@ function WorkflowEditor() {
               // A toggle, not a command: a blank key that lights the same way
               // a config key holding a value does. Amber would be wrong — it
               // means a live measured value, not a control that is on.
-              className={cn(
-                "key key-blank key-sm md:w-full",
-                visualizing && "bg-raised !text-legend",
-              )}
+              // A toggle wears what every key holding a value wears, off
+              // the `aria-pressed` it already carries.
+              className="key key-blank key-sm md:w-full"
               onClick={() => setVisualizing((v) => !v)}
               aria-pressed={visualizing}
               data-testid="visualize-workflow"
@@ -319,7 +322,7 @@ function WorkflowEditor() {
 
         <div className="min-w-0 flex-1 space-y-4 overflow-y-auto px-6 py-4">
           {error && (
-            <p className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2 text-sm text-red-ink">
+            <p className="notice notice-fault">
               {error}
             </p>
           )}
@@ -444,7 +447,7 @@ function SidebarRow({
       className={cn(
         "flex shrink-0 items-center gap-2 rounded-[var(--radius-control)] px-2 py-1.5 text-left transition-colors md:w-full",
         active
-          ? "bg-accent-quiet text-legend"
+          ? "is-selected"
           : "text-dim hover:bg-raised hover:text-legend",
       )}
       onClick={onClick}

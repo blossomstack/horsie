@@ -149,7 +149,7 @@ export function RuntimesSettings() {
   if (error || !settings) {
     return (
       <div className="p-6">
-        <p className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
+        <p className="notice notice-fault">
 {t("runtimesPage.loadFailed")}
         </p>
       </div>
@@ -188,7 +188,7 @@ export function RuntimesSettings() {
         saved={update.isSuccess && !update.isPending}
     >
         {saveError && (
-          <p className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
+          <p className="notice notice-fault">
             {saveError}
           </p>
         )}
@@ -306,7 +306,7 @@ export function RuntimesSettings() {
               >
                 {checks[name] && !checks[name].ok && (
                   <p
-                    className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink"
+                    className="notice notice-fault"
                     data-testid={`cloud-vendor-test-error-${name}`}
                   >
                     {checks[name].error ?? "The vendor did not answer."}

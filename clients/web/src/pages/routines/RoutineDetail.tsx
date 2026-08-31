@@ -154,7 +154,7 @@ export function RoutineDetail({
 
           {(error ?? routine.lastError) && (
             <div
-              className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2 text-sm text-red-ink"
+              className="notice notice-fault"
               data-testid="routine-run-error"
             >
               {error ?? t("routines.lastTriggerFailed", { error: routine.lastError })}
