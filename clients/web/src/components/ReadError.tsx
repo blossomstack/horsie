@@ -44,7 +44,7 @@ export function ReadError({
       role="status"
       data-testid={testId}
       className={cn(
-        "rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink",
+        "notice notice-fault",
         className,
       )}
     >

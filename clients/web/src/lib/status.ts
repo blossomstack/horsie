@@ -198,7 +198,7 @@ export const TONE_TEXT: Record<StatusTone, string> = {
   live: "text-live-ink",
   ready: "text-lamp-ok",
   idle: "text-dim",
-  attention: "text-accent",
+  attention: "text-attention",
   fault: "text-red-ink",
   off: "text-faint",
 };

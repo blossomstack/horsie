@@ -8,7 +8,6 @@ import { PopoverMenu } from "../../components/PopoverMenu";
 import { useEnvironmentPicker } from "../../components/configPickers";
 import { useAgents } from "../../hooks/useAgents";
 import { useWorkflows } from "../../hooks/useWorkflows";
-import { cn } from "../../lib/cn";
 import { useEnvironmentChannel } from "../../hooks/useEnvironmentChannel";
 import {
   useCreateRoutine,
@@ -319,7 +318,7 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
                 would put two namespaces in one menu, where "release" could be
                 either and the reader has no way to tell. */}
             <div
-              className="mb-2 flex w-fit overflow-hidden rounded-[var(--radius-chip)] bg-raised"
+              className="segmented mb-2"
               role="radiogroup"
               aria-label={t("routineEdit.runs")}
             >
@@ -329,12 +328,6 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
                   type="button"
                   role="radio"
                   aria-checked={targetKind === k}
-                  className={cn(
-                    "px-2 py-1 text-xs",
-                    targetKind === k
-                      ? "bg-panel text-legend shadow-[var(--float)]"
-                      : "text-dim hover:text-legend",
-                  )}
                   data-testid={`routine-target-${k.toLowerCase()}`}
                   onClick={() => setTargetKind(k)}
                 >
@@ -621,7 +614,7 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
 
           {error && (
             <div
-              className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2 text-sm text-red-ink"
+              className="notice notice-fault"
               data-testid="routine-error"
             >
               {error}

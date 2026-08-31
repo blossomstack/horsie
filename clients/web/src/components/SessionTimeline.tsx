@@ -249,8 +249,9 @@ function LaneRow({
         "group relative flex items-center",
         // Which run you are looking at, when the transcript key would open one.
         // Without it the three views were three pictures of the same session
-        // with no shared "you are here".
-        isSelected && "bg-raised",
+        // with no shared "you are here" — and it wore the hover fill, so the
+        // lane you had chosen matched the lane under the pointer.
+        isSelected && "is-selected",
       )}
       style={{ height: LANE_H }}
     >

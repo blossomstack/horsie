@@ -80,7 +80,7 @@ export function LoginPage() {
         {message && (
           <p
             data-testid="login-error"
-            className="mt-3 rounded-[var(--radius-control)] border border-red bg-red-quiet px-2.5 py-2 text-xs leading-relaxed text-red-ink"
+            className="notice notice-fault mt-3"
           >
             {message}
           </p>

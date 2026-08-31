@@ -296,13 +296,13 @@ export function PopoverMenu({
             // dot in the corner of a 2rem key is four pixels doing the work of
             // a whole control, and accent there competes with the one accent
             // key that actually commits.
-            warn
-              ? "!bg-live-quiet !text-live-ink"
-              : marked
-                ? "bg-raised !text-legend"
-                : "!text-faint",
+            //
+            // Which colour is the stylesheet's business: `data-marked` and
+            // `aria-expanded` are both already emitted below, and they are
+            // what "holding a value" and "panel open" read off. Only `warn`
+            // is left, because a live tone is not one of those two states.
+            warn && "!bg-live-quiet !text-live-ink",
             disabled && "cursor-default opacity-70",
-            open && "bg-raised !text-legend",
           )}
           onClick={() => !disabled && setOpen((o) => !o)}
           onKeyDown={onTriggerKeyDown}
@@ -321,9 +321,10 @@ export function PopoverMenu({
           ref={triggerRef}
           type="button"
           className={cn(
-            "flex w-full items-center gap-1.5 rounded-[var(--radius-control)] px-2 py-1 text-left transition-colors",
-            disabled ? "cursor-default opacity-70" : "hover:bg-raised",
-            open && "bg-raised",
+            // A row that opens a panel: hover and held-open are `.row`'s, off
+            // `aria-expanded` below.
+            "row w-full gap-1.5 px-2 py-1 text-left",
+            disabled && "cursor-default opacity-70",
           )}
           onClick={() => !disabled && setOpen((o) => !o)}
           onKeyDown={onTriggerKeyDown}

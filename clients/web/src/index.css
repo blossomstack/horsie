@@ -124,16 +124,44 @@
   --keycap-hover: oklch(0.348 0.016 62);
   --keycap-ink: oklch(0.955 0.01 85);
 
+  /* Held down, or a trigger whose panel is standing open. Both were
+   * borrowing `--panel-raised`, which is hover — so an open menu looked
+   * exactly like a menu you were merely pointing at. */
+  --pressed: oklch(0.246 0.013 62);
+
   --accent: oklch(0.688 0.168 42);
   --accent-hover: oklch(0.735 0.155 42);
   --accent-ink: oklch(0.195 0.045 42);
-  --accent-quiet: oklch(0.372 0.092 42);
+  /* The selection wash. Was `oklch(0.372 0.092 42)`: lighter than the
+   * interaction fill but barely warmer, so "you are pointing at this" and
+   * "this is the one you picked" were told apart by nine points of lightness
+   * and nothing else. Now the lightness step is small and the CHROMA step is
+   * large — two cues that differ in KIND cannot be confused, two greys can. */
+  --accent-quiet: oklch(0.33 0.115 42);
+  /* Selected AND under the pointer. The build had no value for this at all,
+   * so hovering the row you had already chosen did nothing. */
+  --accent-quiet-hover: oklch(0.382 0.132 42);
+  /* The 2px marker down the side of a selected row: the third cue, and a
+   * line that carries meaning on its own — the same family as the tree rail,
+   * the graph edge and the focus ring, so rule 1 still holds. */
+  --select-edge: oklch(0.688 0.168 42);
   --selection: oklch(0.81 0.23 42 / 0.12);
   --selection-solid: oklch(0.263 0.039 56);
 
   --live: oklch(0.828 0.132 82);
   --live-ink: oklch(0.828 0.132 82);
   --live-quiet: oklch(0.324 0.062 82);
+
+  /* A session standing still, waiting on the operator. It read as `--accent`
+   * before, which spends the one colour that means "this control commits" on
+   * a lamp that commits nothing. */
+  --attention: oklch(0.72 0.16 42);
+
+  /* The scrim behind the drawer on a narrow screen. It was a literal in
+   * `SessionsLayout` — on hue 255, the cool world's neutral, so on Paper it
+   * dimmed a warm room with a cold sheet. A colour at a call site is a seam
+   * variable that was never declared. */
+  --scrim: oklch(0.1 0.01 62 / 0.62);
 
   --red: oklch(0.618 0.212 26);
   --red-ink: oklch(0.732 0.178 26);
@@ -181,16 +209,26 @@
   --keycap-hover: oklch(0.855 0.028 85);
   --keycap-ink: oklch(0.262 0.022 58);
 
+  --pressed: oklch(0.872 0.024 85);
+
   --accent: oklch(0.518 0.172 34);
   --accent-hover: oklch(0.462 0.162 34);
   --accent-ink: oklch(0.992 0.01 58);
-  --accent-quiet: oklch(0.858 0.075 40);
+  --accent-quiet: oklch(0.878 0.085 44);
+  --accent-quiet-hover: oklch(0.838 0.098 44);
+  --select-edge: oklch(0.518 0.172 34);
   --selection: oklch(0.21 0.23 34 / 0.32);
   --selection-solid: oklch(0.766 0.037 26);
 
   --live: oklch(0.482 0.11 62);
   --live-ink: oklch(0.482 0.11 62);
   --live-quiet: oklch(0.948 0.042 82);
+
+  --attention: oklch(0.508 0.176 36);
+
+  /* Still a DARK wash in the light exposure: a scrim's job is to take the
+   * page back, and a pale one over bone takes nothing back. */
+  --scrim: oklch(0.28 0.02 62 / 0.38);
 
   --red: oklch(0.512 0.198 26);
   --red-ink: oklch(0.492 0.198 26);
@@ -231,6 +269,11 @@
   --color-accent: var(--accent);
   --color-accent-ink: var(--accent-ink);
   --color-accent-quiet: var(--accent-quiet);
+  --color-accent-quiet-hover: var(--accent-quiet-hover);
+  --color-select-edge: var(--select-edge);
+  --color-pressed: var(--pressed);
+  --color-attention: var(--attention);
+  --color-scrim: var(--scrim);
   --color-live: var(--live);
   --color-live-ink: var(--live-ink);
   --color-live-quiet: var(--live-quiet);
@@ -649,6 +692,89 @@
     pointer-events: none;
   }
 
+  /* Held down, and — the case the build had no value for — a trigger whose
+   * panel is standing open. Both were borrowing `--panel-raised`, which is
+   * what hover paints, so an open menu looked exactly like a menu you were
+   * merely pointing at. */
+  .key:active:not(:disabled),
+  .key-blank:active:not(:disabled),
+  .key-flat:active:not(:disabled),
+  .key-icon:active:not(:disabled),
+  .key-icon[aria-expanded="true"],
+  .row[aria-expanded="true"] {
+    background: var(--pressed);
+    color: var(--legend);
+  }
+
+  /* A control HOLDING A VALUE is not the same as one that is open: the value
+   * is a selection, so it speaks the selection's language. The edge sits
+   * UNDER the key rather than beside it — a key is square or near it, and a
+   * left bar on a 1.75rem control reads as a crop rather than as a marker.
+   *
+   * After the pressed rule on purpose: a marked trigger that is also open is
+   * still holding its value, and that is the louder of the two facts. */
+  .key[aria-pressed="true"],
+  .key-icon[aria-pressed="true"],
+  .key-icon[data-marked="true"],
+  a[aria-current="page"].key-icon {
+    background: var(--accent-quiet);
+    color: var(--legend);
+    box-shadow: inset 0 -2px 0 var(--select-edge);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Segmented. "Which of these am I looking at" — the one control the
+   * build did not have, so four places invented it: Appearance rendered
+   * three radio groups as rows of `key-go` keys, the session's view
+   * switcher and the routine's target picker each hand-rolled a trough,
+   * and the tool filter rolled a third.
+   * ------------------------------------------------------------------ */
+  .segmented {
+    display: inline-flex;
+    gap: 2px;
+    border-radius: var(--radius-cap);
+    background: var(--screen);
+    padding: 2px;
+  }
+  .segmented > button {
+    border: none;
+    cursor: pointer;
+    border-radius: calc(var(--radius-cap) - 2px);
+    background: transparent;
+    padding: 0.25rem 0.625rem;
+    font-family: var(--font-sans);
+    font-size: 0.75rem;
+    font-weight: 500;
+    line-height: 1.35;
+    white-space: nowrap;
+    color: var(--legend-dim);
+    transition:
+      background 120ms ease,
+      color 120ms ease;
+  }
+  /* BOTH attributes, because the two call sites are two different controls:
+   * Appearance's mode/language/text-size rows are a `radiogroup` and carry
+   * `aria-checked`, while a view switcher is a `tablist` and carries
+   * `aria-selected`. Keying off one silently left the other unstyled. */
+  .segmented > button:hover:not([aria-selected="true"]):not([aria-checked="true"]) {
+    background: var(--panel-raised);
+    color: var(--legend);
+  }
+  /* The chosen segment is a RAISED PANEL, not an accent fill: the accent is
+   * the key that commits, and saying which of three views you are reading
+   * commits nothing. */
+  .segmented > button[aria-selected="true"],
+  .segmented > button[aria-checked="true"] {
+    background: var(--panel);
+    color: var(--legend);
+    font-weight: 600;
+    box-shadow: 0 1px 2px oklch(0 0 0 / 0.18);
+  }
+  .segmented > button:disabled {
+    opacity: 0.38;
+    pointer-events: none;
+  }
+
   /* ------------------------------------------------------------------ *
    * Fields. A filled slot, not an outlined box. The fill is what says
    * "you can type here"; a border would say it a second time.
@@ -686,6 +812,12 @@
   .field:disabled {
     opacity: 0.5;
   }
+  /* A field the server rejected. The ring is the same 2px the focus ring
+   * spends, in red — one indicator, not four. */
+  .field[aria-invalid="true"] {
+    border-color: var(--red);
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--red) 28%, transparent);
+  }
   /* Identifiers, endpoints, model names: machine strings get the mono face. */
   .field-mono {
     font-family: var(--font-mono);
@@ -718,6 +850,57 @@
   }
 
   /* ------------------------------------------------------------------ *
+   * Notice. One recipe, three tones. Twenty-six call sites each wrote out
+   * `border border-red bg-red-quiet px-3 py-2.5 text-sm …` by hand, in
+   * four radii and three paddings; `MutationErrors` drew a border AND a
+   * fill. A notice is a fill, an ink, and a word.
+   * ------------------------------------------------------------------ */
+  .notice {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    border-radius: var(--radius-panel);
+    padding: 0.625rem 0.75rem;
+    font-size: 0.875rem;
+    line-height: 1.5;
+  }
+  .notice-body {
+    min-width: 0;
+    flex: 1;
+  }
+  .notice-fault {
+    background: var(--red-quiet);
+    color: var(--red-ink);
+    /* The one border that stays. Rule 1 lets a line carry meaning on its
+     * own, and a failure has to hold the eye even where the red does not
+     * read — a colour-blind reader, a projector, a bright room. */
+    box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--red) 45%, transparent);
+  }
+  .notice-live {
+    background: var(--live-quiet);
+    color: var(--live-ink);
+  }
+  .notice-ok {
+    background: var(--lamp-ok-quiet);
+    color: var(--lamp-ok);
+  }
+  /* The dismiss key wears the notice's own ink rather than the panel's, so
+   * it belongs to the thing it closes. */
+  .notice .key-icon,
+  .notice .key {
+    color: inherit;
+  }
+  /* `.key-flat` too, and at a specificity that beats its own hover rule:
+   * without it, pointing at Start a new session inside a failure notice
+   * painted the key with the neutral hover fill and the panel's ink. */
+  .notice-fault .key-icon:hover:not(:disabled),
+  .notice-fault .key-flat:hover:not(:disabled),
+  .notice-fault .key-blank:hover:not(:disabled) {
+    background: color-mix(in oklab, var(--red) 18%, transparent);
+    color: var(--red-ink);
+  }
+
+  /* ------------------------------------------------------------------ *
    * Rows. A list is a list: text with padding and a hover fill. The card
    * per row — a fill AND a ring AND a gap AND a radius, four separations
    * for one boundary — is what made these pages read as loose.
@@ -738,14 +921,57 @@
   .row:hover {
     background: var(--panel-raised);
   }
-  /* Hover is a neutral fill; SELECTED is the accent wash. Two greys a few
+  /* A row that is a DESTINATION rather than a thing: a rail entry, a nav
+   * entry. It is quiet until you reach for it, because a rail of ten
+   * full-strength names is a rail with no hierarchy in it. A roster row is
+   * the opposite — its name IS the item — so it stays at full ink.
+   *
+   * The five files that carried `isActive ? … : "text-dim hover:text-legend"`
+   * were each re-deriving this from React. It is a resting state, and a
+   * resting state belongs to the stylesheet. */
+  .row-quiet {
+    color: var(--legend-dim);
+  }
+  .row-quiet:hover,
+  .row-quiet.is-selected,
+  .row-quiet[data-active="true"],
+  .row-quiet[aria-selected="true"],
+  .row-quiet[aria-current="page"] {
+    color: var(--legend);
+  }
+  /* SELECTION, said once.
+   *
+   * Hover is a neutral fill; selected is the accent wash. Two greys a few
    * points apart cannot say "you are pointing at this" and "this is the one
    * you picked" at the same time, which is why a selected provider row was
-   * indistinguishable from a hovered one. */
+   * indistinguishable from a hovered one. The two cues now differ in KIND —
+   * neutral against chromatic — and three of them arrive together: the wash,
+   * the 2px edge, and the weight.
+   *
+   * `aria-current` is in the list because every selected row in the rail and
+   * in both navs is a react-router `NavLink`, which marks the active one that
+   * way — which is what lets five files drop their `isActive ? …` strings.
+   *
+   * `.is-selected` is for everything that is chosen without being a row: a
+   * skin card, a popover option, a workflow step. */
+  .is-selected,
   .row[data-active="true"],
-  .row[aria-selected="true"] {
+  .row[aria-selected="true"],
+  a[aria-current="page"].row {
     background: var(--accent-quiet);
     color: var(--legend);
+    font-weight: 600;
+    box-shadow: inset 2px 0 0 var(--select-edge);
+  }
+  /* Selected AND under the pointer — a state the build had no value for, so
+   * pointing at the row you had already picked did nothing at all. Declared
+   * after `.row:hover` on purpose: at equal specificity source order is what
+   * keeps the neutral hover fill from winning back a selected row. */
+  .is-selected:hover,
+  .row[data-active="true"]:hover,
+  .row[aria-selected="true"]:hover,
+  a[aria-current="page"].row:hover {
+    background: var(--accent-quiet-hover);
   }
 
   /* ------------------------------------------------------------------ *
@@ -794,6 +1020,18 @@
   .chip-toggle[data-state="require"] {
     background: var(--accent-quiet);
     color: var(--legend);
+    font-weight: 600;
+    /* A hairline rather than the row's 2px bar: a chip is too small to give
+     * 2px of its width away. */
+    box-shadow: inset 0 0 0 1px var(--select-edge);
+  }
+  /* Excluded is not "off": it is a second on-state pointing the other way,
+   * and red is the only colour in the system that means negative. */
+  .chip-toggle[data-state="exclude"] {
+    background: var(--red-quiet);
+    color: var(--red-ink);
+    font-weight: 600;
+    box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--red) 50%, transparent);
   }
   .chip-toggle:disabled {
     cursor: default;
@@ -844,6 +1082,25 @@
     background: transparent;
     box-shadow: inset 0 0 0 1.5px currentColor;
     opacity: 0.55;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Empty. `NothingSelected` generalised to every column that can be
+   * empty — a roster filtered to nothing, an inbox with nothing in it, a
+   * first run. Three of them said the same nothing in three sizes.
+   * ------------------------------------------------------------------ */
+  .empty {
+    padding: 1.5rem;
+    font-size: 0.8125rem;
+    line-height: 1.6;
+    color: var(--legend-faint);
+    text-wrap: pretty;
+  }
+  /* The one word worth finding in it — a name, a key to press. */
+  .empty strong,
+  .empty .kbd {
+    color: var(--legend);
+    font-weight: 550;
   }
 
   /* ------------------------------------------------------------------ *

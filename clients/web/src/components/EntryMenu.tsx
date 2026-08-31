@@ -42,7 +42,7 @@ export function EntryMenu({
             }}
             className={cn(
               "flex w-full items-baseline gap-2 px-3 py-1.5 text-left text-[0.8125rem]",
-              i === activeIndex ? "bg-accent-quiet text-legend" : "text-dim",
+              i === activeIndex ? "is-selected" : "text-dim",
             )}
           >
             <code className="shrink-0">

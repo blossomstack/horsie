@@ -50,15 +50,7 @@ function PrimaryLink({
     <NavLink
       to={to}
       data-testid={testId}
-      className={({ isActive }) =>
-        cn(
-          "flex items-center gap-2.5 rounded-[var(--radius-control)] px-2.5 py-1.5 text-[0.8125rem] transition-colors",
-          // Fill only, like every other selected row in the app.
-          isActive
-            ? "bg-accent-quiet text-legend"
-            : "text-dim hover:bg-raised hover:text-legend",
-        )
-      }
+      className="row row-quiet text-[0.8125rem]"
     >
       {icon}
       <span className="font-medium">{label}</span>
@@ -120,9 +112,9 @@ function FooterLink({
       data-testid={testId}
       title={label}
       aria-label={label}
-      className={({ isActive }) =>
-        cn("key-icon shrink-0", isActive && "bg-accent-quiet text-legend")
-      }
+      // The active one is a key holding a value, and `NavLink` already says
+      // which one that is.
+      className="key-icon shrink-0"
     >
       {icon}
     </NavLink>
@@ -261,14 +253,14 @@ export function Sidebar() {
               behind a button is a control with no job. */}
           {tags.length > 0 && (
             <button
-              className={cn(
-                "key-icon !h-6 !w-6",
-                // A filtered list must never look like the whole list: the one
-                // failure mode of a collapsible filter is a short rail read as
-                // an account that has lost its sessions.
-                filterIsActive(filter) &&
-                  "!bg-accent-quiet !text-legend",
-              )}
+              className="key-icon !h-6 !w-6"
+              // A filtered list must never look like the whole list: the one
+              // failure mode of a collapsible filter is a short rail read as
+              // an account that has lost its sessions. The key is holding a
+              // value, so it says so the way every other key holding one
+              // does — and it outranks `aria-expanded`, because a shut panel
+              // over a live filter is exactly the case this is for.
+              data-marked={filterIsActive(filter) ? "true" : undefined}
               onClick={() => setPanelOpen((v) => !v)}
               aria-expanded={panelOpen}
               data-testid="tag-filter-button"
@@ -331,11 +323,8 @@ export function Sidebar() {
           </p>
         )}
         {!isLoading && !isError && sessions?.length === 0 && (
-          <p className="px-2.5 py-8 text-[0.8125rem] leading-relaxed text-faint">
-            <Trans
-              i18nKey="rail.empty"
-              components={{ key: <span className="text-legend" /> }}
-            />
+          <p className="empty">
+            <Trans i18nKey="rail.empty" components={{ key: <strong /> }} />
           </p>
         )}
         {/* Two filters narrow one list, so an empty result has to name the one
@@ -345,17 +334,11 @@ export function Sidebar() {
           shown.length === 0 &&
           (sessions?.length ?? 0) > 0 &&
           (needle !== "" ? (
-            <p
-              className="px-2.5 py-8 text-[0.8125rem] leading-relaxed text-faint"
-              data-testid="no-text-matches"
-            >
+            <p className="empty" data-testid="no-text-matches">
               {t("rail.noTextMatches", { query: filterText.trim() })}
             </p>
           ) : (
-            <p
-              className="px-2.5 py-8 text-[0.8125rem] leading-relaxed text-faint"
-              data-testid="no-tag-matches"
-            >
+            <p className="empty" data-testid="no-tag-matches">
               {t("rail.noTagMatches")}
             </p>
           ))}

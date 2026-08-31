@@ -50,9 +50,9 @@ export function AskUserCard({ call }: { call: RenderedToolCall }) {
     <div
       data-testid="ask-user-card"
       data-pending={pending}
-      className="rounded-[var(--radius-control)] bg-live-quiet px-3 py-2 text-sm text-legend"
+      className="notice notice-live text-legend"
     >
-      <div className="flex items-start gap-2">
+      <div className="notice-body flex items-start gap-2">
         <HelpCircle size={16} className="mt-0.5 shrink-0 text-live-ink" />
         {/* `break-words` is load-bearing, not defensive: a question or an
             answer routinely carries a path, a URL or an identifier with no

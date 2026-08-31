@@ -183,7 +183,7 @@ function AgentForm({ initial }: { initial?: AgentView }) {
 
           {error && (
             <div
-              className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink"
+              className="notice notice-fault"
               data-testid="agent-error"
             >
               {error}

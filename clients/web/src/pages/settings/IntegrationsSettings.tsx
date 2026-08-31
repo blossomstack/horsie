@@ -52,7 +52,7 @@ export function IntegrationsSettings() {
             </div>
           )}
           {isError && (
-            <div className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
+            <div className="notice notice-fault">
               <Trans
                 i18nKey="modelsPage.loadFailed"
                 components={{ cmd: <code /> }}
@@ -162,7 +162,7 @@ function GithubSection() {
         {status?.connected && <GithubMcpToggle />}
 
         {error && (
-          <div className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
+          <div className="notice notice-fault">
             {error}
           </div>
         )}
@@ -265,7 +265,7 @@ function GithubMcpToggle() {
         </div>
       )}
       {error && (
-        <div className="mt-2 rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
+        <div className="notice notice-fault mt-2">
           {error}
         </div>
       )}
@@ -308,7 +308,7 @@ function McpSection() {
     <section className="section">
       {banner && (
         <div
-          className={`mb-3 rounded-[var(--radius-control)] border px-3 py-2 text-sm ${banner.ok ? "border-lamp-ok bg-lamp-ok-quiet text-lamp-ok" : "border-red bg-red-quiet text-red-ink"}`}
+          className={`notice mb-3 ${banner.ok ? "notice-ok" : "notice-fault"}`}
         >
           {banner.text}
         </div>
@@ -633,7 +633,7 @@ function McpServerRow({
 
 
         {error && (
-          <div className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
+          <div className="notice notice-fault">
             {error}
           </div>
         )}

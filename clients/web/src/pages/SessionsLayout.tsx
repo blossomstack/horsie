@@ -26,7 +26,7 @@ function Shell() {
       {/* Scrim: only ever present while the drawer is open on a narrow screen. */}
       {open && (
         <button
-          className="fixed inset-0 z-30 bg-[oklch(0.1_0.01_255/0.6)] md:hidden"
+          className="fixed inset-0 z-30 bg-scrim md:hidden"
           onClick={() => setOpen(false)}
           aria-label={t("layout.closeSessions")}
           tabIndex={-1}

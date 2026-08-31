@@ -83,7 +83,7 @@ export function InboxMessage({
       </header>
 
       {ask ? (
-        <div className="rounded-[var(--radius-control)] bg-live-quiet px-3 py-2 text-sm text-legend">
+        <div className="notice notice-live flex-col items-stretch text-legend">
           {/* The title is the question's first line, so a short one is the
               heading above verbatim and printing it again reads as a stutter. */}
           {ask.question !== message.title && (

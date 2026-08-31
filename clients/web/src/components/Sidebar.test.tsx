@@ -134,13 +134,16 @@ describe("Sidebar tag filter", () => {
     renderSidebar();
     await screen.findByTestId("session-row");
     const button = screen.getByTestId("tag-filter-button");
-    const quiet = button.className;
+    // The mark is an attribute, not a class: it is the stylesheet that decides
+    // what a key holding a value looks like. Asserting on `className` measured
+    // the wrong thing and would keep passing if the styling were deleted.
+    expect(button.getAttribute("data-marked")).toBeNull();
 
     fireEvent.click(button);
     fireEvent.click(screen.getByTestId("tag-chip-web"));
     fireEvent.click(button);
     expect(screen.queryByTestId("tag-filter-panel")).toBeNull();
-    expect(button.className).not.toBe(quiet);
+    expect(button.getAttribute("data-marked")).toBe("true");
   });
 
   it("remembers the filter across a remount", async () => {

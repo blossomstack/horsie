@@ -1,6 +1,5 @@
 import type { LucideIcon } from "lucide-react";
 import { NavLink } from "react-router-dom";
-import { cn } from "../lib/cn";
 import { useSettingsDirty } from "../pages/settings/dirty";
 
 export type NavItem = { to: string; label: string; icon: LucideIcon };
@@ -32,15 +31,7 @@ export function SettingsNav({
             onClick={(e) => {
               if (!confirmLeave()) e.preventDefault();
             }}
-            className={({ isActive }) =>
-              cn(
-                "flex shrink-0 items-center gap-2 rounded-[var(--radius-control)] px-2.5 py-2 text-[0.8125rem] transition-colors md:gap-2.5",
-                // Fill only, like every other selected row in the app.
-                isActive
-                  ? "bg-accent-quiet text-legend"
-                  : "text-dim hover:bg-raised hover:text-legend",
-              )
-            }
+            className="row row-quiet shrink-0 gap-2 px-2.5 py-2 text-[0.8125rem] md:gap-2.5"
           >
             <Icon size={14} aria-hidden />
             {label}

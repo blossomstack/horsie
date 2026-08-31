@@ -149,7 +149,7 @@ export function InboxPage() {
     >
       <div className="space-y-px">
           {isLoading && (
-            <p className="px-2.5 py-6 text-sm text-faint">{t("common.loading")}</p>
+            <p className="empty">{t("common.loading")}</p>
           )}
           {isError && (
             <p className="px-2.5 py-6 text-sm text-red-ink">
@@ -157,10 +157,7 @@ export function InboxPage() {
             </p>
           )}
           {data && messages.length === 0 && (
-            <p
-              className="px-2.5 py-8 text-[0.8125rem] leading-relaxed text-faint"
-              data-testid="inbox-empty"
-            >
+            <p className="empty" data-testid="inbox-empty">
               {view === "all" ? t("inbox.empty") : t("inbox.noneInView")}
             </p>
           )}
