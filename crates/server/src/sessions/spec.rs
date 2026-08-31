@@ -3,6 +3,7 @@
 //! API contract, these evolve at the speed of data migrations.
 
 use horsie_agentcore::LlmProvider;
+use horsie_models::mcp::McpServerSelection;
 use horsie_models::session::SessionStatusKind;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -139,11 +140,16 @@ pub struct AgentSettings {
     pub use_plugins: Option<bool>,
     pub max_iterations: Option<u32>,
     pub max_retries: u32,
-    /// Enabled MCP servers this session may call (by name); tools appear as
-    /// `mcp__<name>__<tool>`. Empty → none. `#[serde(default)]` so pre-MCP
-    /// journal rows deserialize.
-    #[serde(default)]
-    pub mcp_servers: Vec<String>,
+    /// Enabled MCP servers this session may call, and how much of each; tools
+    /// appear as `mcp__<name>__<tool>`. Empty → none.
+    ///
+    /// `#[serde(default)]` so pre-MCP journal rows deserialize, and read
+    /// through [`crate::mcp::selection::de_selections`] so the far more common
+    /// pre-tool-selection rows — a plain list of names — do too. Those come
+    /// back as every tool of each server, which is what selecting one meant
+    /// when they were written.
+    #[serde(default, deserialize_with = "crate::mcp::selection::de_selections")]
+    pub mcp_servers: Vec<McpServerSelection>,
     /// Memory spaces this session may read and write. Empty → the memory tools
     /// are not offered and no index is injected. `#[serde(default)]` so
     /// pre-memory journal rows deserialize.
@@ -705,6 +711,56 @@ mod tests {
         assert_eq!(spec.origin, SessionOrigin::User);
         assert_eq!(spec.routine(), None);
         assert!(!spec.is_unattended());
+    }
+
+    /// Every session journalled before tool selection holds a plain list of
+    /// server names. If one of those stops deserializing, the session it
+    /// belongs to cannot be recovered — so this is a live-outage guard, not a
+    /// tidiness one.
+    #[test]
+    fn a_journalled_list_of_mcp_names_loads_as_whole_servers() {
+        let row = r#"{"name":null,"kind":{"Agent":{"settings":{"model":"m",
+            "source":"AdHoc","allowed_tools":null,"use_plugins":null,
+            "max_iterations":null,"max_retries":0,
+            "mcp_servers":["linear","github"],"memory_spaces":[],
+            "thinking_effort":null,"max_concurrent_subagents":null,
+            "instructions":null,"auto_compact":null}}},
+            "workspaces":[],"vendor":"mock"}"#;
+        let spec: SessionSpec = serde_json::from_str(row).unwrap();
+        let SessionKind::Agent { settings } = &spec.kind else {
+            panic!("an agent session");
+        };
+        let names: Vec<&str> = settings
+            .mcp_servers
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, ["linear", "github"]);
+        // Every tool of each, which is what naming a server meant when this
+        // row was written.
+        assert!(settings.mcp_servers.iter().all(|s| s.tools.is_none()));
+    }
+
+    /// And the shape written from today on round-trips as itself.
+    #[test]
+    fn a_narrowed_selection_round_trips_through_the_journal() {
+        let mut spec = agent_spec("mock", SessionOrigin::User);
+        let SessionKind::Agent { settings } = &mut spec.kind else {
+            panic!("an agent session");
+        };
+        settings.mcp_servers = vec![
+            McpServerSelection {
+                name: "linear".into(),
+                tools: Some(vec!["search_issues".into()]),
+            },
+            McpServerSelection {
+                name: "github".into(),
+                tools: None,
+            },
+        ];
+        let loaded: SessionSpec =
+            serde_json::from_str(&serde_json::to_string(&spec).unwrap()).unwrap();
+        assert_eq!(loaded, spec);
     }
 
     #[test]

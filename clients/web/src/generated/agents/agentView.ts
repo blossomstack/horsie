@@ -1,4 +1,5 @@
 
+import { McpServerSelection } from '../mcp';
 /**
  * An agent preset as shown to clients.
  */
@@ -27,9 +28,9 @@ export interface AgentView {
    */
   plugins: string[];
   /**
-   * Enabled MCP server names.
+   * Enabled MCP servers, each with the tools of it this preset may call.
    */
-  mcpServers: string[];
+  mcpServers: McpServerSelection[];
   /**
    * Memory spaces the session may read and write.
    */

@@ -1,6 +1,7 @@
 
 import { TaskItem } from '../agent';
 import { Usage } from '../agent';
+import { McpServerSelection } from '../mcp';
 import { UsageView } from '../session';
 /**
  * One agent's current values: what it is, what became of it, what it runs
@@ -44,9 +45,10 @@ export interface AgentDocument {
    */
   model: string;
   /**
-   * Names of the MCP servers this agent may call (empty when none).
+   * The MCP servers this agent may call, with the tools of each that are in
+   * scope (empty when none).
    */
-  mcpServers: string[];
+  mcpServers: McpServerSelection[];
   /**
    * Memory spaces this agent may read and write (empty when none).
    */

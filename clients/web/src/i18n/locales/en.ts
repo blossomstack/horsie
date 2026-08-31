@@ -1257,6 +1257,13 @@ const en = {
       "Attachments are only loaded for a model that takes them. A model with neither box ticked is told an attachment was withheld, instead of being sent bytes it cannot read.",
   },
 
+  mcpChannel: {
+    allTools: "all",
+    noTools: "This server advertised no tools.",
+    toolsUnreadable: "Could not read this server's tools.",
+    toolCount_one: "{{count}} tool",
+    toolCount_other: "{{count}} tools",
+  },
   integrations: {
     desc: "GitHub, MCP servers, and this server's build info.",
     github: "GitHub",

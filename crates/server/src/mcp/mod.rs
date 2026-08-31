@@ -7,5 +7,7 @@ mod oauth;
 mod service;
 mod store;
 
+pub mod selection;
+
 pub use service::McpService;
 pub use store::{ConnectOutcome, McpServerRow, McpStore, StoredAuth};

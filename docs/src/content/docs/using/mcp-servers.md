@@ -53,6 +53,22 @@ server registers itself with the provider.
 Adding a server does not force it on every session. In the session's config
 row, under **MCP servers**, tick the ones that session may use.
 
+### Picking individual tools
+
+Open a server's row in that picker and you get its tools, each with its
+description. Ticking the server takes **all** of them — including any it gains
+later, so a server that adds a tool reaches sessions that asked for the whole
+thing without anyone editing anything.
+
+Untick a tool and the server is narrowed to the rest. The row then reads `2/7`
+instead of `all`, and its box shows as partly ticked. A narrowed server offers
+the agent only the tools you kept: the rest are not in its prompt, and calling
+one is refused. Unticking the last tool deselects the server.
+
+Narrow a server when it has more tools than the job needs. Every tool a session
+carries is a tool definition in every request it makes, and a server with forty
+of them costs that whether or not two were wanted.
+
 The same picker sits on an agent preset, so every session started from that
 preset gets the same set.
 

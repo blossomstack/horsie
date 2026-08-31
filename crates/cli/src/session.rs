@@ -367,7 +367,8 @@ fn render_session_detail(
             out.push_str(&format!("thinking    {e}\n"));
         }
         if !a.mcp_servers.is_empty() {
-            out.push_str(&format!("mcp         {}\n", a.mcp_servers.join(", ")));
+            let mcp: Vec<String> = a.mcp_servers.iter().map(crate::agent::render_mcp).collect();
+            out.push_str(&format!("mcp         {}\n", mcp.join(", ")));
         }
         if !a.memory_spaces.is_empty() {
             out.push_str(&format!("memory      {}\n", a.memory_spaces.join(", ")));

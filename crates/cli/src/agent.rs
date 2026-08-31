@@ -83,6 +83,18 @@ fn render_agent_table(agents: &[AgentView]) -> String {
     out
 }
 
+/// One server as the CLI prints it: `linear` whole, `linear (2 tools)`
+/// narrowed.
+///
+/// A narrowed server must not print like an unnarrowed one — that difference is
+/// the whole of what the selection does, and it is invisible from a name.
+pub(crate) fn render_mcp(sel: &horsie_models::mcp::McpServerSelection) -> String {
+    match &sel.tools {
+        None => sel.name.clone(),
+        Some(tools) => format!("{} ({} tools)", sel.name, tools.len()),
+    }
+}
+
 fn render_agent_detail(a: &AgentView) -> String {
     let mut out = format!(
         "name        {}\ndescription {}\nmodel       {}\n",
@@ -95,7 +107,8 @@ fn render_agent_detail(a: &AgentView) -> String {
         out.push_str(&format!("skills      {}\n", a.plugins.join(", ")));
     }
     if !a.mcp_servers.is_empty() {
-        out.push_str(&format!("mcp         {}\n", a.mcp_servers.join(", ")));
+        let mcp: Vec<String> = a.mcp_servers.iter().map(render_mcp).collect();
+        out.push_str(&format!("mcp         {}\n", mcp.join(", ")));
     }
     if !a.memory_spaces.is_empty() {
         out.push_str(&format!("memory      {}\n", a.memory_spaces.join(", ")));

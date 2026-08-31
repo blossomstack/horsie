@@ -67,7 +67,7 @@ const preset: AgentView = {
   description: "reviews PRs",
   model: "sonnet",
   plugins: ["superpowers"],
-  mcpServers: ["mcp-x"],
+  mcpServers: [{ name: "mcp-x", tools: undefined }],
   memorySpaces: ["horsie"],
   thinkingEffort: "high",
   createdAt: "1",
@@ -94,7 +94,7 @@ describe("useAgentDraft", () => {
     const { result } = render(preset);
     expect(result.current.model).toBe("sonnet");
     expect([...result.current.skills]).toEqual(["superpowers"]);
-    expect([...result.current.mcp]).toEqual(["mcp-x"]);
+    expect([...result.current.mcp]).toEqual([["mcp-x", null]]);
     expect([...result.current.memorySpaces]).toEqual(["horsie"]);
     expect(result.current.thinkingEffort).toBe("high");
   });
@@ -114,7 +114,7 @@ describe("useAgentDraft", () => {
       description: "reviews PRs",
       model: "sonnet",
       plugins: ["superpowers"],
-      mcpServers: ["mcp-x"],
+      mcpServers: [{ name: "mcp-x", tools: undefined }],
       memorySpaces: ["horsie"],
       thinkingEffort: "high",
     });
@@ -160,17 +160,29 @@ describe("useAgentDraft", () => {
     const { result } = render(preset);
     const input = result.current.buildAgentInput("reviewer", "", "");
     expect(input.plugins).toEqual(["superpowers"]);
-    expect(input.mcpServers).toEqual(["mcp-x"]);
+    expect(input.mcpServers).toEqual([{ name: "mcp-x", tools: undefined }]);
     expect(input.memorySpaces).toEqual(["horsie"]);
   });
 
   it("saves a newly ticked skill and mcp server on a non-provisioning vendor", () => {
     const { result } = render(preset);
     act(() => result.current.setSkills(new Set(["superpowers", "impeccable"])));
-    act(() => result.current.setMcp(new Set(["mcp-x", "github"])));
+    act(() =>
+      result.current.setMcp(
+        new Map([
+          ["mcp-x", ["search"] as string[] | null],
+          ["github", null],
+        ]),
+      ),
+    );
     const input = result.current.buildAgentInput("reviewer", "", "");
     expect(input.plugins).toEqual(["superpowers", "impeccable"]);
-    expect(input.mcpServers).toEqual(["mcp-x", "github"]);
+    expect(input.mcpServers).toEqual([
+      { name: "mcp-x", tools: ["search"] },
+      // The whole server stays `undefined` on the wire, not an enumerated
+      // list — a server that gains a tool must still reach this preset.
+      { name: "github", tools: undefined },
+    ]);
   });
 
   it("falls back to the model default when the effort is not offered", () => {

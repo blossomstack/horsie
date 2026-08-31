@@ -19,6 +19,15 @@ export type EnvironmentDraft =
   /** No sandbox at all: the model, its MCP servers and its memory, nothing else. */
   | { kind: "none" };
 
+/**
+ * One selected MCP server in a stored draft: `tools: null` is the whole
+ * server, a list narrows it.
+ */
+export interface McpDraft {
+  name: string;
+  tools: string[] | null;
+}
+
 /** The stored draft, v2. Plain JSON types only — never Map/Set. */
 export interface DraftPayload {
   v: 2;
@@ -26,7 +35,7 @@ export interface DraftPayload {
   environment: EnvironmentDraft;
   model: string;
   skills: string[];
-  mcp: string[];
+  mcp: McpDraft[];
   memorySpaces: string[];
   /**
    * The selected built-in tools, or `null` for the server's default set.
@@ -66,6 +75,32 @@ export function emptyDraft(): DraftPayload {
 
 function isStringArray(x: unknown): x is string[] {
   return Array.isArray(x) && x.every((i) => typeof i === "string");
+}
+
+/**
+ * The stored MCP selection, accepting the bare-name shape drafts written
+ * before tools could be chosen still hold.
+ *
+ * Reading those as whole servers rather than rejecting them keeps a stale
+ * draft's model, environment and attachments — `parse` is all-or-nothing, so
+ * refusing the one field would silently throw the rest away.
+ */
+function parseMcp(x: unknown): McpDraft[] | undefined {
+  if (!Array.isArray(x)) return undefined;
+  const out: McpDraft[] = [];
+  for (const entry of x) {
+    if (typeof entry === "string") {
+      out.push({ name: entry, tools: null });
+      continue;
+    }
+    if (!entry || typeof entry !== "object") return undefined;
+    const e = entry as { name?: unknown; tools?: unknown };
+    if (typeof e.name !== "string") return undefined;
+    if (e.tools !== null && e.tools !== undefined && !isStringArray(e.tools))
+      return undefined;
+    out.push({ name: e.name, tools: isStringArray(e.tools) ? e.tools : null });
+  }
+  return out;
 }
 
 /** `undefined` for anything that is not one of the two shapes. */
@@ -144,14 +179,15 @@ export function parseDraftPayload(raw: unknown): DraftPayload | undefined {
   if (typeof p.model !== "string") return undefined;
   const environment = parseEnvironment(p.environment);
   if (!environment) return undefined;
-  if (!isStringArray(p.skills) || !isStringArray(p.mcp) || !isStringArray(p.memorySpaces))
-    return undefined;
+  if (!isStringArray(p.skills) || !isStringArray(p.memorySpaces)) return undefined;
+  const mcp = parseMcp(p.mcp);
+  if (!mcp) return undefined;
   return {
     v: 2,
     environment,
     model: p.model,
     skills: p.skills,
-    mcp: p.mcp,
+    mcp,
     memorySpaces: p.memorySpaces,
     // Added after v2 shipped. A stored draft without it means the default set,
     // which is what `null` says — so an older draft needs no migration.
@@ -220,7 +256,7 @@ export function reconcileModelEnvironment(
 
 function filterField(
   draft: DraftPayload,
-  field: "skills" | "mcp" | "memorySpaces",
+  field: "skills" | "memorySpaces",
   keep: ReadonlySet<string>,
 ): DraftPayload {
   const filtered = draft[field].filter((name) => keep.has(name));
@@ -233,9 +269,16 @@ export function filterSkills(draft: DraftPayload, installed: ReadonlySet<string>
   return filterField(draft, "skills", installed);
 }
 
-/** Drop selected MCP servers that are no longer enabled. Same ref if unchanged. */
+/** Drop selected MCP servers that are no longer enabled. Same ref if unchanged.
+ *
+ * Only whole entries go. A *tool* that a server no longer offers is left
+ * alone: the enabled list says nothing about tools, and a server that is
+ * merely unreachable this minute would otherwise have its selection quietly
+ * emptied. The server ignores a name it cannot find. */
 export function filterMcpServers(draft: DraftPayload, enabled: ReadonlySet<string>): DraftPayload {
-  return filterField(draft, "mcp", enabled);
+  const filtered = draft.mcp.filter((m) => enabled.has(m.name));
+  if (filtered.length === draft.mcp.length) return draft;
+  return { ...draft, mcp: filtered };
 }
 
 /** Drop selected memory spaces that no longer exist. Same ref if unchanged. */

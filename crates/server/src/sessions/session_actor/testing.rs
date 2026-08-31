@@ -494,7 +494,7 @@ pub(super) fn two_model_run_spec_fixture(
     use crate::sessions::workflow::{TransitionSpec, WorkflowRunSpec, WorkflowStepSpec};
     let mut plan_settings = agent_settings_fixture();
     plan_settings.model = "gpt-5.6-terra".into();
-    plan_settings.mcp_servers = vec!["planner-mcp".into()];
+    plan_settings.mcp_servers = vec![crate::mcp::selection::whole("planner-mcp")];
     let mut code_settings = agent_settings_fixture();
     code_settings.model = "deepseek-v4-flash".into();
     code_settings.thinking_effort = Some("high".into());

@@ -12,7 +12,7 @@ use crate::agent_loop::{ArtifactSink, McpToolbox, McpToolboxes, McpUnavailable};
 use async_trait::async_trait;
 use horsie_models::mcp::{
     McpAuthView, McpBearerView, McpConnectResult, McpGithubAppAuth, McpNoAuth, McpServerDetail,
-    McpServerInput, McpServerView,
+    McpServerInput, McpServerSelection, McpServerView,
 };
 use horsie_support::mcp::{BearerProvider, HttpTransport, McpClient, McpError};
 
@@ -135,7 +135,8 @@ impl McpService {
             .await
     }
 
-    /// Build a live [`McpToolbox`] per named server for an agent spawn.
+    /// Build a live [`McpToolbox`] per selected server for an agent spawn,
+    /// each narrowed to the tools that selection names.
     ///
     /// A server that is unknown or fails to connect does not fail the session —
     /// but it is *reported* rather than merely skipped. Dropping the distinction
@@ -143,9 +144,13 @@ impl McpService {
     /// server that is down and one somebody deleted. Only a store error
     /// propagates. Connect + `tools/list` happen here, so tools reflect the live
     /// server on each turn.
-    pub async fn toolboxes_for(&self, names: &[String]) -> Result<McpToolboxes, String> {
+    pub async fn toolboxes_for(
+        &self,
+        selections: &[McpServerSelection],
+    ) -> Result<McpToolboxes, String> {
         let mut out = McpToolboxes::default();
-        for name in names {
+        for selection in selections {
+            let name = &selection.name;
             let Some(row) = self.store.get(name).await? else {
                 tracing::warn!(server = %name, "session references unknown MCP server; skipping");
                 out.unavailable.push(McpUnavailable::Gone {
@@ -156,9 +161,14 @@ impl McpService {
             match self.build_toolbox(&row).await {
                 Ok(tb) => {
                     // Every turn reconnects, so every turn is also a free
-                    // refresh of what this server is and what it offers.
+                    // refresh of what this server is and what it offers. The
+                    // catalogue is recorded *before* narrowing, because it
+                    // describes the server rather than this session's view of
+                    // it — otherwise a narrowed session would shrink the tool
+                    // picker for everyone.
                     let _ = self.record_reached(name, &tb).await;
-                    out.boxes.push(Arc::new(tb));
+                    out.boxes
+                        .push(Arc::new(tb.with_allowed(selection.tools.as_deref())));
                 }
                 Err(e) => {
                     tracing::warn!(server = %name, error = %e, "MCP server connect failed; skipping");
@@ -492,6 +502,7 @@ fn server_view(row: &McpServerRow) -> McpServerView {
     clippy::wildcard_enum_match_arm
 )]
 mod tests {
+    use super::super::selection::whole;
     use super::*;
     use crate::github::{GithubApi, GithubStore};
     use horsie_models::mcp::{McpAuthInput, McpNoAuth};
@@ -776,7 +787,7 @@ mod tests {
         svc.upsert(none_input("mock", &url)).await.unwrap();
         assert_eq!(svc.get("mock").await.unwrap().unwrap().tools, None);
 
-        svc.toolboxes_for(&["mock".into()]).await.unwrap();
+        svc.toolboxes_for(&[whole("mock")]).await.unwrap();
 
         let detail = svc.get("mock").await.unwrap().unwrap();
         assert_eq!(detail.tools.map(|t| t.len()), Some(2));
@@ -803,12 +814,35 @@ mod tests {
         let url = mock_mcp_server().await;
         svc.upsert(none_input("mock", &url)).await.unwrap();
 
-        let built = svc.toolboxes_for(&["mock".into()]).await.unwrap();
+        let built = svc.toolboxes_for(&[whole("mock")]).await.unwrap();
         assert_eq!(built.boxes.len(), 1);
         assert!(built.unavailable.is_empty());
         let mut names: Vec<String> = built.boxes[0].specs().into_iter().map(|s| s.name).collect();
         names.sort();
         assert_eq!(names, vec!["mcp__mock__echo", "mcp__mock__ping"]);
+    }
+
+    /// A selection reaches the toolbox the turn actually uses: the unpicked
+    /// tool is not offered to the model, and the catalogue still holds both.
+    #[tokio::test]
+    async fn a_narrowed_selection_offers_only_the_tools_it_names() {
+        let (svc, _t) = service().await;
+        let url = mock_mcp_server().await;
+        svc.upsert(none_input("mock", &url)).await.unwrap();
+
+        let built = svc
+            .toolboxes_for(&[McpServerSelection {
+                name: "mock".into(),
+                tools: Some(vec!["echo".into()]),
+            }])
+            .await
+            .unwrap();
+        let names: Vec<String> = built.boxes[0].specs().into_iter().map(|s| s.name).collect();
+        assert_eq!(names, vec!["mcp__mock__echo"]);
+
+        // The server still advertises two, and the picker must go on saying so.
+        let detail = svc.get("mock").await.unwrap().unwrap();
+        assert_eq!(detail.tools.map(|t| t.len()), Some(2));
     }
 
     #[tokio::test]
@@ -833,7 +867,7 @@ mod tests {
     #[tokio::test]
     async fn toolboxes_for_reports_a_deleted_server_as_gone() {
         let (svc, _t) = service().await;
-        let built = svc.toolboxes_for(&["ghost".into()]).await.unwrap();
+        let built = svc.toolboxes_for(&[whole("ghost")]).await.unwrap();
         assert!(built.boxes.is_empty());
         assert_eq!(
             built.unavailable,
@@ -851,7 +885,7 @@ mod tests {
         svc.upsert(none_input("dead", "http://127.0.0.1:0/"))
             .await
             .unwrap();
-        let built = svc.toolboxes_for(&["dead".into()]).await.unwrap();
+        let built = svc.toolboxes_for(&[whole("dead")]).await.unwrap();
         assert!(built.boxes.is_empty());
         match built.unavailable.as_slice() {
             [McpUnavailable::Unreachable { server, reason }] => {

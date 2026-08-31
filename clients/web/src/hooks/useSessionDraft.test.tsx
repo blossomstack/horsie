@@ -192,7 +192,12 @@ describe("useSessionDraft persistence", () => {
   });
 
   it("restores a stored draft and suppresses bundle seeding", async () => {
-    storeDraft({ environment: runtime("velos"), model: "opus", skills: [], mcp: ["mcp-x"] });
+    storeDraft({
+      environment: runtime("velos"),
+      model: "opus",
+      skills: [],
+      mcp: [{ name: "mcp-x", tools: null }],
+    });
     const { result } = render(makeClient());
     await waitFor(() => expect(result.current.mcp.has("mcp-x")).toBe(true));
     expect(result.current.model).toBe("opus");
@@ -224,12 +229,17 @@ describe("useSessionDraft persistence", () => {
   it("filters stored selections that no longer exist", async () => {
     storeDraft({
       skills: ["bundle-a", "gone"],
-      mcp: ["mcp-x", "gone"],
+      mcp: [
+        { name: "mcp-x", tools: null },
+        { name: "gone", tools: null },
+      ],
       memorySpaces: ["horsie", "gone"],
     });
     const { result } = render(makeClient());
     await waitFor(() => expect([...result.current.skills]).toEqual(["bundle-a"]));
-    expect([...result.current.mcp]).toEqual(["mcp-x"]);
+    // The whole server survives as `null` — the enabled list drops entries,
+    // it does not narrow them.
+    expect([...result.current.mcp]).toEqual([["mcp-x", null]]);
     expect([...result.current.memorySpaces]).toEqual(["horsie"]);
   });
 

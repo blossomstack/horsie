@@ -51,8 +51,17 @@ export interface ConfigDraft {
   setModel: (m: string) => void;
   skills: Set<string>;
   setSkills: (s: Set<string>) => void;
-  mcp: Set<string>;
-  setMcp: (s: Set<string>) => void;
+  /**
+   * The MCP servers this agent may call, and how much of each: `null` means
+   * every tool that server offers — now and later — and a list narrows it.
+   *
+   * A map rather than a set because a server and its tools are one answer.
+   * Keeping the tools in a second list beside the names would let the two
+   * disagree, and there would be no reading of "a tool whose server is not
+   * selected" that was not a bug.
+   */
+  mcp: Map<string, string[] | null>;
+  setMcp: (s: Map<string, string[] | null>) => void;
   /** Memory spaces the session may read and write. */
   memorySpaces: Set<string>;
   setMemorySpaces: (s: Set<string>) => void;
@@ -319,7 +328,9 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
       usePlugins: true,
       // Nor is MCP: a toolbox is composed server-side and never reaches the
       // runtime at all.
-      mcpServers: draft.mcp.length ? draft.mcp : undefined,
+      mcpServers: draft.mcp.length
+        ? draft.mcp.map((m) => ({ name: m.name, tools: m.tools ?? undefined }))
+        : undefined,
       // Memories are served by the server itself, so they work on every
       // vendor, including ones that can't provision.
       memorySpaces: draft.memorySpaces.length ? draft.memorySpaces : undefined,
@@ -374,8 +385,12 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
     setModel: (model) => setDraft({ ...draft, model }),
     skills: new Set(draft.skills),
     setSkills: (skills) => setDraft({ ...draft, skills: [...skills] }),
-    mcp: new Set(draft.mcp),
-    setMcp: (mcp) => setDraft({ ...draft, mcp: [...mcp] }),
+    mcp: new Map(draft.mcp.map((m) => [m.name, m.tools])),
+    setMcp: (mcp) =>
+      setDraft({
+        ...draft,
+        mcp: [...mcp].map(([name, tools]) => ({ name, tools })),
+      }),
     memorySpaces: new Set(draft.memorySpaces),
     setMemorySpaces: (memorySpaces) =>
       setDraft({ ...draft, memorySpaces: [...memorySpaces] }),

@@ -1846,7 +1846,8 @@ async fn session_detail_echoes_full_config() {
     let client = reqwest::Client::new();
 
     let body = serde_json::json!({
-        "agent": {"model": "mock", "usePlugins": true, "mcpServers": ["gh"]},
+        "agent": {"model": "mock", "usePlugins": true,
+                  "mcpServers": [{"name": "gh", "tools": ["search"]}]},
         "environment": {"type": "Runtime", "value": {"vendor": "mock"}},
         "message": "hi"
     });
@@ -1882,7 +1883,10 @@ async fn session_detail_echoes_full_config() {
         .await
         .unwrap();
     assert_eq!(agent["agent"]["usePlugins"], serde_json::json!(true));
-    assert_eq!(agent["agent"]["mcpServers"], serde_json::json!(["gh"]));
+    assert_eq!(
+        agent["agent"]["mcpServers"],
+        serde_json::json!([{"name": "gh", "tools": ["search"]}])
+    );
 
     server.shutdown().await;
 }

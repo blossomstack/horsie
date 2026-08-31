@@ -1,4 +1,5 @@
 
+import { McpServerSelection } from '../mcp';
 /**
  * Agent settings supplied at session creation.
  */
@@ -24,10 +25,11 @@ export interface AgentSettings {
   maxIterations?: number;
   maxRetries?: number;
   /**
-   * Names of enabled MCP servers this session may call, namespaced
-   * `mcp__<name>__<tool>`; absent → none.
+   * Enabled MCP servers this session may call, each with the tools of it
+   * that are in scope; absent → none. Tools appear to the model as
+   * `mcp__<name>__<tool>`.
    */
-  mcpServers?: string[];
+  mcpServers?: McpServerSelection[];
   /**
    * Memory spaces this session may read and write; absent → none, and the
    * memory_* tools are not offered.
