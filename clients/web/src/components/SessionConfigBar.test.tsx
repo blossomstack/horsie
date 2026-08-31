@@ -192,7 +192,7 @@ describe("SessionConfigBar locked mode", () => {
       title: "code",
       model: "deepseek-v4-flash",
       thinkingEffort: "high",
-      mcpServers: ["mcp-code"],
+      mcpServers: [{ name: "mcp-code", tools: undefined }],
     });
     const { getByTestId, getByText } = renderLocked(run, code);
     const model = getByTestId("config-model");

@@ -1212,6 +1212,13 @@ const zhHant: typeof en = {
       "只有能夠接收附件的模型才會載入附件內容。兩項都未勾選的模型只會被告知附件已被略過，而不會收到它讀不了的位元組。",
   },
 
+  mcpChannel: {
+    allTools: "全部",
+    noTools: "該伺服器未提供任何工具。",
+    toolsUnreadable: "無法讀取該伺服器的工具。",
+    toolCount_one: "{{count}} 個工具",
+    toolCount_other: "{{count}} 個工具",
+  },
   integrations: {
     desc: "GitHub、MCP 伺服器，以及此伺服器的建置資訊。",
     github: "GitHub",

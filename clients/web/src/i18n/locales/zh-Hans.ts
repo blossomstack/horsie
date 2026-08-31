@@ -1209,6 +1209,13 @@ const zhHans: typeof en = {
       "只有能够接收附件的模型才会加载附件内容。两项都未勾选的模型只会被告知附件已被略过，而不会收到它读不了的字节。",
   },
 
+  mcpChannel: {
+    allTools: "全部",
+    noTools: "该服务器未提供任何工具。",
+    toolsUnreadable: "无法读取该服务器的工具。",
+    toolCount_one: "{{count}} 个工具",
+    toolCount_other: "{{count}} 个工具",
+  },
   integrations: {
     desc: "GitHub、MCP 服务器，以及此服务器的构建信息。",
     github: "GitHub",

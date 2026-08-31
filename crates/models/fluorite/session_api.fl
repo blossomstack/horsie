@@ -1,6 +1,7 @@
 /// HTTP request/response contracts for the session server.
 package session_api;
 
+use mcp.McpServerSelection;
 use environments.EnvironmentSpec;
 use session.AgentSettings;
 use session.AnnotationEntry;
@@ -114,8 +115,9 @@ struct AgentDocument {
     /// The model this agent runs under: the main agent's, a step's own
     /// preset, or a subagent's inherited tree root.
     model: String,
-    /// Names of the MCP servers this agent may call (empty when none).
-    mcp_servers: Vec<String>,
+    /// The MCP servers this agent may call, with the tools of each that are in
+    /// scope (empty when none).
+    mcp_servers: Vec<McpServerSelection>,
     /// Memory spaces this agent may read and write (empty when none).
     memory_spaces: Vec<String>,
     /// The built-in tools this agent may call, frozen at creation. Absent → the

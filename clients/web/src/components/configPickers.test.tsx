@@ -4,9 +4,16 @@ import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it } from "vitest";
 import { ApiRequestError } from "../api/client";
-import type { EnvironmentView, SettingsView, ToolCatalog } from "../api/types";
+import type {
+  EnvironmentView,
+  McpServerDetail,
+  McpServerView,
+  SettingsView,
+  ToolCatalog,
+} from "../api/types";
 import { ToolAccess } from "../api/types";
 import { environmentKeys } from "../hooks/useEnvironments";
+import { mcpKeys } from "../hooks/useMcp";
 import { memorySpacesKey } from "../hooks/useMemory";
 import { pluginsKey } from "../hooks/usePlugins";
 import { settingsKey } from "../hooks/useSettings";
@@ -64,7 +71,7 @@ function draft(overrides: Partial<ConfigDraft> = {}): ConfigDraft {
     setModel: () => {},
     skills: new Set(),
     setSkills: () => {},
-    mcp: new Set(),
+    mcp: new Map(),
     setMcp: () => {},
     memorySpaces: new Set(),
     setMemorySpaces: () => {},
@@ -158,6 +165,28 @@ function keys(d: ConfigDraft): string[] {
   return pickers(d, seededClient()).map((p) => p.key);
 }
 
+// One enabled server with three tools, already in the cache: the picker reads
+// what horsie remembered, never a live server.
+const mcpServers: McpServerView[] = [
+  {
+    name: "linear",
+    url: "https://mcp.linear.app/mcp",
+    enabled: true,
+    auth: { kind: "None", value: {} },
+    description: "Linear",
+    toolCount: 3,
+  },
+];
+
+const linearDetail: McpServerDetail = {
+  server: mcpServers[0],
+  tools: [
+    { name: "search_issues", description: "find" },
+    { name: "create_issue", description: "open" },
+    { name: "delete_issue", description: "shred" },
+  ],
+};
+
 function seededClient(): QueryClient {
   const client = new QueryClient({
     defaultOptions: {
@@ -175,6 +204,8 @@ function seededClient(): QueryClient {
   client.setQueryData(settingsKey, settings);
   client.setQueryData(environmentKeys.all, environments);
   client.setQueryData(toolsKey, toolCatalog);
+  client.setQueryData(mcpKeys.servers, mcpServers);
+  client.setQueryData(mcpKeys.server("linear"), linearDetail);
   return client;
 }
 
@@ -215,7 +246,13 @@ function renderPickerBody(
   if (!picker) throw new Error(`missing picker ${key}`);
   // Scoped to this render's own container: `render` defaults its queries to
   // document.body, so two bodies rendered in one test see each other's nodes.
-  const { container } = render(<MemoryRouter>{picker.body(() => {})}</MemoryRouter>);
+  // The provider is here because a body may read on its own — the MCP one
+  // fetches a server's tools when a row is opened.
+  const { container } = render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter>{picker.body(() => {})}</MemoryRouter>
+    </QueryClientProvider>,
+  );
   return within(container);
 }
 
@@ -234,6 +271,124 @@ describe("useConfigPickers", () => {
     const k = keys(sessionDraft({ provisions: false }));
     expect(k).toContain("skills");
     expect(k).toContain("mcp");
+  });
+
+  describe("the MCP picker", () => {
+    /** Linear's row, open. A narrowed server opens itself, so clicking
+     * unconditionally would close the very rows these tests are about. */
+    const openLinear = (d: ConfigDraft) => {
+      const view = renderPickerBody(d, "mcp");
+      const row = view.getByTestId("mcp-server-linear");
+      if (row.getAttribute("data-expanded") !== "true")
+        fireEvent.click(view.getByTestId("mcp-server-expand-linear"));
+      return view;
+    };
+
+    it("lists the enabled servers with what they are for", () => {
+      const view = renderPickerBody(draft(), "mcp");
+      expect(view.getByText("linear")).toBeTruthy();
+      expect(view.getByText("Linear")).toBeTruthy();
+    });
+
+    // Nothing is fetched for a row nobody opened: this popover mounts a row per
+    // configured server.
+    it("reads a server's tools only when its row is opened", () => {
+      const view = renderPickerBody(draft(), "mcp");
+      expect(view.queryByTestId("mcp-tool-option")).toBeNull();
+      fireEvent.click(view.getByTestId("mcp-server-expand-linear"));
+      expect(view.getAllByTestId("mcp-tool-option")).toHaveLength(3);
+    });
+
+    it("ticking a server selects all of it", () => {
+      let got: Map<string, string[] | null> | undefined;
+      const view = renderPickerBody(
+        draft({ setMcp: (m) => (got = m) }),
+        "mcp",
+      );
+      fireEvent.click(view.getByTestId("mcp-server-check-linear"));
+      // `null`, never an enumerated list — see `McpServerRow`.
+      expect([...(got ?? [])]).toEqual([["linear", null]]);
+    });
+
+    // The case the whole picker exists for, and the one that needs the
+    // catalogue: "all except this one" can only be written out once the others
+    // are known.
+    it("unticking one tool of a whole server narrows it to the rest", () => {
+      let got: Map<string, string[] | null> | undefined;
+      const view = openLinear(
+        draft({ mcp: new Map([["linear", null]]), setMcp: (m) => (got = m) }),
+      );
+      const shred = view
+        .getAllByTestId("mcp-tool-option")
+        .find((el) => el.getAttribute("data-value") === "delete_issue");
+      fireEvent.click(within(shred as HTMLElement).getByRole("checkbox"));
+      expect([...(got ?? [])]).toEqual([
+        ["linear", ["search_issues", "create_issue"]],
+      ]);
+    });
+
+    it("ticking the last missing tool goes back to the whole server", () => {
+      let got: Map<string, string[] | null> | undefined;
+      const view = openLinear(
+        draft({
+          mcp: new Map([["linear", ["search_issues", "create_issue"]]]),
+          setMcp: (m) => (got = m),
+        }),
+      );
+      const shred = view
+        .getAllByTestId("mcp-tool-option")
+        .find((el) => el.getAttribute("data-value") === "delete_issue");
+      fireEvent.click(within(shred as HTMLElement).getByRole("checkbox"));
+      // Not the three names: a server that gains a fourth tool must still
+      // reach a session that asked for all of it.
+      expect([...(got ?? [])]).toEqual([["linear", null]]);
+    });
+
+    it("unticking the last remaining tool deselects the server", () => {
+      let got: Map<string, string[] | null> | undefined;
+      const view = openLinear(
+        draft({
+          mcp: new Map([["linear", ["search_issues"]]]),
+          setMcp: (m) => (got = m),
+        }),
+      );
+      const search = view
+        .getAllByTestId("mcp-tool-option")
+        .find((el) => el.getAttribute("data-value") === "search_issues");
+      fireEvent.click(within(search as HTMLElement).getByRole("checkbox"));
+      expect([...(got ?? [])]).toEqual([]);
+    });
+
+    // Three states, not two — and the middle one is the only one a name alone
+    // cannot tell you about.
+    it("shows a narrowed server as neither on nor off", () => {
+      const whole = renderPickerBody(draft({ mcp: new Map([["linear", null]]) }), "mcp");
+      const box = whole.getByTestId("mcp-server-check-linear") as HTMLInputElement;
+      expect(box.checked).toBe(true);
+      expect(box.indeterminate).toBe(false);
+      expect(whole.getByText("all")).toBeTruthy();
+
+      const narrowed = renderPickerBody(
+        draft({ mcp: new Map([["linear", ["search_issues"]]]) }),
+        "mcp",
+      );
+      const narrowBox = narrowed.getByTestId(
+        "mcp-server-check-linear",
+      ) as HTMLInputElement;
+      expect(narrowBox.checked).toBe(true);
+      expect(narrowBox.indeterminate).toBe(true);
+      expect(narrowed.getByText("1/3")).toBeTruthy();
+    });
+
+    // A narrowed server opens on its own, because its row cannot say which
+    // tools it kept.
+    it("opens a narrowed server without a click", () => {
+      const view = renderPickerBody(
+        draft({ mcp: new Map([["linear", ["search_issues"]]]) }),
+        "mcp",
+      );
+      expect(view.getAllByTestId("mcp-tool-option")).toHaveLength(3);
+    });
   });
 
   // Repos live inside the Environment popover now — the one place the decision

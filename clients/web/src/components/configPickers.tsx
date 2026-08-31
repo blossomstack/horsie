@@ -14,13 +14,15 @@ import { useState, type ReactNode } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 import { useGithubRepos } from "../hooks/useGithub";
-import { useMcpServers } from "../hooks/useMcp";
+import { useMcpServer, useMcpServers } from "../hooks/useMcp";
 import { useMemorySpaces } from "../hooks/useMemory";
 import { usePlugins } from "../hooks/usePlugins";
 import { useSettings } from "../hooks/useSettings";
 import { allTools, defaultSelection, useTools } from "../hooks/useTools";
 import type {
   AgentDocument,
+  McpServerSelection,
+  McpServerView,
   SessionDetail,
   ToolCatalog,
   ToolGroupView,
@@ -515,6 +517,219 @@ function ToolsBody({
   );
 }
 
+/** One selected server as a read-only line: `linear`, or `linear (2 tools)`. */
+function mcpReadout(sel: McpServerSelection): string {
+  return sel.tools
+    ? `${sel.name} (${i18n.t("mcpChannel.toolCount", { count: sel.tools.length })})`
+    : sel.name;
+}
+
+/** What one server's row reads as: `all`, `2/7`, or nothing when unselected. */
+function selectionLabel(
+  chosen: string[] | null | undefined,
+  total: number | undefined,
+): string {
+  if (chosen === undefined) return "";
+  if (chosen === null) return i18n.t("mcpChannel.allTools");
+  return total === undefined
+    ? `${chosen.length}`
+    : `${chosen.length}/${total}`;
+}
+
+/**
+ * The MCP popover's contents: a server per row, each opening into its tools.
+ *
+ * A component rather than inline JSX for the same reason `ToolsBody` is one —
+ * which rows are open is state, and `PickerSpec.body` is a plain render
+ * function called from a hook.
+ */
+function McpBody({
+  servers,
+  selected,
+  onSet,
+}: {
+  servers: McpServerView[];
+  selected: Map<string, string[] | null>;
+  onSet: (next: Map<string, string[] | null>) => void;
+}) {
+  // Open what the row cannot summarise: a narrowed server is the only case
+  // where the answer is inside. Same rule as the Tools groups.
+  const [expanded, setExpanded] = useState<Set<string>>(
+    () =>
+      new Set(
+        servers
+          .filter((s) => (selected.get(s.name) ?? null) !== null)
+          .map((s) => s.name),
+      ),
+  );
+
+  const set = (name: string, tools: string[] | null | undefined) => {
+    const next = new Map(selected);
+    if (tools === undefined) next.delete(name);
+    else next.set(name, tools);
+    onSet(next);
+  };
+
+  return (
+    <div className="space-y-0.5" data-testid="mcp-body">
+      {servers.map((server) => (
+        <McpServerRow
+          key={server.name}
+          server={server}
+          chosen={selected.has(server.name) ? (selected.get(server.name) ?? null) : undefined}
+          expanded={expanded.has(server.name)}
+          onToggleExpanded={() =>
+            setExpanded((prev) => {
+              const next = new Set(prev);
+              if (!next.delete(server.name)) next.add(server.name);
+              return next;
+            })
+          }
+          onSet={(tools) => set(server.name, tools)}
+        />
+      ))}
+    </div>
+  );
+}
+
+/**
+ * One server, and its tools when opened.
+ *
+ * `chosen` is three answers, not two: `undefined` — not selected at all;
+ * `null` — the whole server, **including tools it gains later**; a list —
+ * only those. Collapsing `null` into "every name I can see today" would
+ * silently freeze the selection, so a server that added a tool would never
+ * offer it to a preset that asked for all of it.
+ *
+ * The tools come from what horsie remembered at the last connect, fetched only
+ * when this row is opened. Nothing here dials the server: this popover is on
+ * the new-session screen, which has no MCP connection at all.
+ */
+function McpServerRow({
+  server,
+  chosen,
+  expanded,
+  onToggleExpanded,
+  onSet,
+}: {
+  server: McpServerView;
+  chosen: string[] | null | undefined;
+  expanded: boolean;
+  onToggleExpanded: () => void;
+  onSet: (tools: string[] | null | undefined) => void;
+}) {
+  const { data: detail, isPending, isError } = useMcpServer(server.name, expanded);
+  const every = (detail?.tools ?? []).map((t) => t.name);
+  const selectedAll = chosen === null;
+
+  // Toggling one tool needs the full list, because "all" is stored as `null`:
+  // unticking one of an unnarrowed server means "the others", which can only
+  // be written out once the others are known.
+  const toggleTool = (name: string, checked: boolean) => {
+    const current = chosen === null ? every : (chosen ?? []);
+    const next = checked
+      ? current.filter((t) => t !== name)
+      : [...current, name];
+    if (next.length === 0) return onSet(undefined);
+    // Back to the whole server rather than a list of every name — see above.
+    if (every.length > 0 && next.length === every.length) return onSet(null);
+    onSet(next);
+  };
+
+  return (
+    <div data-testid={`mcp-server-${server.name}`} data-expanded={expanded}>
+      <div className="flex items-center gap-2 px-2 py-1 hover:bg-raised">
+        <input
+          type="checkbox"
+          className="shrink-0"
+          checked={chosen !== undefined}
+          // Narrowed is neither on nor off, and `indeterminate` is a DOM
+          // property with no HTML attribute.
+          ref={(el) => {
+            if (el) el.indeterminate = Array.isArray(chosen);
+          }}
+          aria-label={server.name}
+          data-testid={`mcp-server-check-${server.name}`}
+          onChange={() => onSet(chosen === undefined ? null : undefined)}
+        />
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          aria-expanded={expanded}
+          data-testid={`mcp-server-expand-${server.name}`}
+          onClick={onToggleExpanded}
+        >
+          <span className="min-w-0 flex-1">
+            <span className="block truncate font-mono text-sm text-legend">
+              {server.name}
+            </span>
+            {server.description && (
+              <span className="block truncate text-[0.6875rem] leading-tight text-faint">
+                {server.description}
+              </span>
+            )}
+          </span>
+          <span className="shrink-0 font-mono text-[0.6875rem] text-faint">
+            {selectionLabel(chosen, server.toolCount)}
+          </span>
+          <ChevronDown
+            size={13}
+            className={cn("shrink-0 text-faint", expanded && "rotate-180")}
+            aria-hidden
+          />
+        </button>
+      </div>
+      {expanded && isPending && (
+        <p className="py-1 pr-2 pl-8 text-[0.6875rem] text-faint">
+          {i18n.t("common.loading")}
+        </p>
+      )}
+      {expanded && isError && (
+        <p className="py-1 pr-2 pl-8 text-[0.6875rem] text-faint">
+          {i18n.t("mcpChannel.toolsUnreadable")}
+        </p>
+      )}
+      {expanded &&
+        !isPending &&
+        !isError &&
+        (every.length === 0 ? (
+          <p className="py-1 pr-2 pl-8 text-[0.6875rem] text-faint">
+            {i18n.t("mcpChannel.noTools")}
+          </p>
+        ) : (
+          (detail?.tools ?? []).map((tool) => {
+            const checked = selectedAll || (chosen ?? []).includes(tool.name);
+            return (
+              <label
+                key={tool.name}
+                className="flex cursor-pointer items-center gap-2 py-1 pr-2 pl-8 text-sm hover:bg-raised"
+                data-testid="mcp-tool-option"
+                data-value={tool.name}
+                data-selected={checked}
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() => toggleTool(tool.name, checked)}
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate font-mono text-sm text-legend">
+                    {tool.name}
+                  </span>
+                  {tool.description && (
+                    <span className="block text-[0.6875rem] leading-snug text-faint">
+                      {tool.description}
+                    </span>
+                  )}
+                </span>
+              </label>
+            );
+          })
+        ))}
+    </div>
+  );
+}
+
 /**
  * The one Environment picker, as its own hook.
  *
@@ -952,31 +1167,30 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
       ? i18n.t("channel.selectedCount", { count: draft.mcp.size })
       : i18n.t("common.none"),
     marked: draft.mcp.size > 0,
-    width: "w-72",
+    width: "w-96",
+    // Two lines per server and its tools underneath. The 18rem default shows
+    // one open server and hides the rest behind a scrollbar.
+    height: "max-h-[32rem]",
     testId: "config-mcp",
     body: () =>
-      checkList({
-        items: enabledMcp.map((s) => s.name),
-        selected: draft.mcp,
-        onToggle: (name, checked) => {
-          const next = new Set(draft.mcp);
-          if (checked) next.delete(name);
-          else next.add(name);
-          draft.setMcp(next);
-        },
-        empty: mcpFailed ? (
-          <ReadError
-            what={i18n.t("channel.mcpServers")}
-            error={mcpError}
-            testId="mcp-read-error"
-            className="mx-1 my-0.5"
-          />
-        ) : (
-          <EmptyLink to="/settings/integrations">
-            {i18n.t("channel.addMcp")}
-          </EmptyLink>
-        ),
-      }),
+      mcpFailed ? (
+        <ReadError
+          what={i18n.t("channel.mcpServers")}
+          error={mcpError}
+          testId="mcp-read-error"
+          className="mx-1 my-0.5"
+        />
+      ) : enabledMcp.length === 0 ? (
+        <EmptyLink to="/settings/integrations">
+          {i18n.t("channel.addMcp")}
+        </EmptyLink>
+      ) : (
+        <McpBody
+          servers={enabledMcp}
+          selected={draft.mcp}
+          onSet={draft.setMcp}
+        />
+      ),
   });
 
   // Not gated on `provisions`: the server owns memory, so it works on vendors
@@ -1282,7 +1496,10 @@ export function useLockedChannels(
       i18n.t("channel.mcp"),
       <Plug size={15} />,
       "w-72",
-      agent.mcpServers,
+      // A narrowed server must not read like an unnarrowed one — that
+      // difference is the whole of what the selection does, and a bare name
+      // hides it.
+      agent.mcpServers.map(mcpReadout),
     ),
     ...optional(
       "memory",

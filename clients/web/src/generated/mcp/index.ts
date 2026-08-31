@@ -11,6 +11,7 @@ export * from './mcpAuthInput';
 export * from './mcpToolInfo';
 export * from './mcpServerView';
 export * from './mcpServerDetail';
+export * from './mcpServerSelection';
 export * from './mcpServerInput';
 export * from './mcpConnectResult';
 export * from './mcpServerList';

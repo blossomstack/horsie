@@ -2,8 +2,10 @@
 //! List-typed columns are JSON.
 
 use crate::db::Db;
+use crate::mcp::selection::de_selections;
 use crate::projects::ProjectId;
 use crate::revisions::{EntityKind, RevisionStore};
+use horsie_models::mcp::McpServerSelection;
 use sqlx::Row;
 use sqlx::any::AnyRow;
 
@@ -20,7 +22,8 @@ pub struct AgentRow {
     pub instructions: Option<String>,
     pub model: String,
     pub plugins: Vec<String>,
-    pub mcp_servers: Vec<String>,
+    /// The MCP servers this preset selects, and how much of each.
+    pub mcp_servers: Vec<McpServerSelection>,
     pub memory_spaces: Vec<String>,
     pub thinking_effort: Option<String>,
     /// `None` means yes — see the 0034 migration.
@@ -223,6 +226,13 @@ fn from_json<T: serde::de::DeserializeOwned>(col: &str, text: String) -> Result<
     serde_json::from_str(&text).map_err(|e| format!("agents.{col}: {e}"))
 }
 
+/// `agents.mcp_servers`, tolerating the list-of-names shape every row written
+/// before tool selection still holds.
+fn selections_from_json(text: String) -> Result<Vec<McpServerSelection>, String> {
+    let mut de = serde_json::Deserializer::from_str(&text);
+    de_selections(&mut de).map_err(|e| format!("agents.mcp_servers: {e}"))
+}
+
 fn row_to_agent(row: &AnyRow) -> Result<AgentRow, String> {
     let get = |c: &str| row.try_get::<String, _>(c).map_err(|e| e.to_string());
     let get_opt = |c: &str| {
@@ -235,7 +245,9 @@ fn row_to_agent(row: &AnyRow) -> Result<AgentRow, String> {
         instructions: get_opt("instructions")?,
         model: get("model")?,
         plugins: from_json("plugins", get("plugins")?)?,
-        mcp_servers: from_json("mcp_servers", get("mcp_servers")?)?,
+        // Through the tolerant reader: rows written before tools could be
+        // selected hold a list of bare names.
+        mcp_servers: selections_from_json(get("mcp_servers")?)?,
         memory_spaces: from_json("memory_spaces", get("memory_spaces")?)?,
         thinking_effort: get_opt("thinking_effort")?,
         // `i64`, not `bool`: the Any driver has no mapping for SQLite's
@@ -261,6 +273,7 @@ fn row_to_agent(row: &AnyRow) -> Result<AgentRow, String> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 pub(super) mod tests {
     use super::*;
+    use horsie_models::mcp::McpServerSelection;
 
     pub(super) async fn store() -> (AgentStore, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
@@ -269,6 +282,56 @@ pub(super) mod tests {
             AgentStore::new(pool, crate::projects::ProjectId::new("1")),
             tmp,
         )
+    }
+
+    /// A preset saved before tools could be selected holds a plain list of
+    /// names in its JSON column. It has to keep loading — there is no
+    /// migration that can rewrite JSON in both dialects, and a preset that
+    /// will not load is a preset nobody can invoke.
+    #[tokio::test]
+    async fn a_stored_list_of_names_loads_as_whole_servers() {
+        let (s, _t) = store().await;
+        s.insert(&row("legacy"), "{}").await.unwrap();
+        sqlx::query(
+            &s.db
+                .q("UPDATE agents SET mcp_servers = ? WHERE project_id = ? AND name = ?"),
+        )
+        .bind(r#"["linear","github"]"#)
+        .bind("1")
+        .bind("legacy")
+        .execute(s.db.pool())
+        .await
+        .unwrap();
+
+        let loaded = s.get("legacy").await.unwrap().unwrap();
+        assert_eq!(
+            loaded
+                .mcp_servers
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>(),
+            ["linear", "github"]
+        );
+        assert!(loaded.mcp_servers.iter().all(|m| m.tools.is_none()));
+    }
+
+    #[tokio::test]
+    async fn a_narrowed_selection_round_trips_through_the_column() {
+        let (s, _t) = store().await;
+        let mut r = row("narrowed");
+        r.mcp_servers = vec![
+            McpServerSelection {
+                name: "linear".into(),
+                tools: Some(vec!["search_issues".into()]),
+            },
+            McpServerSelection {
+                name: "github".into(),
+                tools: None,
+            },
+        ];
+        s.insert(&r, "{}").await.unwrap();
+        let loaded = s.get("narrowed").await.unwrap().unwrap();
+        assert_eq!(loaded.mcp_servers, r.mcp_servers);
     }
 
     pub(super) fn row(name: &str) -> AgentRow {

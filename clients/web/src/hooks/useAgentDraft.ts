@@ -31,8 +31,8 @@ export function useAgentDraft(initial?: AgentView): AgentDraft {
   const [skills, setSkills] = useState<Set<string>>(
     () => new Set(initial?.plugins ?? []),
   );
-  const [mcp, setMcp] = useState<Set<string>>(
-    () => new Set(initial?.mcpServers ?? []),
+  const [mcp, setMcp] = useState<Map<string, string[] | null>>(
+    () => new Map((initial?.mcpServers ?? []).map((m) => [m.name, m.tools ?? null])),
   );
   const [memorySpaces, setMemorySpaces] = useState<Set<string>>(
     () => new Set(initial?.memorySpaces ?? []),
@@ -78,7 +78,9 @@ export function useAgentDraft(initial?: AgentView): AgentDraft {
         instructions: instructions.trim() || undefined,
         model: model.trim(),
         plugins: skills.size ? [...skills] : undefined,
-        mcpServers: mcp.size ? [...mcp] : undefined,
+        mcpServers: mcp.size
+          ? [...mcp].map(([name, tools]) => ({ name, tools: tools ?? undefined }))
+          : undefined,
         memorySpaces: memorySpaces.size ? [...memorySpaces] : undefined,
         thinkingEffort: effectiveThinkingEffort || undefined,
         autoCompact: carriedAutoCompact,
@@ -108,8 +110,8 @@ export function useAgentDraft(initial?: AgentView): AgentDraft {
     setModel,
     skills: new Set(skills),
     setSkills: (s) => setSkills(new Set(s)),
-    mcp: new Set(mcp),
-    setMcp: (s) => setMcp(new Set(s)),
+    mcp: new Map(mcp),
+    setMcp: (s) => setMcp(new Map(s)),
     memorySpaces: new Set(memorySpaces),
     setMemorySpaces: (s) => setMemorySpaces(new Set(s)),
     thinkingEffort: effectiveThinkingEffort,

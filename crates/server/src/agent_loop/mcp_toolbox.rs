@@ -13,6 +13,7 @@ use horsie_agentcore::{ToolCallError, ToolOutcome, ToolSpec, ToolValue, Toolbox}
 use horsie_models::agent::ArtifactRef;
 use horsie_support::mcp::{McpClient, McpError, McpImage, McpServerInfo, McpToolDef};
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// Where a toolbox puts the bytes a tool produced: one project's artifact
@@ -278,6 +279,17 @@ pub struct McpToolbox {
     tools: Vec<McpToolDef>,
     /// What the server said about itself when this toolbox connected.
     info: McpServerInfo,
+    /// The tools of this server that are in scope, by their unprefixed names.
+    ///
+    /// `None` is "all of them", which is not `Some(every name)`: a server that
+    /// gains a tool must reach a session that asked for the whole server, and
+    /// a frozen list of names would quietly stop that happening.
+    ///
+    /// This is the only layer that can do the filtering. The session-wide
+    /// `FilteredToolbox` deliberately passes names it does not recognise —
+    /// which is every MCP name there is — and it is a flat set with no idea
+    /// which server a name came from.
+    allowed: Option<BTreeSet<String>>,
     /// Where an image block's bytes go. No runtime hop here: the client is in
     /// this process, so the bytes are already in hand when the call returns.
     artifacts: ArtifactSink,
@@ -297,8 +309,17 @@ impl McpToolbox {
             client,
             tools,
             info,
+            allowed: None,
             artifacts,
         }
+    }
+
+    /// Narrow this toolbox to some of the server's tools. `None` leaves it
+    /// whole.
+    #[must_use]
+    pub fn with_allowed(mut self, allowed: Option<&[String]>) -> Self {
+        self.allowed = allowed.map(|names| names.iter().cloned().collect());
+        self
     }
 
     /// Connect: `initialize` + `tools/list`, capturing what the server says it
@@ -313,13 +334,24 @@ impl McpToolbox {
         Ok(Self::new(server, client, info, tools, artifacts))
     }
 
+    /// Whether a tool of this server, named as the server names it, is in
+    /// scope for this session.
+    fn is_allowed(&self, tool: &str) -> bool {
+        self.allowed
+            .as_ref()
+            .is_none_or(|allowed| allowed.contains(tool))
+    }
+
     /// What the server said about itself on this connection.
     #[must_use]
     pub fn info(&self) -> &McpServerInfo {
         &self.info
     }
 
-    /// The tools it advertised, in the server's own spelling (unprefixed).
+    /// Every tool the server advertised, in its own spelling (unprefixed) —
+    /// deliberately unfiltered. This is what gets remembered as the server's
+    /// catalogue, and the catalogue is a fact about the server, not about
+    /// whichever session happened to connect this turn.
     #[must_use]
     pub fn tool_defs(&self) -> &[McpToolDef] {
         &self.tools
@@ -336,6 +368,7 @@ impl Toolbox for McpToolbox {
         let prefix = self.prefix();
         self.tools
             .iter()
+            .filter(|t| self.is_allowed(&t.name))
             .map(|t| ToolSpec {
                 name: format!("{prefix}{}", t.name),
                 description: t.description.clone(),
@@ -357,6 +390,18 @@ impl Toolbox for McpToolbox {
                 self.server
             ))
         })?;
+        // A narrowed server refuses in its own words. "Not selected" and "no
+        // such tool" are different situations, and collapsing them leaves a
+        // model retrying a name that exists and will never be allowed —
+        // exactly the confusion `McpUnavailable` exists to prevent one layer
+        // up.
+        if !self.is_allowed(tool) {
+            return Err(ToolCallError::InvalidInput(format!(
+                "'{tool}' is not among the tools selected from MCP server '{}' for this session, \
+                 so it cannot be called. Do not try it again.",
+                self.server
+            )));
+        }
         match self.client.call_tool(tool, input).await {
             Ok(outcome) if outcome.is_error => Err(ToolCallError::ExecutionFailed(outcome.text)),
             Ok(outcome) => {
@@ -509,6 +554,96 @@ mod tests {
             .map(|(m, v)| (m.to_string(), v))
             .collect();
         Arc::new(McpClient::new(Arc::new(MockTransport { results: map })))
+    }
+
+    /// A three-tool server, for the narrowing tests.
+    async fn linear() -> (McpToolbox, crate::db::Db) {
+        let (sink, db) = sink().await;
+        let client = mock_client(vec![
+            ("initialize", json!({})),
+            (
+                "tools/list",
+                json!({ "tools": [
+                    { "name": "search_issues", "description": "find" },
+                    { "name": "create_issue", "description": "open" },
+                    { "name": "delete_issue", "description": "shred" }
+                ] }),
+            ),
+            (
+                "tools/call",
+                json!({ "content": [{ "type": "text", "text": "ok" }] }),
+            ),
+        ]);
+        let tb = McpToolbox::connect("linear".into(), client, sink)
+            .await
+            .unwrap();
+        (tb, db)
+    }
+
+    fn spec_names(tb: &McpToolbox) -> Vec<String> {
+        tb.specs().into_iter().map(|s| s.name).collect()
+    }
+
+    /// No selection means the whole server — and it has to keep meaning that
+    /// rather than freezing today's list, or a server that gains a tool would
+    /// never reach a session that asked for all of it.
+    #[tokio::test]
+    async fn an_unnarrowed_server_offers_every_tool() {
+        let (tb, _db) = linear().await;
+        assert_eq!(
+            spec_names(&tb.with_allowed(None)),
+            vec![
+                "mcp__linear__search_issues",
+                "mcp__linear__create_issue",
+                "mcp__linear__delete_issue"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_narrowed_server_offers_only_the_tools_it_names() {
+        let (tb, _db) = linear().await;
+        let tb = tb.with_allowed(Some(&["search_issues".to_string()]));
+        assert_eq!(spec_names(&tb), vec!["mcp__linear__search_issues"]);
+        // Still callable, so narrowing does not break the tool it kept.
+        assert!(
+            tb.execute("mcp__linear__search_issues", json!({}), "tc1")
+                .await
+                .is_ok()
+        );
+    }
+
+    /// Hiding a tool from the spec list is not enough: a model that saw it on
+    /// an earlier turn, or guessed the name, will call it anyway.
+    #[tokio::test]
+    async fn calling_a_tool_that_was_not_selected_is_refused_in_its_own_words() {
+        let (tb, _db) = linear().await;
+        let tb = tb.with_allowed(Some(&["search_issues".to_string()]));
+        let Err(ToolCallError::InvalidInput(said)) = tb
+            .execute("mcp__linear__delete_issue", json!({}), "tc1")
+            .await
+        else {
+            panic!("an unselected tool must be refused");
+        };
+        assert!(said.contains("delete_issue"), "{said}");
+        assert!(said.contains("not among the tools selected"), "{said}");
+        // Not the same sentence as a name this server never had — those are
+        // different situations and the model acts differently on each.
+        let Err(ToolCallError::InvalidInput(unknown)) =
+            tb.execute("mcp__other__thing", json!({}), "tc1").await
+        else {
+            panic!("a foreign name must be refused too");
+        };
+        assert!(unknown.contains("is not a tool of MCP server"), "{unknown}");
+    }
+
+    /// The stored catalogue describes the *server*. If narrowing reached it, a
+    /// session that picked two tools would shrink the picker for everyone.
+    #[tokio::test]
+    async fn narrowing_does_not_shrink_the_catalogue_the_server_advertised() {
+        let (tb, _db) = linear().await;
+        let tb = tb.with_allowed(Some(&["search_issues".to_string()]));
+        assert_eq!(tb.tool_defs().len(), 3);
     }
 
     #[tokio::test]

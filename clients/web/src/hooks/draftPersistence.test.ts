@@ -18,7 +18,7 @@ const sample: DraftPayload = {
   environment: { kind: "runtime", vendor: "velos", repos: { "owner/repo": "" } },
   model: "sonnet",
   skills: ["bundle-a"],
-  mcp: ["mcp-x"],
+  mcp: [{ name: "mcp-x", tools: null }],
   memorySpaces: ["horsie"],
   tools: null,
   thinkingEffort: "high",
@@ -214,8 +214,35 @@ describe("selection filters", () => {
   });
 
   it("filterMcpServers drops servers that are no longer enabled", () => {
-    const next = filterMcpServers({ ...sample, mcp: ["mcp-x", "gone"] }, new Set(["mcp-x"]));
-    expect(next.mcp).toEqual(["mcp-x"]);
+    const next = filterMcpServers(
+      {
+        ...sample,
+        mcp: [
+          { name: "mcp-x", tools: ["search"] },
+          { name: "gone", tools: null },
+        ],
+      },
+      new Set(["mcp-x"]),
+    );
+    // The surviving server keeps its narrowing: the enabled list says nothing
+    // about tools.
+    expect(next.mcp).toEqual([{ name: "mcp-x", tools: ["search"] }]);
+  });
+
+  // Drafts stored before tools could be chosen hold plain names. Rejecting one
+  // would take the model, the environment and the attachments with it — `parse`
+  // is all-or-nothing.
+  it("reads a stored draft whose servers are bare names", () => {
+    const stored = { ...sample, mcp: ["mcp-x", "github"] };
+    const parsed = parseDraftPayload(stored);
+    expect(parsed?.mcp).toEqual([
+      { name: "mcp-x", tools: null },
+      { name: "github", tools: null },
+    ]);
+  });
+
+  it("refuses a stored draft whose servers are neither", () => {
+    expect(parseDraftPayload({ ...sample, mcp: [7] })).toBeUndefined();
   });
 
   it("filterMemorySpaces drops spaces that no longer exist", () => {

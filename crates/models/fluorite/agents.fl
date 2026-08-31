@@ -10,6 +10,7 @@
 package agents;
 
 use environments.EnvironmentSpec;
+use mcp.McpServerSelection;
 use session.SessionSummary;
 
 /// An agent preset as shown to clients.
@@ -27,8 +28,8 @@ struct AgentView {
     model: String,
     /// Selected plugin-bundle (skill) names.
     plugins: Vec<String>,
-    /// Enabled MCP server names.
-    mcp_servers: Vec<String>,
+    /// Enabled MCP servers, each with the tools of it this preset may call.
+    mcp_servers: Vec<McpServerSelection>,
     /// Memory spaces the session may read and write.
     memory_spaces: Vec<String>,
     /// Canonical thinking effort; absent → the model's configured default.
@@ -76,7 +77,7 @@ struct AgentPresetInput {
     instructions: Option<String>,
     model: String,
     plugins: Option<Vec<String>>,
-    mcp_servers: Option<Vec<String>>,
+    mcp_servers: Option<Vec<McpServerSelection>>,
     memory_spaces: Option<Vec<String>>,
     thinking_effort: Option<String>,
     /// Seeds `AgentSettings.auto_compact` for sessions created from this

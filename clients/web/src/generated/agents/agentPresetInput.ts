@@ -1,4 +1,5 @@
 
+import { McpServerSelection } from '../mcp';
 /**
  * Create or fully replace an agent preset. Omitted list fields default to
  * empty; `description` defaults to "".
@@ -13,7 +14,7 @@ export interface AgentPresetInput {
   instructions?: string;
   model: string;
   plugins?: string[];
-  mcpServers?: string[];
+  mcpServers?: McpServerSelection[];
   memorySpaces?: string[];
   thinkingEffort?: string;
   /**

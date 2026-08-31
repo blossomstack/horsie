@@ -2,6 +2,7 @@
 package session;
 
 use agent.Message;
+use mcp.McpServerSelection;
 use agent.AgentLogEntry;
 use agent.Usage;
 // `task_list` is the agent's own tool state, so `TaskItem` lives with the agent
@@ -55,9 +56,10 @@ struct AgentSettings {
     use_plugins: Option<bool>,
     max_iterations: Option<u32>,
     max_retries: Option<u32>,
-    /// Names of enabled MCP servers this session may call, namespaced
-    /// `mcp__<name>__<tool>`; absent → none.
-    mcp_servers: Option<Vec<String>>,
+    /// Enabled MCP servers this session may call, each with the tools of it
+    /// that are in scope; absent → none. Tools appear to the model as
+    /// `mcp__<name>__<tool>`.
+    mcp_servers: Option<Vec<McpServerSelection>>,
     /// Memory spaces this session may read and write; absent → none, and the
     /// memory_* tools are not offered.
     memory_spaces: Option<Vec<String>>,
