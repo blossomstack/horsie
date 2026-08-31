@@ -175,6 +175,11 @@ for (const [skin, mode, T] of PALETTES) {
     "code-fill",
     "accent",
     "accent-ink",
+    "accent-quiet",
+    "accent-quiet-hover",
+    "select-edge",
+    "pressed",
+    "attention",
   ].filter((k) => !T[k]);
   if (missing.length) {
     fail(`palette is missing: ${missing.join(", ")}`);
@@ -236,6 +241,61 @@ for (const [skin, mode, T] of PALETTES) {
   const sel = contrast(T["accent-quiet"], T["panel-raised"]);
   if (sel < 1.1) fail(`selected fill only ${sel.toFixed(2)} against the hover fill`);
   else console.log(`  ok    ${"select:hover".padEnd(13)} ${sel.toFixed(2)}`);
+
+  // The selection wash CARRIES TEXT — a rail row, a nav row, a settings row —
+  // and nothing above measures it, which is how a wash tuned for visibility
+  // could quietly take the ink on it under AA.
+  for (const fill of ["accent-quiet", "accent-quiet-hover"]) {
+    const v = contrast(T.legend, T[fill]);
+    if (v < AA) fail(`legend on ${fill} is ${v.toFixed(2)}`);
+  }
+  console.log(
+    `  ok    ${"ink:selected".padEnd(13)} ${contrast(T.legend, T["accent-quiet"]).toFixed(2)}`,
+  );
+
+  // Selected, and under the pointer. A state that cannot be told from the one
+  // it steps off is a state nobody drew.
+  const selHover = contrast(T["accent-quiet-hover"], T["accent-quiet"]);
+  if (selHover < 1.1) {
+    fail(`selected+hover only ${selHover.toFixed(2)} against selected`);
+  } else console.log(`  ok    ${"sel+hover:sel".padEnd(13)} ${selHover.toFixed(2)}`);
+
+  // The 2px marker on a selected row is a non-text indicator, so 1.4.11's 3:1
+  // — against the wash it is drawn on, not against the panel behind it.
+  const edge = contrast(T["select-edge"], T["accent-quiet"]);
+  if (edge < NON_TEXT) fail(`select-edge ${edge.toFixed(2)} on the selection wash`);
+  else console.log(`  ok    ${"edge:selected".padEnd(13)} ${edge.toFixed(2)}`);
+
+  // Held, or a trigger whose panel is open. Its whole job is to not be hover.
+  const press = contrast(T.pressed, T["panel-raised"]);
+  if (press < 1.1) fail(`pressed fill only ${press.toFixed(2)} against the hover fill`);
+  else console.log(`  ok    ${"pressed:hover".padEnd(13)} ${press.toFixed(2)}`);
+
+  // `--attention` is an ink as well as a lamp: `TONE_TEXT.attention` puts the
+  // word "waiting" in it. So it clears AA on every field, like every other ink.
+  {
+    const worst = Math.min(...FIELDS.map((f) => contrast(T.attention, T[f])));
+    if (worst < AA) fail(`attention worst ${worst.toFixed(2)} on a field`);
+    else console.log(`  ok    ${"attention".padEnd(13)} worst ${worst.toFixed(2)}`);
+  }
+
+  // A notice is a fill, an ink and a word. Each tone's ink is only ever read
+  // on that tone's own fill, and none of the pairs was measured anywhere.
+  for (const [ink, fill] of [
+    ["red-ink", "red-quiet"],
+    ["live-ink", "live-quiet"],
+    ["lamp-ok", "lamp-ok-quiet"],
+  ]) {
+    const v = contrast(T[ink], T[fill]);
+    if (v < AA) fail(`${ink} on ${fill} is ${v.toFixed(2)}`);
+  }
+  console.log(
+    `  ok    ${"notice inks".padEnd(13)} worst ${Math.min(
+      contrast(T["red-ink"], T["red-quiet"]),
+      contrast(T["live-ink"], T["live-quiet"]),
+      contrast(T["lamp-ok"], T["lamp-ok-quiet"]),
+    ).toFixed(2)}`,
+  );
 
   // ::selection is a semi-transparent WASH, so the declared colour is never
   // what lands on screen. Every check below is against the composite.

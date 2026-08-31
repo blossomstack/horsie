@@ -47,18 +47,26 @@
   --keycap-hover: oklch(0.318 0.012 250);
   --keycap-ink: oklch(0.968 0.004 250);
 
+  --pressed: oklch(0.212 0.009 250);
+
   /* Lime is the brightest accent either world carries, so its ink is the
    * dark one — a lime key is a lit key, and the word on it is cut out. */
   --accent: oklch(0.862 0.192 128);
   --accent-hover: oklch(0.902 0.175 128);
   --accent-ink: oklch(0.192 0.052 128);
-  --accent-quiet: oklch(0.348 0.098 128);
+  --accent-quiet: oklch(0.34 0.105 132);
+  --accent-quiet-hover: oklch(0.392 0.12 132);
+  --select-edge: oklch(0.862 0.192 128);
   --selection: oklch(0.72 0.23 128 / 0.12);
   --selection-solid: oklch(0.232 0.039 132);
 
   --live: oklch(0.828 0.135 82);
   --live-ink: oklch(0.828 0.135 82);
   --live-quiet: oklch(0.298 0.062 82);
+
+  /* Amber, not lime: in this world the accent is already the brightest thing
+   * on screen, and lime cannot also mean "act". */
+  --attention: oklch(0.828 0.135 82);
 
   --red: oklch(0.622 0.216 25);
   --red-ink: oklch(0.728 0.182 25);
@@ -99,6 +107,8 @@
   --keycap-hover: oklch(0.858 0.009 250);
   --keycap-ink: oklch(0.212 0.012 250);
 
+  --pressed: oklch(0.868 0.008 250);
+
   /* Lime cannot commit on a white ground — at the lightness that makes it
    * lime, white text on it measures under 3:1 and dark text under 4.5. In
    * the light exposure the accent is the same hue taken deep enough to
@@ -106,13 +116,22 @@
   --accent: oklch(0.512 0.148 136);
   --accent-hover: oklch(0.452 0.135 136);
   --accent-ink: oklch(0.995 0.004 136);
-  --accent-quiet: oklch(0.862 0.078 136);
+  /* The handoff's L .878 put the wash 1.096 against this world's hover fill,
+   * just under contrast.mjs's 1.1 floor — the light Signal panel is the
+   * lightest surface either world ships, so there is less room above it.
+   * Lightness moved down .016 and the chroma left where the retune put it,
+   * which is the cue that has to do the work. */
+  --accent-quiet: oklch(0.862 0.09 138);
+  --accent-quiet-hover: oklch(0.822 0.104 138);
+  --select-edge: oklch(0.512 0.148 136);
   --selection: oklch(0.18 0.23 136 / 0.35);
   --selection-solid: oklch(0.742 0.019 149);
 
   --live: oklch(0.478 0.11 70);
   --live-ink: oklch(0.478 0.11 70);
   --live-quiet: oklch(0.948 0.042 82);
+
+  --attention: oklch(0.478 0.11 70);
 
   --red: oklch(0.518 0.208 25);
   --red-ink: oklch(0.498 0.204 25);
