@@ -1,13 +1,13 @@
 ---
 title: Routines
-description: Run an agent against a fixed prompt on a schedule, from the API, or on demand.
+description: Run an agent or a workflow against a fixed prompt on a schedule, from the API, or on demand.
 kind: how-to
 sidebar:
   order: 7
 ---
 
-A **routine** runs an agent against a fixed prompt — on a timer, from the API,
-or whenever you press a button. Nobody has to be watching: a run works from the
+A **routine** runs an agent, or a whole workflow, against a fixed prompt — on a
+timer, from the API, or whenever you press a button. Nobody has to be watching: a run works from the
 prompt alone and reports what it did when it finishes.
 
 Use one for the work you would otherwise remember to ask for. Triage the issue
@@ -34,16 +34,25 @@ That is the whole argument. Everything below is mechanics.
 ## What one is made of
 
 ```text
-routine = an agent preset  (model, skills, MCP, memory)
+routine = a target         (an agent preset, or a workflow)
         + an environment   (a runtime and its repos, or a saved environment)
         + a prompt         (the whole instruction each run gets)
         + a trigger        (manually · repeatedly · once · daily · weekly · monthly · yearly)
 ```
 
-The agent configuration lives in the **preset**, not the routine. A preset
-already answers "how does this agent think?", so a routine only has to answer
-"what should it do, where, and when?". Several routines can share one preset,
-and editing the preset changes all of them at once.
+The **target** is what a firing runs. An agent preset gives one session, handed
+the prompt as its first message. A [workflow](/using/workflows/) gives a run,
+handed the prompt as the input its start step receives — every step brings its
+own preset, exactly as an interactive run does. Pick the kind first and then
+the name: both are slugs, so "nightly-release" reads as either until you say
+which.
+
+Either way the configuration lives in the thing you point at, not in the
+routine. A preset already answers "how does this agent think?" and a workflow
+already answers "what happens in what order", so a routine only has to answer
+"what should it do, where, and when?". Several routines can share one target,
+and editing that target changes all of them at once — which is why deleting one
+is refused while a routine still names it.
 
 The environment lives on the **routine**, because where work happens is a
 property of the run rather than of the agent. It is required — a routine that

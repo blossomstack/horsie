@@ -16,7 +16,7 @@ const changedTimezone = "Asia/Tokyo";
 const storedRoutine: RoutineView = {
   name: "stored",
   description: "",
-  agent: "reviewer",
+  target: { type: "Agent", value: { agent: "reviewer" } },
   environment: { type: "Runtime", value: { vendor: "local" } },
   prompt: "triage the queue",
   schedule: {
@@ -53,6 +53,18 @@ vi.mock("../../api/client", () => ({
       get: async (name: string) => (name === storedRoutine.name ? storedRoutine : undefined),
       create: (body: RoutineInput) => create(body),
       update: (name: string, body: RoutineInput) => update(name, body),
+    },
+    workflows: {
+      list: async () => [
+        {
+          name: "nightly-release",
+          description: "",
+          start: "build",
+          steps: [{ name: "build", agent: "reviewer", prompt: "build" }],
+          createdAt: "1",
+          updatedAt: "1",
+        },
+      ],
     },
     // The form carries an environment field now, which reads all three.
     environments: { list: async () => [] },
@@ -319,5 +331,58 @@ describe("RoutineEditPage", () => {
       target: { value: "5" },
     });
     expect(save.disabled).toBe(false);
+  });
+});
+
+describe("what a routine runs", () => {
+  /**
+   * A routine used to be an agent preset and nothing else, so the form had one
+   * select and the wire had one string. Both are now a tagged choice: a
+   * workflow and a preset are both slugs, and a single field could not say
+   * which kind a name was.
+   */
+  it("saves a workflow target when the workflow kind is chosen", async () => {
+    const utils = renderNew();
+    const { getByTestId } = utils;
+    fireEvent.change(await utils.findByTestId("routine-name-input"), {
+      target: { value: "nightly" },
+    });
+    fireEvent.click(getByTestId("routine-target-workflow"));
+    await waitFor(() => getByTestId("routine-workflow-select"));
+    fireEvent.change(getByTestId("routine-workflow-select"), {
+      target: { value: "nightly-release" },
+    });
+    fireEvent.change(getByTestId("routine-prompt-input"), {
+      target: { value: "ship it" },
+    });
+    await chooseEnvironment(utils);
+    fireEvent.click(getByTestId("save-routine-button"));
+
+    await waitFor(() => expect(create).toHaveBeenCalled());
+    expect(create.mock.calls[0]?.[0].target).toEqual({
+      type: "Workflow",
+      value: { workflow: "nightly-release" },
+    });
+  });
+
+  /** Switching kind must not silently save the other one: the two selects hold
+   * their own state, and only the chosen kind reaches the wire. */
+  it("keeps the two kinds apart", async () => {
+    const { getByTestId, queryByTestId } = renderNew();
+    await waitFor(() => getByTestId("routine-agent-select"));
+    expect(queryByTestId("routine-workflow-select")).toBeNull();
+    fireEvent.click(getByTestId("routine-target-workflow"));
+    expect(queryByTestId("routine-agent-select")).toBeNull();
+    expect(getByTestId("routine-workflow-select")).toBeTruthy();
+  });
+
+  /** A saved routine opens on the kind it holds. */
+  it("opens an agent routine on the agent kind", async () => {
+    const { getByTestId } = renderStored();
+    await waitFor(() =>
+      expect(
+        (getByTestId("routine-agent-select") as HTMLSelectElement).value,
+      ).toBe("reviewer"),
+    );
   });
 });

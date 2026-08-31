@@ -3370,9 +3370,14 @@ mod tests {
         replaced: |v: &serde_json::Value| assert_eq!(v["description"], "v2"),
     }
 
+    fn agent_target() -> serde_json::Value {
+        serde_json::json!({"type": "Agent", "value": {"agent": "reviewer"}})
+    }
+
     fn routine_body() -> serde_json::Value {
         serde_json::json!({
-            "name": "nightly", "description": "triage", "agent": "reviewer",
+            "name": "nightly", "description": "triage",
+            "target": {"type": "Agent", "value": {"agent": "reviewer"}},
             "environment": {"type": "Runtime", "value": {"vendor": "mock"}},
             "prompt": "triage the inbox",
             "schedule": {"type": "Every", "value": {"intervalSecs": 3600}}
@@ -3384,10 +3389,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (app, t) = routine_app(&tmp).await;
         for bad in [
-            serde_json::json!({"name": "Bad Name", "agent": "reviewer", "prompt": "x"}),
-            serde_json::json!({"name": "b", "agent": "ghost", "prompt": "x"}),
-            serde_json::json!({"name": "b", "agent": "reviewer", "prompt": "  "}),
-            serde_json::json!({"name": "b", "agent": "reviewer", "prompt": "x",
+            serde_json::json!({"name": "Bad Name", "target": agent_target(), "prompt": "x"}),
+            serde_json::json!({"name": "b", "target": {"type": "Agent", "value": {"agent": "ghost"}}, "prompt": "x"}),
+            // A workflow that does not exist is refused on the same rule.
+            serde_json::json!({"name": "b", "target": {"type": "Workflow", "value": {"workflow": "ghost"}}, "prompt": "x"}),
+            serde_json::json!({"name": "b", "target": agent_target(), "prompt": "  "}),
+            serde_json::json!({"name": "b", "target": agent_target(), "prompt": "x",
                                "schedule": {"type": "Every", "value": {"intervalSecs": 5}}}),
         ] {
             let res = app
@@ -3412,7 +3419,12 @@ mod tests {
             .await
             .unwrap();
         let v: RoutineView = read_json(res).await;
-        assert_eq!(v.agent, "reviewer");
+        assert_eq!(
+            v.target,
+            horsie_models::routines::RoutineTarget::Agent(horsie_models::routines::AgentTarget {
+                agent: "reviewer".into()
+            })
+        );
         assert!(v.enabled);
         assert!(v.next_run_at_ms.is_some());
 
@@ -3420,7 +3432,7 @@ mod tests {
             .oneshot(put_json(
                 &t.url("/routines/nightly"),
                 &serde_json::json!({
-                    "name": "nightly", "agent": "reviewer", "prompt": "new prompt", "enabled": false,
+                    "name": "nightly", "target": agent_target(), "prompt": "new prompt", "enabled": false,
                     "environment": {"type": "Runtime", "value": {"vendor": "mock"}}
                 }),
             ))

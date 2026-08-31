@@ -92,6 +92,78 @@ test("Q2: a routine is created, run, and its run is listed only under it", async
   await expect(page.getByTestId("composer-input")).toBeVisible();
 });
 
+/**
+ * A routine used to be an agent preset and nothing else. A workflow is the
+ * other thing worth scheduling — "ship the nightly build" is a graph, not one
+ * agent — and it takes the same trigger, the same environment and the same
+ * prompt, which becomes the run's input.
+ */
+test("Q5: a routine can run a workflow, and its run is a run", async ({
+  page,
+  appBase,
+  mock,
+  apiBase,
+}) => {
+  await mock.reset();
+  await mock.queueToolCall("submit_result", { outcome: "success", description: "shipped" });
+  await seedAgent(page, apiBase, "e2e-wf-routine-agent");
+  const res = await page.request.post(`${apiBase}/workflows`, {
+    data: {
+      name: "e2e-routine-workflow",
+      description: "from e2e",
+      start: "ship",
+      steps: [
+        { name: "ship", agent: "e2e-wf-routine-agent", prompt: "ship it" },
+      ],
+    },
+  });
+  expect([201, 409]).toContain(res.status());
+  const before = await sessionCount(page, apiBase);
+
+  await page.goto(`${appBase}/routines`);
+  await page.getByTestId("new-routine-button").click();
+  await page.getByTestId("routine-name-input").fill("e2e-wf-routine");
+  // Which kind first, then which one: a workflow and a preset are both slugs.
+  await page.getByTestId("routine-target-workflow").click();
+  await page
+    .getByTestId("routine-workflow-select")
+    .selectOption("e2e-routine-workflow");
+  await page.getByTestId("routine-prompt-input").fill("do the release");
+  await page.getByTestId("config-environment").click();
+  await page.locator('[data-testid="environment-option"][data-value="e2e"]').click();
+  await page.keyboard.press("Escape");
+  await page.getByTestId("save-routine-button").click();
+
+  await page.waitForURL(
+    (url) => url.pathname === projectRoot() + "/routines/e2e-wf-routine",
+  );
+  await expect(page.getByTestId("routine-detail-page")).toContainText(
+    "e2e-routine-workflow",
+  );
+
+  // Firing it starts a run, not a plain session — and like every routine's
+  // sessions, it stays out of the session list.
+  await page.getByTestId("run-routine-button").click();
+  await expect(page.getByTestId("routine-run-row")).toHaveCount(1);
+  expect(await sessionCount(page, apiBase)).toBe(before);
+
+  // Opening it lands on the run's page: the graph, with the transcript and
+  // timeline keys switched off.
+  await page.getByTestId("routine-run-row").first().click();
+  await page.waitForURL(/\/sessions\/[0-9a-f-]+$/);
+  await expect(page.getByTestId("graph-toggle")).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
+  await expect(page.getByTestId("transcript-toggle")).toBeDisabled();
+
+  // A workflow a routine runs cannot be deleted out from under it.
+  const del = await page.request.delete(
+    `${apiBase}/workflows/e2e-routine-workflow`,
+  );
+  expect(del.status()).toBe(409);
+});
+
 test("Q3: deleting a routine takes its runs with it", async ({
   page,
   appBase,
@@ -101,7 +173,7 @@ test("Q3: deleting a routine takes its runs with it", async ({
   const created = await page.request.post(`${apiBase}/routines`, {
     data: {
       name: "e2e-doomed",
-      agent: "e2e-doomed-agent",
+      target: { type: "Agent", value: { agent: "e2e-doomed-agent" } },
       environment: { type: "Runtime", value: { vendor: "e2e" } },
       prompt: "say hello",
     },

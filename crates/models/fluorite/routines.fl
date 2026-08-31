@@ -62,14 +62,33 @@ union RoutineSchedule {
     Yearly(YearlySchedule),
 }
 
+/// Run an agent preset against the routine's prompt, in a session of its own.
+struct AgentTarget { agent: String }
+
+/// Start a run of a workflow, with the routine's prompt as its input. The run's
+/// steps supply their own presets, exactly as an interactive run's do.
+struct WorkflowTarget { workflow: String }
+
+/// What a routine runs when it fires.
+///
+/// A union rather than two optional fields, so "neither" and "both" cannot be
+/// written down. A routine that names nothing to run is not a routine, and one
+/// that names two has no answer for which wins — neither is a state anything
+/// downstream should have to handle.
+#[type_tag = "type"]
+union RoutineTarget {
+    Agent(AgentTarget),
+    Workflow(WorkflowTarget),
+}
+
 /// A routine as shown to clients: its definition, plus what the schedule and
 /// the last trigger did.
 struct RoutineView {
     /// Slug; the id of record, used in API paths.
     name: String,
     description: String,
-    /// Name of the agent preset every run is configured from.
-    agent: String,
+    /// What every run runs: an agent preset, or a workflow.
+    target: RoutineTarget,
     /// Where every run happens. Required: a routine that cannot say where it
     /// runs is worse than one that says something which later breaks, and a
     /// break is already visible — it lands in `last_error`.
@@ -99,13 +118,14 @@ struct RoutineView {
 struct RoutineInput {
     name: String,
     description: Option<String>,
-    agent: String,
+    target: RoutineTarget,
     environment: EnvironmentSpec,
     prompt: String,
     schedule: Option<RoutineSchedule>,
     enabled: Option<bool>,
 }
 
-/// The session a trigger created. It is running in the background by the time
+/// The session a trigger created — a plain session for an agent routine, a
+/// workflow run for a workflow one. It is running in the background by the time
 /// this is returned.
 struct RoutineRunResponse { session: SessionSummary }

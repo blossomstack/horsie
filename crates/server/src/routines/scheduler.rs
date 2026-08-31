@@ -256,7 +256,11 @@ mod tests {
             ),
             name: name.into(),
             description: Some("d".into()),
-            agent: "reviewer".into(),
+            target: horsie_models::routines::RoutineTarget::Agent(
+                horsie_models::routines::AgentTarget {
+                    agent: "reviewer".into(),
+                },
+            ),
             prompt: "triage the inbox".into(),
             schedule: Some(schedule),
             enabled: None,

@@ -28,7 +28,7 @@ function routine(name: string, over: Partial<RoutineView> = {}): RoutineView {
   return {
     name,
     description: `${name} description`,
-    agent: "reviewer",
+    target: { type: "Agent", value: { agent: "reviewer" } },
     environment: { type: "Runtime", value: { vendor: "local" } },
     prompt: "triage the inbox",
     schedule: { type: "Manual", value: {} },

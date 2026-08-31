@@ -75,6 +75,30 @@ pub async fn resolve_run_spec(
     name: &str,
     input: &str,
 ) -> Result<ResolvedRun, ResolveRunError> {
+    resolve_run_with(
+        &services.workflows,
+        &services.agents,
+        &services.config_store,
+        name,
+        input,
+    )
+    .await
+}
+
+/// The same resolution, against the three services it actually reads.
+///
+/// Separate from [`resolve_run_spec`] because the routine runner starts runs
+/// too and is built *before* `ProjectServices` exists — it is one of the things
+/// that bundle holds. Taking the parts rather than the whole is also the
+/// honest interface: a run is resolved from the definition, the presets it
+/// names, and the configured models, and nothing else in the bundle.
+pub async fn resolve_run_with(
+    workflows: &crate::workflows::WorkflowService,
+    agents: &crate::agents::AgentService,
+    config: &Arc<dyn crate::config::ConfigStore>,
+    name: &str,
+    input: &str,
+) -> Result<ResolvedRun, ResolveRunError> {
     // Also checked by assembly; repeated here so a caller with no input is
     // refused before any store is read, whether or not the workflow exists.
     if input.trim().is_empty() {
@@ -82,12 +106,8 @@ pub async fn resolve_run_spec(
             "input must not be empty — it is what the first step is handed".to_string(),
         ));
     }
-    let row = services.workflows.row(name).await?;
-    let view = services
-        .config_store
-        .view()
-        .await
-        .map_err(ResolveRunError::Internal)?;
+    let row = workflows.row(name).await?;
+    let view = config.view().await.map_err(ResolveRunError::Internal)?;
     let models: Vec<String> = view.models.into_iter().map(|m| m.alias).collect();
     // Fetch what assembly will look up. A preset that cannot be read is simply
     // absent, and assembly names the step that needed it — the decision about
@@ -97,7 +117,7 @@ pub async fn resolve_run_spec(
         if presets.contains_key(&step.agent) {
             continue;
         }
-        if let Ok(preset) = services.agents.get(&step.agent).await {
+        if let Ok(preset) = agents.get(&step.agent).await {
             presets.insert(step.agent.clone(), preset);
         }
     }

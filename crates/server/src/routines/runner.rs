@@ -12,17 +12,20 @@ use crate::routines::service::{RoutineError, RoutineService};
 use crate::routines::store::RunOutcome;
 use crate::runtime_vendor::RuntimeVendorRegistry;
 use crate::sessions::addressing::SupervisorRef;
-use crate::sessions::builder::{AgentChoice, SpecError, build_session_spec};
+use crate::sessions::builder::{AgentChoice, SpecError, build_session_spec, build_workflow_spec};
 use crate::sessions::session_actor::NewSessionMessage;
 use crate::sessions::spec::{SessionOrigin, SessionStatus, status_kind, status_reason};
 use crate::sessions::supervisor::SessionSupervisorCommand;
+use crate::sessions::workflow::{ResolveRunError, resolve_run_with};
 use crate::sessions::{CreateSessionError, UserMessageError};
+use horsie_models::routines::RoutineTarget;
 use horsie_models::session::{AgentSettings as WireAgentSettings, SessionSummary};
 use std::sync::Arc;
 
 pub struct RoutineRunner {
     routines: Arc<RoutineService>,
     agents: Arc<AgentService>,
+    workflows: Arc<crate::workflows::WorkflowService>,
     environments: Arc<EnvironmentService>,
     config: Arc<dyn ConfigStore>,
     vendors: Arc<RuntimeVendorRegistry>,
@@ -33,6 +36,7 @@ impl RoutineRunner {
     pub fn new(
         routines: Arc<RoutineService>,
         agents: Arc<AgentService>,
+        workflows: Arc<crate::workflows::WorkflowService>,
         environments: Arc<EnvironmentService>,
         config: Arc<dyn ConfigStore>,
         vendors: Arc<RuntimeVendorRegistry>,
@@ -41,6 +45,7 @@ impl RoutineRunner {
         Self {
             routines,
             agents,
+            workflows,
             environments,
             config,
             vendors,
@@ -83,12 +88,29 @@ impl RoutineRunner {
 
     async fn start(&self, name: &str, now_ms: u64) -> Result<SessionSummary, RoutineError> {
         let routine = self.routines.row(name).await?;
-        // Re-resolved every run: presets are editable, and a routine saved
-        // against one that has since been deleted must fail here, visibly,
-        // rather than as a turn error inside a session nobody is watching.
-        let agent = self.agents.get(&routine.agent).await.map_err(|_| {
-            RoutineError::Invalid(format!("unknown agent preset '{}'", routine.agent))
-        })?;
+        // Re-resolved every run, whichever it is: presets and workflows are
+        // both editable, and a routine saved against one that has since been
+        // deleted must fail here, visibly, rather than as a turn error inside
+        // a session nobody is watching.
+        match routine.target.clone() {
+            RoutineTarget::Agent(a) => self.start_agent(&routine, &a.agent, now_ms).await,
+            RoutineTarget::Workflow(w) => self.start_workflow(&routine, &w.workflow, now_ms).await,
+        }
+    }
+
+    /// A routine that runs an agent preset: one ordinary session, with the
+    /// routine's prompt as its first user message.
+    async fn start_agent(
+        &self,
+        routine: &crate::routines::store::RoutineRow,
+        preset: &str,
+        now_ms: u64,
+    ) -> Result<SessionSummary, RoutineError> {
+        let agent = self
+            .agents
+            .get(preset)
+            .await
+            .map_err(|_| RoutineError::Invalid(format!("unknown agent preset '{preset}'")))?;
 
         let view = self.config.view().await.map_err(RoutineError::Internal)?;
         if !view.models.iter().any(|m| m.alias == agent.model) {
@@ -170,8 +192,12 @@ impl RoutineRunner {
                     RoutineError::Internal("the session vanished before its prompt".into())
                 }
                 CreateSessionError::Message(
-                    // A routine invokes an agent preset, never a workflow, so
-                    // `Rejected` is unreachable rather than merely unlikely.
+                    // `Rejected` means "this session does not take messages",
+                    // which is a workflow run. This arm creates a plain
+                    // session, and the workflow arm creates its run with no
+                    // message at all — so neither can reach it. Still matched
+                    // rather than ignored: it carries a reason worth reporting
+                    // if the shape of a session ever changes under it.
                     UserMessageError::Unrecoverable(why) | UserMessageError::Rejected(why),
                 ) => RoutineError::Conflict(why),
             })?
@@ -184,11 +210,104 @@ impl RoutineRunner {
             status: status_kind(&status),
             created_at: now_ms,
             last_error: status_reason(&status),
-            // A routine invokes an agent preset, never a workflow.
+            // This arm invokes an agent preset; the workflow arm names its
+            // definition here.
             workflow: None,
             // A run's session was just created; it has no annotations yet.
             annotations: vec![],
             // Nor sub sessions: nobody has had a session in it to branch.
+            sub_sessions: vec![],
+        })
+    }
+
+    /// A routine that runs a workflow: one run, with the routine's prompt as
+    /// the input its start step is handed.
+    ///
+    /// No message is queued. A run is started by being created — the session
+    /// actor asks the orchestrator what to do at load, and a pending run's
+    /// answer is its first step — and a run refuses user messages outright.
+    async fn start_workflow(
+        &self,
+        routine: &crate::routines::store::RoutineRow,
+        workflow: &str,
+        now_ms: u64,
+    ) -> Result<SessionSummary, RoutineError> {
+        // Every step's preset resolved once, here, exactly as an interactive
+        // run does it. After this the run is self-contained, so a preset edited
+        // between the trigger and a later step cannot change that step.
+        let resolved = resolve_run_with(
+            &self.workflows,
+            &self.agents,
+            &self.config,
+            workflow,
+            &routine.prompt,
+        )
+        .await
+        .map_err(|e| match e {
+            ResolveRunError::NotFound(m) => RoutineError::Invalid(m),
+            ResolveRunError::Invalid(m) => RoutineError::Invalid(m),
+            ResolveRunError::Internal(m) => RoutineError::Internal(m),
+        })?;
+        let spec = build_workflow_spec(
+            &self.environments,
+            routine.environment.clone(),
+            resolved.plugins,
+            resolved.run,
+            // What keeps a routine's runs out of the session list, the same as
+            // its agent sessions.
+            SessionOrigin::Routine {
+                routine: routine.name.clone(),
+            },
+        )
+        .await
+        .map_err(|e| match e {
+            SpecError::Invalid(m) => RoutineError::Invalid(m),
+            SpecError::Internal(m) => RoutineError::Internal(m),
+        })?;
+        if let Some(vendor) = spec.vendor()
+            && !self.vendors.connected_names().iter().any(|v| v == vendor)
+        {
+            return Err(RoutineError::Invalid(format!(
+                "runtime vendor '{vendor}' is not connected"
+            )));
+        }
+
+        let id = self
+            .supervisor
+            .ask(|reply| SessionSupervisorCommand::Create {
+                spec: spec.clone(),
+                name: Some(routine.name.clone()),
+                created_at: now_ms,
+                // A run carries its input in its snapshot, not in an inbox.
+                message: None,
+                reply,
+            })
+            .await
+            .map_err(|_| RoutineError::Internal("session supervisor unavailable".into()))?
+            .map_err(|e| match e {
+                CreateSessionError::NotRecorded(m) => RoutineError::Internal(m),
+                CreateSessionError::Message(
+                    UserMessageError::NotFound
+                    | UserMessageError::Unrecoverable(_)
+                    | UserMessageError::Rejected(_),
+                ) => RoutineError::Internal(
+                    "a run was created with no message and still reported one".into(),
+                ),
+            })?
+            .id;
+
+        let status = SessionStatus::Idle;
+        Ok(SessionSummary {
+            id,
+            name: Some(routine.name.clone()),
+            status: status_kind(&status),
+            created_at: now_ms,
+            last_error: status_reason(&status),
+            // What makes the session recognisable as a run wherever one is
+            // listed or opened — including the run page the whole session view
+            // now switches to.
+            workflow: Some(workflow.to_string()),
+            annotations: vec![],
             sub_sessions: vec![],
         })
     }
@@ -268,6 +387,7 @@ pub(crate) mod tests {
         let runner = Arc::new(RoutineRunner::new(
             f.routines.clone(),
             f.agents.clone(),
+            f.workflows.clone(),
             f.environments.clone(),
             f.config.clone(),
             registry,

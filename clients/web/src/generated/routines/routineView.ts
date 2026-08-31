@@ -1,6 +1,7 @@
 
 import { EnvironmentSpec } from '../environments';
 import { RoutineSchedule } from './routineSchedule';
+import { RoutineTarget } from './routineTarget';
 /**
  * A routine as shown to clients: its definition, plus what the schedule and
  * the last trigger did.
@@ -12,9 +13,9 @@ export interface RoutineView {
   name: string;
   description: string;
   /**
-   * Name of the agent preset every run is configured from.
+   * What every run runs: an agent preset, or a workflow.
    */
-  agent: string;
+  target: RoutineTarget;
   /**
    * Where every run happens. Required: a routine that cannot say where it
    * runs is worse than one that says something which later breaks, and a

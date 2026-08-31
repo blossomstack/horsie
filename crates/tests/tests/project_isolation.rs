@@ -546,7 +546,11 @@ fn routine(name: &str) -> horsie_server::routines::RoutineRow {
         ),
         name: name.into(),
         description: String::new(),
-        agent: "reviewer".into(),
+        target: horsie_models::routines::RoutineTarget::Agent(
+            horsie_models::routines::AgentTarget {
+                agent: "reviewer".into(),
+            },
+        ),
         prompt: "go".into(),
         schedule: horsie_models::routines::RoutineSchedule::Manual(
             horsie_models::routines::ManualSchedule {},

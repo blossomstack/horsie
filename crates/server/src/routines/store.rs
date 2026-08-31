@@ -7,11 +7,11 @@
 use crate::db::Db;
 use crate::projects::ProjectId;
 use horsie_models::environments::EnvironmentSpec;
-use horsie_models::routines::RoutineSchedule;
+use horsie_models::routines::{RoutineSchedule, RoutineTarget};
 use sqlx::Row;
 use sqlx::any::AnyRow;
 
-const COLS: &str = "name, description, agent, environment, prompt, schedule, enabled, next_run_at_ms, \
+const COLS: &str = "name, description, target, environment, prompt, schedule, enabled, next_run_at_ms, \
                     last_run_at_ms, last_session_id, last_error, created_at, updated_at";
 
 /// What one trigger did. One value rather than two nullable fields, so a run
@@ -29,7 +29,9 @@ pub enum RunOutcome {
 pub struct RoutineRow {
     pub name: String,
     pub description: String,
-    pub agent: String,
+    /// What this routine runs. Stored verbatim as the serialized wire union,
+    /// one JSON column, exactly as `schedule` and `environment` are.
+    pub target: RoutineTarget,
     pub environment: EnvironmentSpec,
     pub prompt: String,
     pub schedule: RoutineSchedule,
@@ -111,21 +113,41 @@ impl RoutineStore {
             .collect()
     }
 
-    /// Names of the routines configured to run a given agent preset.
+    /// Names of the routines that run a given agent preset.
     pub async fn using_agent(&self, agent: &str) -> Result<Vec<String>, String> {
-        let rows = sqlx::query(
-            &self
-                .db
-                .q("SELECT name FROM routines WHERE project_id = ? AND agent = ? ORDER BY name"),
-        )
-        .bind(self.user.as_str())
-        .bind(agent)
-        .fetch_all(self.db.pool())
-        .await
-        .map_err(|e| e.to_string())?;
-        rows.iter()
-            .map(|r| r.try_get::<String, _>("name").map_err(|e| e.to_string()))
-            .collect()
+        self.referencing(|t| matches!(t, RoutineTarget::Agent(a) if a.agent == agent))
+            .await
+    }
+
+    /// Names of the routines that run a given workflow.
+    ///
+    /// The twin of `using_agent`, and needed for the same reason: a routine's
+    /// whole configuration is the thing it points at, so deleting that out from
+    /// under it turns a scheduled job into a timer that fails every firing.
+    pub async fn using_workflow(&self, workflow: &str) -> Result<Vec<String>, String> {
+        self.referencing(|t| matches!(t, RoutineTarget::Workflow(w) if w.workflow == workflow))
+            .await
+    }
+
+    /// Routines whose target matches, read and decoded rather than matched in
+    /// SQL.
+    ///
+    /// The target is one JSON column now, so a `WHERE target = ?` would be
+    /// matching on serialization — key order, escaping, whitespace — which is
+    /// a comparison that works right up until something re-serializes the
+    /// column. An account's routines are a list a person maintains by hand, so
+    /// reading them to answer this costs nothing worth optimising.
+    async fn referencing(
+        &self,
+        matches: impl Fn(&RoutineTarget) -> bool,
+    ) -> Result<Vec<String>, String> {
+        Ok(self
+            .list()
+            .await?
+            .into_iter()
+            .filter(|r| matches(&r.target))
+            .map(|r| r.name)
+            .collect())
     }
 
     /// Insert; errs when the name is taken (no upsert — a silent overwrite
@@ -137,7 +159,7 @@ impl RoutineStore {
         .bind(self.user.as_str())
         .bind(&row.name)
         .bind(&row.description)
-        .bind(&row.agent)
+        .bind(serde_json::to_string(&row.target).map_err(|e| e.to_string())?)
         .bind(serde_json::to_string(&row.environment).map_err(|e| e.to_string())?)
         .bind(&row.prompt)
         .bind(serde_json::to_string(&row.schedule).map_err(|e| e.to_string())?)
@@ -159,12 +181,12 @@ impl RoutineStore {
     /// routine does not un-run it.
     pub async fn replace(&self, row: &RoutineRow) -> Result<bool, String> {
         let res = sqlx::query(&self.db.q(
-            "UPDATE routines SET description = ?, agent = ?, environment = ?, prompt = ?, schedule = ?, \
+            "UPDATE routines SET description = ?, target = ?, environment = ?, prompt = ?, schedule = ?, \
              enabled = ?, next_run_at_ms = ?, updated_at = ? \
              WHERE project_id = ? AND name = ?",
         ))
         .bind(&row.description)
-        .bind(&row.agent)
+        .bind(serde_json::to_string(&row.target).map_err(|e| e.to_string())?)
         .bind(serde_json::to_string(&row.environment).map_err(|e| e.to_string())?)
         .bind(&row.prompt)
         .bind(serde_json::to_string(&row.schedule).map_err(|e| e.to_string())?)
@@ -250,7 +272,8 @@ fn row_to_routine(row: &AnyRow) -> Result<RoutineRow, String> {
     Ok(RoutineRow {
         name: get("name")?,
         description: get("description")?,
-        agent: get("agent")?,
+        target: serde_json::from_str(&get("target")?)
+            .map_err(|e| format!("routines.target: {e}"))?,
         environment: serde_json::from_str(&get("environment")?)
             .map_err(|e| format!("routines.environment: {e}"))?,
         prompt: get("prompt")?,
@@ -272,8 +295,8 @@ mod tests {
     use super::*;
     use horsie_models::environments::{NamedEnvironment, RuntimeEnvironment};
     use horsie_models::routines::{
-        DailySchedule, EverySchedule, ManualSchedule, MonthlySchedule, OnceSchedule, Weekday,
-        WeeklySchedule, YearlySchedule,
+        AgentTarget, DailySchedule, EverySchedule, ManualSchedule, MonthlySchedule, OnceSchedule,
+        Weekday, WeeklySchedule, WorkflowTarget, YearlySchedule,
     };
     use horsie_models::session_api::RepoConfig;
     use std::collections::HashMap;
@@ -290,7 +313,9 @@ mod tests {
         RoutineRow {
             name: name.into(),
             description: "d".into(),
-            agent: "reviewer".into(),
+            target: RoutineTarget::Agent(AgentTarget {
+                agent: "reviewer".into(),
+            }),
             environment: EnvironmentSpec::Runtime(RuntimeEnvironment {
                 vendor: "local".into(),
                 repos: None,
@@ -569,13 +594,37 @@ mod tests {
     async fn using_agent_finds_every_referencing_routine() {
         let (s, _db) = store().await;
         let mut other = row("b", RoutineSchedule::Manual(ManualSchedule {}));
-        other.agent = "fixer".into();
+        other.target = RoutineTarget::Agent(AgentTarget {
+            agent: "fixer".into(),
+        });
         s.insert(&row("a", RoutineSchedule::Manual(ManualSchedule {})))
             .await
             .unwrap();
         s.insert(&other).await.unwrap();
         assert_eq!(s.using_agent("reviewer").await.unwrap(), vec!["a"]);
         assert!(s.using_agent("ghost").await.unwrap().is_empty());
+    }
+
+    /// The two arms must not see each other. A workflow and a preset can share
+    /// a name — both are slugs in their own namespace — and a lookup that read
+    /// the target's *payload* without checking which arm it is would refuse to
+    /// delete a preset because a workflow routine happened to match.
+    #[tokio::test]
+    async fn a_target_lookup_never_matches_the_other_arm() {
+        let (s, _db) = store().await;
+        let mut wf = row("b", RoutineSchedule::Manual(ManualSchedule {}));
+        // Deliberately the same slug the agent routine uses.
+        wf.target = RoutineTarget::Workflow(WorkflowTarget {
+            workflow: "reviewer".into(),
+        });
+        s.insert(&row("a", RoutineSchedule::Manual(ManualSchedule {})))
+            .await
+            .unwrap();
+        s.insert(&wf).await.unwrap();
+
+        assert_eq!(s.using_agent("reviewer").await.unwrap(), vec!["a"]);
+        assert_eq!(s.using_workflow("reviewer").await.unwrap(), vec!["b"]);
+        assert!(s.using_workflow("ghost").await.unwrap().is_empty());
     }
 
     #[tokio::test]

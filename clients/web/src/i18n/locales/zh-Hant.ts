@@ -1042,6 +1042,10 @@ const zhHant: typeof en = {
     namePlaceholder: "nightly-triage",
     descriptionPlaceholder: "這個例行工作是做什麼的",
     chooseAgent: "選擇一個智慧代理…",
+    runs: "執行",
+    chooseWorkflow: "選擇一個工作流程…",
+    workflowHint:
+      "每次觸發都會啟動這個工作流程的一次執行，並把下面的提示詞作為它的輸入。每個步驟都自帶智慧代理預設。",
     agentHint:
       "例行工作會使用該智慧代理的模型、技能與記憶。這些請在「智慧代理」頁面編輯。",
     environmentHint:
