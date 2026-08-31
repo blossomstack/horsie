@@ -29,3 +29,19 @@ pub struct McpCallOutcome {
     /// made such a call reach the model as an empty string.
     pub images: Vec<McpImage>,
 }
+
+/// What a server said about itself in the `initialize` handshake.
+///
+/// Every field is optional because every field is optional on the wire: a
+/// server that offers nothing but tools is well within spec, and a handshake
+/// must never fail over a missing pleasantry. `title` falls back to the
+/// required `serverInfo.name` — displaying a blank where a name was available
+/// is worse than displaying the id twice.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct McpServerInfo {
+    pub title: Option<String>,
+    pub version: Option<String>,
+    /// The server's own guidance for a client (`instructions`). Stored and
+    /// shown; not yet fed to the model.
+    pub instructions: Option<String>,
+}

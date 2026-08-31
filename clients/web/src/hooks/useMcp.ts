@@ -4,6 +4,10 @@ import type { McpServerInput } from "../api/types";
 
 export const mcpKeys = {
   servers: ["mcp", "servers"] as const,
+  // A prefix of `servers`, deliberately: a test refreshes the stored tool
+  // catalogue, so invalidating the list has to drop the open tool lists with
+  // it or they go on showing what the server used to offer.
+  server: (name: string) => ["mcp", "servers", name] as const,
 };
 
 /** The configured MCP servers (redacted). */
@@ -11,6 +15,20 @@ export function useMcpServers() {
   return useQuery({
     queryKey: mcpKeys.servers,
     queryFn: () => api.mcp.list().then((r) => r.servers),
+  });
+}
+
+/**
+ * One server with its remembered tools, fetched only when someone asks to see
+ * them. `enabled` is what makes this lazy: a settings row or a picker mounts
+ * for every configured server, and fetching every catalogue up front would
+ * cost a request per server to show something nobody has opened.
+ */
+export function useMcpServer(name: string, enabled = true) {
+  return useQuery({
+    queryKey: mcpKeys.server(name),
+    queryFn: () => api.mcp.get(name),
+    enabled: enabled && name !== "",
   });
 }
 

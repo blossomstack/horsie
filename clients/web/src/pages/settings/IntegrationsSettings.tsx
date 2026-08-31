@@ -1,5 +1,13 @@
-import { Boxes, GitBranch, Loader2, Plus, Server } from "lucide-react";
-import { useEffect, useState } from "react";
+import {
+  Boxes,
+  ChevronDown,
+  ChevronRight,
+  GitBranch,
+  Loader2,
+  Plus,
+  Server,
+} from "lucide-react";
+import { Fragment, useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api, ApiRequestError } from "../../api/client";
 import type {
@@ -11,6 +19,7 @@ import { useGithubDisconnect, useGithubStatus } from "../../hooks/useGithub";
 import {
   useConnectMcpServer,
   useDeleteMcpServer,
+  useMcpServer,
   useMcpServers,
   useTestMcpServer,
   useUpsertMcpServer,
@@ -317,10 +326,15 @@ function McpSection() {
           <div>
             <h2 className="section-title">{t("channel.mcpServers2")}</h2>
             <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-faint">
+              {/* The pattern rides in the component, not in `values`: Trans
+                  HTML-escapes an interpolated value so it cannot be mistaken
+                  for markup, and this one is all angle brackets — the page
+                  read `mcp__&lt;name&gt;__&lt;tool&gt;`. A
+                  self-closing <mono/> in the sentence marks where it goes and
+                  keeps the placement translatable. */}
               <Trans
                 i18nKey="integrations.mcpDesc"
-                values={{ pattern: "mcp__<name>__<tool>" }}
-                components={{ mono: <code /> }}
+                components={{ mono: <code>{"mcp__<name>__<tool>"}</code> }}
               />
             </p>
           </div>
@@ -376,6 +390,11 @@ function McpServerRow({
 
   const [name, setName] = useState(server?.name ?? "");
   const [url, setUrl] = useState(server?.url ?? "");
+  // The *typed* description, never the discovered one: showing the server's
+  // own words in an editable box would turn them into something a person
+  // wrote the moment anyone pressed Save.
+  const [description, setDescription] = useState(server?.userDescription ?? "");
+  const [showTools, setShowTools] = useState(false);
   const [authKind, setAuthKind] = useState<"None" | "Bearer" | "OAuth">(
     server?.auth.kind === "Bearer"
       ? "Bearer"
@@ -438,7 +457,15 @@ function McpServerRow({
     try {
       await upsert.mutateAsync({
         name: name.trim(),
-        body: { name: name.trim(), url: url.trim(), auth },
+        body: {
+          name: name.trim(),
+          url: url.trim(),
+          // "" clears; the server then falls back to whatever the server
+          // itself says. Undefined would mean "keep", which is not what an
+          // emptied box asks for.
+          description: description.trim(),
+          auth,
+        },
       });
       setTokenInput("");
       setClientSecret("");
@@ -500,6 +527,20 @@ function McpServerRow({
             }}
             placeholder={t("integrations.urlPlaceholder")}
           />
+          <TextField
+            label={t("integrations.description")}
+            value={description}
+            onChange={(v) => {
+              setDescription(v);
+              touch();
+            }}
+            placeholder={
+              server?.description && !server.userDescription
+                ? server.description
+                : t("integrations.descriptionPlaceholder")
+            }
+            hint={t("integrations.descriptionHint")}
+          />
           <label className="block">
             <RowLabel>{t("integrations.auth")}</RowLabel>
             <select
@@ -558,14 +599,32 @@ function McpServerRow({
           <div className="flex flex-wrap items-center gap-2 text-xs">
             {server.enabled ? (
               <span className="chip !py-0 text-[0.625rem] text-lamp-ok">
-                {t("integrations.enabledTools", {
-                  count: server.toolCount ?? 0,
-                })}
+                {t("integrations.enabled")}
               </span>
             ) : (
               <span className="chip !py-0 text-[0.625rem] text-faint">
                 {t("integrations.notTested")}
               </span>
+            )}
+            {/* Shown whenever a catalogue exists, enabled or not: a server
+                that is down right now is still worth reading the tools of.
+                `undefined` means it has never connected, which is the only
+                case with nothing to show. */}
+            {server.toolCount !== undefined && (
+              <button
+                type="button"
+                className="chip !py-0 text-[0.625rem] text-legend"
+                onClick={() => setShowTools((v) => !v)}
+                aria-expanded={showTools}
+                data-testid="mcp-tools-toggle"
+              >
+                {showTools ? (
+                  <ChevronDown size={11} />
+                ) : (
+                  <ChevronRight size={11} />
+                )}
+                {t("integrations.toolCount", { count: server.toolCount })}
+              </button>
             )}
             {authKind === "OAuth" && connected && (
               <span className="chip !py-0 text-[0.625rem] text-lamp-ok">
@@ -579,6 +638,18 @@ function McpServerRow({
             )}
           </div>
         )}
+
+        {!isNew && showTools && <McpToolList name={server.name} />}
+
+        {!isNew && server.instructions && (
+          <div className="screen px-3 py-2">
+            <RowLabel>{t("integrations.serverInstructions")}</RowLabel>
+            <p className="mt-1 max-w-prose text-xs leading-relaxed whitespace-pre-wrap text-faint">
+              {server.instructions}
+            </p>
+          </div>
+        )}
+
 
         {error && (
           <div className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
@@ -635,6 +706,61 @@ function McpServerRow({
         </div>
       </div>
     </RowShell>
+  );
+}
+
+/**
+ * The tools one server advertised at its last successful connect, each with
+ * its own description.
+ *
+ * Read from what horsie remembered, not from the server: this list has to load
+ * for a server that is currently down, and dialling one from a settings page
+ * would make opening a row wait on a network round trip to a third party.
+ */
+function McpToolList({ name }: { name: string }) {
+  const { t } = useTranslation();
+  const { data, isPending, isError, error } = useMcpServer(name);
+
+  if (isPending)
+    return (
+      <div className="screen px-3 py-2 text-xs text-faint">
+        <Loader2 size={12} className="mr-1.5 inline animate-spin" />
+        {t("common.loading")}
+      </div>
+    );
+  if (isError)
+    return (
+      <ReadError
+        what={t("integrations.tools")}
+        error={error}
+        testId="mcp-tools-error"
+      />
+    );
+
+  const tools = data.tools ?? [];
+  if (tools.length === 0)
+    return (
+      <p className="screen px-3 py-2 text-xs text-faint">
+        {t("integrations.noTools")}
+      </p>
+    );
+
+  return (
+    <dl
+      className="screen grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 px-3 py-2"
+      data-testid="mcp-tool-list"
+    >
+      {tools.map((tool) => (
+        <Fragment key={tool.name}>
+          <dt className="font-mono text-[0.6875rem] text-legend">
+            {tool.name}
+          </dt>
+          <dd className="min-w-0 text-[0.6875rem] leading-relaxed text-faint">
+            {tool.description || t("integrations.noToolDescription")}
+          </dd>
+        </Fragment>
+      ))}
+    </dl>
   );
 }
 

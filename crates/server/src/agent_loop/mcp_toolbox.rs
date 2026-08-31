@@ -11,7 +11,7 @@ use crate::projects::ProjectId;
 use async_trait::async_trait;
 use horsie_agentcore::{ToolCallError, ToolOutcome, ToolSpec, ToolValue, Toolbox};
 use horsie_models::agent::ArtifactRef;
-use horsie_support::mcp::{McpClient, McpError, McpImage, McpToolDef};
+use horsie_support::mcp::{McpClient, McpError, McpImage, McpServerInfo, McpToolDef};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -276,6 +276,8 @@ pub struct McpToolbox {
     server: String,
     client: Arc<McpClient>,
     tools: Vec<McpToolDef>,
+    /// What the server said about itself when this toolbox connected.
+    info: McpServerInfo,
     /// Where an image block's bytes go. No runtime hop here: the client is in
     /// this process, so the bytes are already in hand when the call returns.
     artifacts: ArtifactSink,
@@ -286,6 +288,7 @@ impl McpToolbox {
     pub fn new(
         server: String,
         client: Arc<McpClient>,
+        info: McpServerInfo,
         tools: Vec<McpToolDef>,
         artifacts: ArtifactSink,
     ) -> Self {
@@ -293,19 +296,33 @@ impl McpToolbox {
             server,
             client,
             tools,
+            info,
             artifacts,
         }
     }
 
-    /// Connect: `initialize` + `tools/list`, capturing the advertised tools.
+    /// Connect: `initialize` + `tools/list`, capturing what the server says it
+    /// is along with the tools it advertises.
     pub async fn connect(
         server: String,
         client: Arc<McpClient>,
         artifacts: ArtifactSink,
     ) -> Result<Self, McpError> {
-        client.initialize().await?;
+        let info = client.initialize().await?;
         let tools = client.list_tools().await?;
-        Ok(Self::new(server, client, tools, artifacts))
+        Ok(Self::new(server, client, info, tools, artifacts))
+    }
+
+    /// What the server said about itself on this connection.
+    #[must_use]
+    pub fn info(&self) -> &McpServerInfo {
+        &self.info
+    }
+
+    /// The tools it advertised, in the server's own spelling (unprefixed).
+    #[must_use]
+    pub fn tool_defs(&self) -> &[McpToolDef] {
+        &self.tools
     }
 
     fn prefix(&self) -> String {

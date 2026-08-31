@@ -73,7 +73,21 @@ union McpAuthInput {
     GithubApp(McpGithubAppAuth),
 }
 
+/// One tool a server advertised at its last successful connect. The name is the
+/// server's own spelling — the `mcp__<server>__` prefix is added where the tool
+/// is offered to a model, not here.
+struct McpToolInfo {
+    name: String,
+    /// The tool's own description, verbatim. Empty when it published none.
+    description: String,
+}
+
 /// One configured remote MCP server, redacted for display.
+///
+/// Deliberately carries no tool list. A server with forty tools would put its
+/// whole catalogue into every listing, including the one the control plane
+/// hands to a model — see `McpServerDetail`, which is what a caller that wants
+/// the tools asks for.
 struct McpServerView {
     /// Stable id and namespace prefix for its tools (`mcp__<name>__<tool>`).
     name: String,
@@ -82,16 +96,42 @@ struct McpServerView {
     /// Whether the last connect/test succeeded and the server is usable.
     enabled: bool,
     auth: McpAuthView,
-    /// Tools advertised at the last successful test, for the UI.
+    /// What this server is for, as it should be shown: the description someone
+    /// typed, else what the server called itself in the handshake. Absent when
+    /// neither exists.
+    description: Option<String>,
+    /// Only the typed description, so an edit form shows an empty box rather
+    /// than presenting the server's own words as something a person wrote.
+    user_description: Option<String>,
+    /// The server's `instructions` from the last successful connect: its own
+    /// guidance on how it expects to be used.
+    instructions: Option<String>,
+    /// How many tools it advertised at the last successful connect. Absent
+    /// means it has never connected — which is not the same as offering none.
     tool_count: Option<u32>,
     /// Last connect/test error, for the UI.
     last_error: Option<String>,
+}
+
+/// One server *with* its remembered tools: what `GET /mcp/servers/{name}`
+/// answers, and the only shape that carries tool descriptions.
+///
+/// `tools` absent means the server has never successfully connected; an empty
+/// list means it connected and advertised nothing.
+struct McpServerDetail {
+    server: McpServerView,
+    tools: Option<Vec<McpToolInfo>>,
 }
 
 /// Upsert input for a server. Secrets follow omit=keep, ""=clear semantics.
 struct McpServerInput {
     name: String,
     url: String,
+    /// What this server is for, in your own words. Follows the same
+    /// omit=keep, ""=clear convention as the secrets: omitting it on an edit
+    /// keeps what is stored. Leave it clear to fall back to whatever the server
+    /// says about itself.
+    description: Option<String>,
     auth: McpAuthInput,
 }
 
@@ -99,6 +139,9 @@ struct McpServerInput {
 struct McpConnectResult {
     ok: bool,
     tool_count: Option<u32>,
+    /// What the server called itself in the handshake, so a successful test can
+    /// show what it just learned.
+    discovered_title: Option<String>,
     error: Option<String>,
 }
 

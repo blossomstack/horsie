@@ -31,6 +31,7 @@ import type {
   MarketplaceView,
   McpAuthorizeUrl,
   McpConnectResult,
+  McpServerDetail,
   McpServerInput,
   McpServerList,
   McpServerView,
@@ -944,6 +945,14 @@ export const api = {
   mcp: {
     /** The configured remote MCP servers, redacted (tokens as `hasToken`). */
     list: (): Promise<McpServerList> => request("/mcp/servers"),
+
+    /** One server *with* the tools it advertised at its last good connect.
+     *
+     * A separate call because `list` deliberately carries no tool lists: a few
+     * servers with forty tools apiece would be a wall of text on every read,
+     * and the tools are only wanted once someone opens one server. */
+    get: (name: string): Promise<McpServerDetail> =>
+      request(`/mcp/servers/${encodeURIComponent(name)}`),
 
     /** Upsert a server by name (the path is the id of record). */
     upsert: (name: string, body: McpServerInput): Promise<McpServerView> =>
