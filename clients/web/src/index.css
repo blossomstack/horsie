@@ -890,7 +890,12 @@
   .notice .key {
     color: inherit;
   }
-  .notice-fault .key-icon:hover:not(:disabled) {
+  /* `.key-flat` too, and at a specificity that beats its own hover rule:
+   * without it, pointing at Start a new session inside a failure notice
+   * painted the key with the neutral hover fill and the panel's ink. */
+  .notice-fault .key-icon:hover:not(:disabled),
+  .notice-fault .key-flat:hover:not(:disabled),
+  .notice-fault .key-blank:hover:not(:disabled) {
     background: color-mix(in oklab, var(--red) 18%, transparent);
     color: var(--red-ink);
   }
