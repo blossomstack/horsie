@@ -20,10 +20,8 @@ import { EnvironmentsPage } from "./pages/environments/EnvironmentsPage";
 import { InboxPage } from "./pages/inbox/InboxPage";
 import { LoginPage } from "./pages/LoginPage";
 import { NewSessionView } from "./pages/NewSessionView";
-import { RoutineDetailPage } from "./pages/routines/RoutineDetailPage";
 import { RoutineEditPage } from "./pages/routines/RoutineEditPage";
 import { RoutinesPage } from "./pages/routines/RoutinesPage";
-import { WorkflowDetailPage } from "./pages/workflows/WorkflowDetailPage";
 import { WorkflowEditPage } from "./pages/workflows/WorkflowEditPage";
 import { WorkflowsPage } from "./pages/workflows/WorkflowsPage";
 import { SessionsLayout } from "./pages/SessionsLayout";
@@ -129,22 +127,28 @@ function ProjectApp({ project }: { project: string }) {
                   subagent, which had no page of its own before. */}
               <Route path="sessions/:id/agents/:agentId" element={<SessionView />} />
               <Route path="inbox" element={<InboxPage />} />
+              {/* The roster and what is selected in it are one page, so the
+                  name is a parameter of that page rather than a route to
+                  somewhere else. Editing takes the whole width — a form beside
+                  a roster is two things competing for the same attention. */}
               <Route path="agents" element={<AgentsPage />} />
               <Route path="agents/new" element={<AgentEditPage />} />
+              <Route path="agents/:name" element={<AgentsPage />} />
               <Route path="agents/:name/edit" element={<AgentEditPage />} />
               <Route path="environments" element={<EnvironmentsPage />} />
               <Route path="environments/new" element={<EnvironmentEditPage />} />
+              <Route path="environments/:name" element={<EnvironmentsPage />} />
               <Route
                 path="environments/:name/edit"
                 element={<EnvironmentEditPage />}
               />
               <Route path="workflows" element={<WorkflowsPage />} />
               <Route path="workflows/new" element={<WorkflowEditPage />} />
-              <Route path="workflows/:name" element={<WorkflowDetailPage />} />
+              <Route path="workflows/:name" element={<WorkflowsPage />} />
               <Route path="workflows/:name/edit" element={<WorkflowEditPage />} />
               <Route path="routines" element={<RoutinesPage />} />
               <Route path="routines/new" element={<RoutineEditPage />} />
-              <Route path="routines/:name" element={<RoutineDetailPage />} />
+              <Route path="routines/:name" element={<RoutinesPage />} />
               <Route
                 path="routines/:name/edit"
                 element={<RoutineEditPage />}

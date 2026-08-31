@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import type { AgentDocument, SessionDetail } from "../api/types";
 import type { ConfigDraft } from "../hooks/useSessionDraft";
 import { useFrozenDraft } from "../hooks/useSessionDraft";
-import type { PickerSpec } from "./configPickers";
+import type { ConfigMode, PickerSpec } from "./configPickers";
 import { useConfigPickers } from "./configPickers";
 import { PopoverMenu } from "./PopoverMenu";
 
@@ -123,8 +123,16 @@ function KeyControls({ pickers }: { pickers: PickerSpec[] }) {
  * bottom-anchored layout into a form and left the configuration floating below
  * the fields it belongs with.
  */
-export function ConfigFields({ draft }: { draft: ConfigDraft }) {
-  const pickers = useConfigPickers(draft);
+export function ConfigFields({
+  draft,
+  mode = "edit",
+}: {
+  draft: ConfigDraft;
+  /** Frozen renders the same fields with their controls turned off — what a
+   * preset's read-only page shows, so it cannot drift from the form. */
+  mode?: ConfigMode;
+}) {
+  const pickers = useConfigPickers(draft, mode);
   return (
     <div
       className="grid grid-cols-1 gap-3 sm:grid-cols-2"

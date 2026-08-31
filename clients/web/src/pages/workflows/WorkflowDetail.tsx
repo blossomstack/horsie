@@ -1,24 +1,28 @@
-import { ArrowLeft, Pencil, Play } from "lucide-react";
-import { Link, useParams } from "react-router-dom";
+import { Pencil, Play, Trash2 } from "lucide-react";
+import { Link } from "react-router-dom";
 import { StatusBadge } from "../../components/StatusBadge";
 import { WorkflowGraph } from "../../components/WorkflowGraph";
 import { relativeTime } from "../../lib/format";
 import { renderFilter } from "./stepDraft";
-import { RailToggle } from "../../components/rail";
 import { ReadError } from "../../components/ReadError";
 import { useWorkflow, useWorkflowRuns } from "../../hooks/useWorkflows";
 import { Trans, useTranslation } from "react-i18next";
 
 /**
- * A workflow's page: the graph it will run, and the runs it has had.
+ * A workflow, beside the roster: the graph it will run, and the runs it has had.
  *
  * Running one is not configured here. A run needs a runtime and a workspace,
  * which is exactly what the new-session page already asks for — so `Run` hands
  * the workflow to that page rather than growing a second launch form that
  * would have to learn the same channels.
  */
-export function WorkflowDetailPage() {
-  const { name } = useParams<{ name: string }>();
+export function WorkflowDetail({
+  name,
+  onDelete,
+}: {
+  name: string;
+  onDelete: () => void;
+}) {
   const { data: workflow, isLoading, isError } = useWorkflow(name);
   const {
     data: runs,
@@ -46,20 +50,11 @@ export function WorkflowDetailPage() {
 
   return (
     <div className="flex h-full flex-col" data-testid="workflow-detail-page">
-      <div className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
-        <RailToggle />
-        <Link
-          to="/workflows"
-          className="key key-sm"
-          data-testid="return-to-workflows"
-        >
-          <ArrowLeft size={14} />
-          {t("common.return")}
-        </Link>
-        <h1 className="page-title min-w-0 flex-1 truncate">{workflow.name}</h1>
+      <header className="flex h-[var(--header-h)] shrink-0 items-center gap-2 bar-scroll px-6">
+        <h2 className="page-title min-w-0 flex-1 truncate">{workflow.name}</h2>
         <Link
           to={`/workflows/${encodeURIComponent(workflow.name)}/edit`}
-          className="key ml-auto key-sm"
+          className="key key-sm"
           data-testid="edit-workflow"
         >
           <Pencil size={14} />
@@ -73,7 +68,16 @@ export function WorkflowDetailPage() {
           <Play size={14} />
           {t("common.run")}
         </Link>
-      </div>
+        <button
+          className="key-icon hover:!bg-red-quiet hover:!text-red-ink"
+          onClick={onDelete}
+          title={t("common.deleteNamed", { name: workflow.name })}
+          aria-label={t("common.deleteNamed", { name: workflow.name })}
+          data-testid="delete-workflow"
+        >
+          <Trash2 size={15} aria-hidden />
+        </button>
+      </header>
 
       <div className="flex-1 space-y-4 overflow-y-auto px-6 py-4">
         {workflow.description && (

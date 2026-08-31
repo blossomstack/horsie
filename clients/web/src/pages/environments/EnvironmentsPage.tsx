@@ -1,96 +1,102 @@
-import { useScrolledUnder } from "../../hooks/useScrolledUnder";
 import { Plus } from "lucide-react";
 import { Trans, useTranslation } from "react-i18next";
-import { RailToggle } from "../../components/rail";
+import { useNavigate, useParams } from "react-router-dom";
+import { ListDetail, NothingSelected } from "../../components/ListDetail";
 import { RosterRow } from "../../components/RosterRow";
 import { askConfirm } from "../../lib/confirm";
-import { useNavigate } from "react-router-dom";
-import { useEnvironments, useDeleteEnvironment } from "../../hooks/useEnvironments";
+import { useDeleteEnvironment, useEnvironments } from "../../hooks/useEnvironments";
+import { EnvironmentDetail } from "./EnvironmentDetail";
 
 export function EnvironmentsPage() {
   const { t } = useTranslation();
-  const { onScroll, barProps } = useScrolledUnder();
+  const { name } = useParams<{ name: string }>();
   const { data: environments, isLoading, isError } = useEnvironments();
   const del = useDeleteEnvironment();
   const navigate = useNavigate();
 
+  const selected = environments?.find((e) => e.name === name);
+
+  const remove = async (env: string) => {
+    if (!(await askConfirm(t("environments.confirmDelete", { name: env })))) return;
+    del.mutate(env);
+    if (env === name) navigate("/environments");
+  };
+
   return (
-    <div className="flex h-full flex-col" data-testid="environments-page">
-      <div {...barProps}
-        className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
-        <RailToggle />
-        <h1 className="page-title min-w-0 flex-1 truncate">
-          {t("nav.environments")}
-        </h1>
+    <ListDetail
+      testId="environments-page"
+      title={t("nav.environments")}
+      action={
         <button
-          className="key key-go shrink-0"
+          className="key key-go key-sm shrink-0"
           onClick={() => navigate("/environments/new")}
           data-testid="new-environment-button"
         >
           <Plus size={13} aria-hidden />
           {t("environments.new")}
         </button>
+      }
+      detail={
+        selected ? (
+          <EnvironmentDetail
+            environment={selected}
+            onDelete={() => void remove(selected.name)}
+          />
+        ) : (
+          <NothingSelected>{t("environments.pickOne")}</NothingSelected>
+        )
+      }
+    >
+      {isLoading && (
+        <div className="flex items-center gap-2 px-2.5 py-6">
+          <span className="lamp lamp-live text-live-ink" aria-hidden />
+          <span className="legend">{t("environments.loading")}</span>
+        </div>
+      )}
+      {isError && (
+        <p className="px-2.5 py-6 text-sm text-red-ink">{t("rail.unreachable")}</p>
+      )}
+      {environments && environments.length === 0 && (
+        <section className="section m-1" data-testid="environments-empty">
+          <h2 className="legend">{t("environments.rosterTitle")}</h2>
+          <p className="mt-3 text-sm leading-relaxed text-dim">
+            <Trans
+              i18nKey="environments.rosterBlurb"
+              components={{ key: <span className="text-legend" /> }}
+            />
+          </p>
+        </section>
+      )}
+      <div className="list-divided">
+        {(environments ?? []).map((e) => (
+          <RosterRow
+            key={e.name}
+            to={`/environments/${encodeURIComponent(e.name)}`}
+            name={e.name}
+            meta={e.vendor}
+            description={e.description}
+            selected={e.name === name}
+            facts={
+              <>
+                {e.repos.length > 0 && (
+                  <span className="legend">{e.repos.length} repos</span>
+                )}
+                {e.envVars.length > 0 && (
+                  <span className="legend">{e.envVars.length} env</span>
+                )}
+                {e.provision.length > 0 && (
+                  <span className="legend">{e.provision.length} steps</span>
+                )}
+              </>
+            }
+            testId="environment-row"
+            nameAttr={{ "data-environment-name": e.name }}
+            deleteLabel={t("common.deleteNamed", { name: e.name })}
+            deleteTestId={`delete-environment-${e.name}`}
+            onDelete={() => void remove(e.name)}
+          />
+        ))}
       </div>
-      <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-6" onScroll={onScroll}>
-          {isLoading && (
-            <div className="flex items-center gap-2">
-              <span className="lamp lamp-live text-live-ink" aria-hidden />
-              <span className="legend">{t("environments.loading")}</span>
-            </div>
-          )}
-          {isError && (
-            <p className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
-{t("rail.unreachable")}
-            </p>
-          )}
-          {environments && environments.length === 0 && (
-            <section className="section" data-testid="environments-empty">
-              <h2 className="legend">{t("environments.rosterTitle")}</h2>
-              <p className="mt-3 max-w-prose text-sm leading-relaxed text-dim">
-                <Trans
-                  i18nKey="environments.rosterBlurb"
-                  components={{ key: <span className="text-legend" /> }}
-                />
-              </p>
-            </section>
-          )}
-          <div className="list-divided">
-            {(environments ?? []).map((e) => (
-              <RosterRow
-                key={e.name}
-                to={`/environments/${encodeURIComponent(e.name)}/edit`}
-                name={e.name}
-                meta={e.vendor}
-                description={e.description}
-                facts={
-                  <>
-                    {e.repos.length > 0 && (
-                      <span className="legend">{e.repos.length} repos</span>
-                    )}
-                    {e.envVars.length > 0 && (
-                      <span className="legend">{e.envVars.length} env</span>
-                    )}
-                    {e.provision.length > 0 && (
-                      <span className="legend">{e.provision.length} steps</span>
-                    )}
-                  </>
-                }
-                testId="environment-row"
-                nameAttr={{ "data-environment-name": e.name }}
-                deleteLabel={t("common.deleteNamed", { name: e.name })}
-                deleteTestId={`delete-environment-${e.name}`}
-                onDelete={async () => {
-                  if (
-                    await askConfirm(
-                      t("environments.confirmDelete", { name: e.name }),
-                    )
-                  )
-                    del.mutate(e.name);
-                }}
-              />
-            ))}
-          </div>
-      </div>
-    </div>
+    </ListDetail>
   );
 }
