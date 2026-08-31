@@ -9,7 +9,7 @@ use crate::agents::AgentService;
 use crate::routines::store::{RoutineRow, RoutineStore, RunOutcome};
 use horsie_models::environments::EnvironmentSpec;
 use horsie_models::routines::{
-    ManualSchedule, RoutineInput, RoutineSchedule, RoutineView, Weekday,
+    ManualSchedule, RoutineInput, RoutineSchedule, RoutineTarget, RoutineView, Weekday,
 };
 use jiff::tz::TimeZone;
 use std::sync::Arc;
@@ -65,11 +65,20 @@ pub fn next_run_at(schedule: &RoutineSchedule, enabled: bool, now_ms: u64) -> Op
 pub struct RoutineService {
     store: RoutineStore,
     agents: Arc<AgentService>,
+    workflows: Arc<crate::workflows::WorkflowService>,
 }
 
 impl RoutineService {
-    pub fn new(store: RoutineStore, agents: Arc<AgentService>) -> Self {
-        Self { store, agents }
+    pub fn new(
+        store: RoutineStore,
+        agents: Arc<AgentService>,
+        workflows: Arc<crate::workflows::WorkflowService>,
+    ) -> Self {
+        Self {
+            store,
+            agents,
+            workflows,
+        }
     }
 
     pub async fn list(&self) -> Result<Vec<RoutineView>, RoutineError> {
@@ -169,6 +178,14 @@ impl RoutineService {
     }
 
     /// Names of the routines that would run a given agent preset.
+    /// Routines that run a given workflow — what a delete has to refuse over.
+    pub async fn using_workflow(&self, workflow: &str) -> Result<Vec<String>, RoutineError> {
+        self.store
+            .using_workflow(workflow)
+            .await
+            .map_err(RoutineError::Internal)
+    }
+
     pub async fn using_agent(&self, agent: &str) -> Result<Vec<String>, RoutineError> {
         self.store
             .using_agent(agent)
@@ -209,10 +226,20 @@ impl RoutineService {
             ));
         }
         // The reference is checked here so a routine cannot be saved broken;
-        // it is checked again at every trigger, because presets are editable.
-        self.agents.get(&input.agent).await.map_err(|_| {
-            RoutineError::Invalid(format!("unknown agent preset '{}'", input.agent))
-        })?;
+        // it is checked again at every trigger, because both presets and
+        // workflows are editable and deletable.
+        match &input.target {
+            RoutineTarget::Agent(a) => {
+                self.agents.get(&a.agent).await.map_err(|_| {
+                    RoutineError::Invalid(format!("unknown agent preset '{}'", a.agent))
+                })?;
+            }
+            RoutineTarget::Workflow(w) => {
+                self.workflows.get(&w.workflow).await.map_err(|_| {
+                    RoutineError::Invalid(format!("unknown workflow '{}'", w.workflow))
+                })?;
+            }
+        }
         // Only what is stable at save. Whether the named vendor is connected,
         // or the named environment still exists, is a run-time fact — a routine
         // outlives both, and reports a broken one through `last_error`.
@@ -325,7 +352,7 @@ fn row_from_input(
     RoutineRow {
         name: input.name,
         description: input.description.unwrap_or_default(),
-        agent: input.agent,
+        target: input.target,
         environment: input.environment,
         prompt: input.prompt,
         next_run_at_ms: next_run_at(&schedule, enabled, now_ms),
@@ -344,7 +371,7 @@ fn routine_view(row: &RoutineRow) -> RoutineView {
     RoutineView {
         name: row.name.clone(),
         description: row.description.clone(),
-        agent: row.agent.clone(),
+        target: row.target.clone(),
         environment: row.environment.clone(),
         prompt: row.prompt.clone(),
         schedule: row.schedule.clone(),
@@ -375,8 +402,8 @@ pub(crate) mod tests {
     use horsie_models::agents::AgentPresetInput;
     use horsie_models::environments::RuntimeEnvironment;
     use horsie_models::routines::{
-        DailySchedule, EverySchedule, ManualSchedule, MonthlySchedule, OnceSchedule, Weekday,
-        WeeklySchedule, YearlySchedule,
+        AgentTarget, DailySchedule, EverySchedule, ManualSchedule, MonthlySchedule, OnceSchedule,
+        Weekday, WeeklySchedule, WorkflowTarget, YearlySchedule,
     };
     use horsie_models::settings::{ModelInput, ProviderInput};
 
@@ -387,6 +414,7 @@ pub(crate) mod tests {
     pub(crate) struct Fixture {
         pub routines: Arc<RoutineService>,
         pub agents: Arc<AgentService>,
+        pub workflows: Arc<crate::workflows::WorkflowService>,
         pub environments: Arc<crate::environments::EnvironmentService>,
         pub config: Arc<dyn ConfigStore>,
         pub provider_registry: crate::sessions::spec::SharedProviderRegistry,
@@ -461,12 +489,21 @@ pub(crate) mod tests {
             })
             .await
             .unwrap();
+        let workflows = Arc::new(crate::workflows::WorkflowService::new(
+            crate::workflows::WorkflowStore::new(
+                opened.db.clone(),
+                crate::projects::ProjectId::new("1"),
+            ),
+            agents.clone(),
+        ));
         Fixture {
             routines: Arc::new(RoutineService::new(
                 RoutineStore::new(opened.db.clone(), crate::projects::ProjectId::new("1")),
                 agents.clone(),
+                workflows.clone(),
             )),
             agents,
+            workflows,
             environments: Arc::new(crate::environments::EnvironmentService::new(
                 crate::environments::EnvironmentStore::new(
                     opened.db.clone(),
@@ -489,7 +526,9 @@ pub(crate) mod tests {
         RoutineInput {
             name: name.into(),
             description: Some("d".into()),
-            agent: "reviewer".into(),
+            target: RoutineTarget::Agent(AgentTarget {
+                agent: "reviewer".into(),
+            }),
             environment: EnvironmentSpec::Runtime(RuntimeEnvironment {
                 vendor: "mock".into(),
                 repos: None,
@@ -577,7 +616,12 @@ pub(crate) mod tests {
         let (s, _t) = service().await;
         let v = s.create(input("nightly", None), 1_000).await.unwrap();
         assert_eq!(v.name, "nightly");
-        assert_eq!(v.agent, "reviewer");
+        assert_eq!(
+            v.target,
+            RoutineTarget::Agent(AgentTarget {
+                agent: "reviewer".into()
+            })
+        );
         assert_eq!(v.schedule, RoutineSchedule::Manual(ManualSchedule {}));
         assert!(v.enabled);
         assert_eq!(v.next_run_at_ms, None);
@@ -619,10 +663,24 @@ pub(crate) mod tests {
         ));
 
         let mut ghost = input("a", None);
-        ghost.agent = "ghost".into();
+        ghost.target = RoutineTarget::Agent(AgentTarget {
+            agent: "ghost".into(),
+        });
         assert!(matches!(
             s.create(ghost, 0).await.unwrap_err(),
             RoutineError::Invalid(m) if m.contains("ghost")
+        ));
+
+        // The same rule on the other arm: a routine cannot be saved pointing
+        // at a workflow that does not exist, or its first firing is the
+        // discovery.
+        let mut no_wf = input("a", None);
+        no_wf.target = RoutineTarget::Workflow(WorkflowTarget {
+            workflow: "nowhere".into(),
+        });
+        assert!(matches!(
+            s.create(no_wf, 0).await.unwrap_err(),
+            RoutineError::Invalid(m) if m.contains("nowhere")
         ));
 
         let fast = input(

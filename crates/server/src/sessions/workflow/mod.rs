@@ -17,7 +17,9 @@ pub mod spec;
 mod toolbox;
 
 pub use driver::{WorkflowOrchestrator, next_transition};
-pub use resolve::{ResolveRunError, ResolvedRun, assemble_run_spec, resolve_run_spec};
+pub use resolve::{
+    ResolveRunError, ResolvedRun, assemble_run_spec, resolve_run_spec, resolve_run_with,
+};
 pub use result_schema::{
     DESCRIPTION_FIELD, OUTCOME_FIELD, SUBMIT_RESULT_TOOL, default_outcomes, outcomes_or_default,
     render_result, result_schema, validate_result,

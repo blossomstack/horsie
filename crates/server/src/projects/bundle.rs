@@ -290,16 +290,19 @@ async fn build_project(
         shared.db.clone(),
         project.clone(),
     ));
-    let routines = Arc::new(crate::routines::RoutineService::new(
-        crate::routines::RoutineStore::new(shared.db.clone(), project.clone()),
-        agents.clone(),
-    ));
     let environments = Arc::new(crate::environments::EnvironmentService::new(
         crate::environments::EnvironmentStore::new(shared.db.clone(), project.clone()),
     ));
     let workflows = Arc::new(crate::workflows::WorkflowService::new(
         crate::workflows::WorkflowStore::new(shared.db.clone(), project.clone()),
         agents.clone(),
+    ));
+    // After the workflows: a routine targets one or the other, and validates
+    // its target at save against whichever service owns it.
+    let routines = Arc::new(crate::routines::RoutineService::new(
+        crate::routines::RoutineStore::new(shared.db.clone(), project.clone()),
+        agents.clone(),
+        workflows.clone(),
     ));
     let chatgpt = Arc::new(crate::config::chatgpt_login::ChatGptLoginService::new(
         shared.db.clone(),
@@ -385,6 +388,7 @@ async fn build_project(
     let routine_runner = Arc::new(crate::routines::RoutineRunner::new(
         routines.clone(),
         agents.clone(),
+        workflows.clone(),
         environments.clone(),
         opened.store.clone(),
         connected_vendors.clone(),

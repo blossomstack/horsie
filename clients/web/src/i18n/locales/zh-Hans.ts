@@ -1042,6 +1042,10 @@ const zhHans: typeof en = {
     namePlaceholder: "nightly-triage",
     descriptionPlaceholder: "这个例行任务是做什么的",
     chooseAgent: "选择一个智能体…",
+    runs: "运行",
+    chooseWorkflow: "选择一个工作流…",
+    workflowHint:
+      "每次触发都会启动这个工作流的一次运行，并把下面的提示词作为它的输入。每个步骤都自带智能体预设。",
     agentHint: "例行任务会使用该智能体的模型、技能与记忆。这些请在“智能体”页面编辑。",
     environmentHint:
       "每次运行发生的地方。若某次运行的环境已不存在 —— 运行时离线、环境被删除 —— 该次运行会失败并在此说明。",

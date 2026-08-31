@@ -8,6 +8,7 @@ import { relativeTime } from "../../lib/format";
 import { askConfirm } from "../../lib/confirm";
 import { RailToggle } from "../../components/rail";
 import { describeSchedule } from "../../lib/schedule";
+import { targetOf } from "../../lib/routineTarget";
 import { useDeleteRoutine, useRoutines } from "../../hooks/useRoutines";
 
 /** What the routine's timer is doing, in one phrase. */
@@ -62,7 +63,7 @@ export function RoutinesPage() {
               key={r.name}
               to={`/routines/${encodeURIComponent(r.name)}`}
               name={r.name}
-              meta={`${r.agent} · ${scheduleLine(r)}`}
+              meta={`${targetOf(r.target).name} · ${scheduleLine(r)}`}
               description={r.description}
               facts={
                 <>

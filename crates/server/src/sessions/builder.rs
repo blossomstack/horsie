@@ -305,14 +305,12 @@ pub async fn build_workflow_spec(
     environment: EnvironmentSpec,
     plugins: Vec<String>,
     run: Arc<crate::sessions::workflow::WorkflowRunSpec>,
+    // Taken rather than assumed: a routine can now start a run, and the origin
+    // is what keeps a routine's sessions out of the session list. Hardcoding
+    // `User` here would have put every scheduled run in the rail.
+    origin: SessionOrigin,
 ) -> Result<SessionSpec, SpecError> {
-    let common = resolve_common(
-        environments,
-        environment,
-        Some(plugins),
-        SessionOrigin::User,
-    )
-    .await?;
+    let common = resolve_common(environments, environment, Some(plugins), origin).await?;
     Ok(SessionSpec {
         kind: SessionKind::Workflow { run },
         runtime: common.runtime,

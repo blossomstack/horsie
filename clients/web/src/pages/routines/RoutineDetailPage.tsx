@@ -1,4 +1,5 @@
 import { ArrowLeft, Pencil, Play } from "lucide-react";
+import { targetOf } from "../../lib/routineTarget";
 import { Link, useParams } from "react-router-dom";
 import { StatusDot } from "../../components/StatusBadge";
 import { ApiRequestError } from "../../api/client";
@@ -46,6 +47,7 @@ export function RoutineDetailPage() {
     }
   };
 
+  const target = targetOf(routine.target);
   return (
     <div className="flex h-full flex-col" data-testid="routine-detail-page">
       <div className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
@@ -90,13 +92,14 @@ export function RoutineDetailPage() {
           )}
 
           <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
-            <dt className="text-faint">{t("routines.agent")}</dt>
+            <dt className="text-faint">
+              {t(
+                target.kind === "agent" ? "routines.agent" : "channel.workflow",
+              )}
+            </dt>
             <dd className="text-legend">
-              <Link
-                className="hover:underline"
-                to={`/agents/${encodeURIComponent(routine.agent)}/edit`}
-              >
-                {routine.agent}
+              <Link className="hover:underline" to={target.to}>
+                {target.name}
               </Link>
             </dd>
             <dt className="text-faint">{t("channel.environment")}</dt>

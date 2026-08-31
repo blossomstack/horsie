@@ -1082,6 +1082,10 @@ const en = {
     namePlaceholder: "nightly-triage",
     descriptionPlaceholder: "What this routine is for",
     chooseAgent: "Choose an agent\u2026",
+    runs: "Runs",
+    chooseWorkflow: "Choose a workflow\u2026",
+    workflowHint:
+      "Every firing starts a run of this workflow, handed the prompt below as its input. Each step brings its own agent preset.",
     agentHint:
       "The routine runs with this agent\u2019s model, skills and memory. Edit those on the Agents page.",
     environmentHint:

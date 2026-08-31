@@ -94,13 +94,10 @@ impl Resource for Workflows {
                 "delete",
                 Method::Delete,
                 "/workflows/{name}",
-                "Delete a workflow. Its past runs are ordinary sessions and stay \
-             readable.",
+                "Delete a workflow. Refused while a routine runs it. Its past \
+             runs are ordinary sessions and stay readable.",
                 Expose::ApiAndTool,
-                |s: Arc<ProjectServices>, i: NameRef| async move {
-                    s.workflows.delete(&i.name).await?;
-                    Ok::<(), ControlError>(())
-                },
+                |s: Arc<ProjectServices>, i: NameRef| async move { delete(&s, &i.name).await },
             )
             .no_content(),
             op(
@@ -115,6 +112,29 @@ impl Resource for Workflows {
             .created(),
         ]
     }
+}
+
+/// Refused while a routine runs this workflow.
+///
+/// The twin of the same guard on `agents.delete`, and there for the same
+/// reason: a routine's whole configuration is the thing it points at, so
+/// deleting that out from under it turns a scheduled job into a timer that
+/// fails every firing — visible only in `last_error`, on a page nobody has
+/// open.
+async fn delete(services: &ProjectServices, name: &str) -> Result<(), ControlError> {
+    let used_by = services
+        .routines
+        .using_workflow(name)
+        .await
+        .map_err(|e| ControlError::Internal(e.to_string()))?;
+    if !used_by.is_empty() {
+        return Err(ControlError::Conflict {
+            code: "workflow_in_use".to_string(),
+            message: format!("routines still use this workflow: {}", used_by.join(", ")),
+        });
+    }
+    services.workflows.delete(name).await?;
+    Ok(())
 }
 
 async fn run_workflow(
@@ -141,6 +161,7 @@ async fn run_workflow(
         req.environment,
         resolved.plugins,
         resolved.run,
+        crate::sessions::spec::SessionOrigin::User,
     )
     .await?;
     // Checked on the *resolved* vendor: a named environment carries its own,

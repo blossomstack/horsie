@@ -7,7 +7,9 @@ use crate::error::CliError;
 use crate::server_client::ServerClient;
 use crate::session::relative;
 use horsie_models::now_ms;
-use horsie_models::routines::{RoutineRunResponse, RoutineSchedule, RoutineView, Weekday};
+use horsie_models::routines::{
+    RoutineRunResponse, RoutineSchedule, RoutineTarget, RoutineView, Weekday,
+};
 
 pub async fn list(server: &str, project: Option<&str>) -> Result<(), CliError> {
     let routines = ServerClient::new(server, project)
@@ -92,19 +94,31 @@ fn enabled_label(enabled: bool) -> &'static str {
     if enabled { "yes" } else { "no" }
 }
 
+/// What a routine runs, said in one column.
+///
+/// Prefixed rather than bare: "reviewer" and "nightly-release" are both slugs,
+/// and a column of bare names cannot say which kind each one is — which is the
+/// first thing you need to know to guess what a firing will produce.
+fn target_label(target: &RoutineTarget) -> String {
+    match target {
+        RoutineTarget::Agent(a) => format!("agent {}", a.agent),
+        RoutineTarget::Workflow(w) => format!("workflow {}", w.workflow),
+    }
+}
+
 fn render_routine_table(routines: &[RoutineView], now: u64) -> String {
     if routines.is_empty() {
         return "no routines\n".to_string();
     }
     let mut out = format!(
-        "{:<20} {:<14} {:<12} {:<7} {:<10} DESCRIPTION\n",
-        "NAME", "AGENT", "SCHEDULE", "ENABLED", "NEXT RUN"
+        "{:<20} {:<22} {:<12} {:<7} {:<10} DESCRIPTION\n",
+        "NAME", "RUNS", "SCHEDULE", "ENABLED", "NEXT RUN"
     );
     for r in routines {
         out.push_str(&format!(
-            "{:<20} {:<14} {:<12} {:<7} {:<10} {}\n",
+            "{:<20} {:<22} {:<12} {:<7} {:<10} {}\n",
             truncate(&r.name, 20),
-            truncate(&r.agent, 14),
+            truncate(&target_label(&r.target), 22),
             truncate(&schedule_label(&r.schedule), 12),
             enabled_label(r.enabled),
             r.next_run_at_ms
@@ -118,10 +132,10 @@ fn render_routine_table(routines: &[RoutineView], now: u64) -> String {
 
 fn render_routine_detail(r: &RoutineView, now: u64) -> String {
     let mut out = format!(
-        "name        {}\ndescription {}\nagent       {}\nschedule    {}\nenabled     {}\nnext run    {}\nlast run    {}\n",
+        "name        {}\ndescription {}\nruns        {}\nschedule    {}\nenabled     {}\nnext run    {}\nlast run    {}\n",
         r.name,
         r.description,
-        r.agent,
+        target_label(&r.target),
         schedule_label(&r.schedule),
         enabled_label(r.enabled),
         r.next_run_at_ms
@@ -151,8 +165,8 @@ fn render_invoke(base: &str, session_id: &str) -> String {
 mod tests {
     use super::*;
     use horsie_models::routines::{
-        DailySchedule, EverySchedule, ManualSchedule, MonthlySchedule, OnceSchedule, Weekday,
-        WeeklySchedule, YearlySchedule,
+        AgentTarget, DailySchedule, EverySchedule, ManualSchedule, MonthlySchedule, OnceSchedule,
+        Weekday, WeeklySchedule, WorkflowTarget, YearlySchedule,
     };
 
     fn routine(name: &str) -> RoutineView {
@@ -165,7 +179,9 @@ mod tests {
             ),
             name: name.into(),
             description: "nightly review".into(),
-            agent: "reviewer".into(),
+            target: RoutineTarget::Agent(AgentTarget {
+                agent: "reviewer".into(),
+            }),
             prompt: "Review open PRs.".into(),
             schedule: RoutineSchedule::Every(EverySchedule {
                 interval_secs: 3600,
@@ -178,6 +194,23 @@ mod tests {
             created_at: "1".into(),
             updated_at: "1".into(),
         }
+    }
+
+    /// Two slugs of the same shape mean different things, and the column has to
+    /// say which — "nightly-release" reads as either until it is labelled.
+    #[test]
+    fn the_runs_column_says_which_kind_of_target_it_is() {
+        let mut wf = routine("release");
+        wf.target = RoutineTarget::Workflow(WorkflowTarget {
+            workflow: "ship-it".into(),
+        });
+        let out = render_routine_table(&[routine("nightly"), wf], 1_000_000);
+        assert!(out.contains("agent reviewer"), "{out}");
+        assert!(out.contains("workflow ship-it"), "{out}");
+        assert!(
+            render_routine_detail(&routine("nightly"), 0).contains("runs        agent reviewer"),
+            "the detail view names it too",
+        );
     }
 
     #[test]

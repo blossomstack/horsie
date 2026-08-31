@@ -8,6 +8,8 @@ import { Weekday } from "../../api/types";
 import { PopoverMenu } from "../../components/PopoverMenu";
 import { useEnvironmentPicker } from "../../components/configPickers";
 import { useAgents } from "../../hooks/useAgents";
+import { useWorkflows } from "../../hooks/useWorkflows";
+import { cn } from "../../lib/cn";
 import { useEnvironmentChannel } from "../../hooks/useEnvironmentChannel";
 import {
   useCreateRoutine,
@@ -85,10 +87,24 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
   const update = useUpdateRoutine();
   const navigate = useNavigate();
   const { data: agents } = useAgents();
+  const { data: workflows } = useWorkflows();
 
   const [routineName, setRoutineName] = useState(initial?.name ?? "");
   const [description, setDescription] = useState(initial?.description ?? "");
-  const [agent, setAgent] = useState(initial?.agent ?? "");
+  // Which kind of thing this routine runs, and the slug of it. Two pieces of
+  // state rather than the union itself: a form is edited a field at a time, and
+  // switching kind must not throw away what was typed in the other — the union
+  // is assembled at save, where "neither" cannot survive the check anyway.
+  const [targetKind, setTargetKind] = useState<"Agent" | "Workflow">(
+    initial?.target.type ?? "Agent",
+  );
+  const [agent, setAgent] = useState(
+    initial?.target.type === "Agent" ? initial.target.value.agent : "",
+  );
+  const [workflow, setWorkflow] = useState(
+    initial?.target.type === "Workflow" ? initial.target.value.workflow : "",
+  );
+  const target = targetKind === "Agent" ? agent : workflow;
   // The same channel the new-session bar uses, rendered as a field below.
   const environment = useEnvironmentChannel(initial?.environment);
   const environmentPicker = useEnvironmentPicker(environment);
@@ -168,7 +184,7 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
   const canSave =
     !busy &&
     routineName.trim() !== "" &&
-    agent !== "" &&
+    target !== "" &&
     environment.chosen &&
     prompt.trim() !== "" &&
     scheduleValid;
@@ -225,7 +241,10 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
     const body: RoutineInput = {
       name: routineName.trim(),
       description: description.trim() || undefined,
-      agent,
+      target:
+        targetKind === "Agent"
+          ? { type: "Agent", value: { agent } }
+          : { type: "Workflow", value: { workflow } },
       environment: environment.spec,
       prompt: prompt.trim(),
       schedule: buildSchedule(),
@@ -292,25 +311,75 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
             />
           </label>
 
-          <label className="block">
-<RowLabel>{t("routines.agent")}</RowLabel>
-            <select
-              className="field w-full"
-              value={agent}
-              onChange={(e) => setAgent(e.target.value)}
-              data-testid="routine-agent-select"
+          <div>
+            <RowLabel>{t("routineEdit.runs")}</RowLabel>
+            {/* Which kind first, then which one. A single list of everything
+                would put two namespaces in one menu, where "release" could be
+                either and the reader has no way to tell. */}
+            <div
+              className="mb-2 flex w-fit overflow-hidden rounded-[var(--radius-chip)] bg-raised"
+              role="radiogroup"
+              aria-label={t("routineEdit.runs")}
             >
-              <option value="">{t("routineEdit.chooseAgent")}</option>
-              {(agents ?? []).map((a) => (
-                <option key={a.name} value={a.name}>
-                  {a.name} · {a.model}
-                </option>
+              {(["Agent", "Workflow"] as const).map((k) => (
+                <button
+                  key={k}
+                  type="button"
+                  role="radio"
+                  aria-checked={targetKind === k}
+                  className={cn(
+                    "px-2 py-1 text-xs",
+                    targetKind === k
+                      ? "bg-panel text-legend shadow-[var(--float)]"
+                      : "text-dim hover:text-legend",
+                  )}
+                  data-testid={`routine-target-${k.toLowerCase()}`}
+                  onClick={() => setTargetKind(k)}
+                >
+                  {t(k === "Agent" ? "routines.agent" : "channel.workflow")}
+                </button>
               ))}
-            </select>
-            <span className="mt-1 block text-[0.6875rem] text-faint">
-{t("routineEdit.agentHint")}
-            </span>
-          </label>
+            </div>
+            {targetKind === "Agent" ? (
+              <label className="block">
+                <select
+                  className="field w-full"
+                  value={agent}
+                  onChange={(e) => setAgent(e.target.value)}
+                  data-testid="routine-agent-select"
+                >
+                  <option value="">{t("routineEdit.chooseAgent")}</option>
+                  {(agents ?? []).map((a) => (
+                    <option key={a.name} value={a.name}>
+                      {a.name} · {a.model}
+                    </option>
+                  ))}
+                </select>
+                <span className="mt-1 block text-[0.6875rem] text-faint">
+                  {t("routineEdit.agentHint")}
+                </span>
+              </label>
+            ) : (
+              <label className="block">
+                <select
+                  className="field w-full"
+                  value={workflow}
+                  onChange={(e) => setWorkflow(e.target.value)}
+                  data-testid="routine-workflow-select"
+                >
+                  <option value="">{t("routineEdit.chooseWorkflow")}</option>
+                  {(workflows ?? []).map((w) => (
+                    <option key={w.name} value={w.name}>
+                      {w.name} · {t("newSession.stepCount", { count: w.steps.length })}
+                    </option>
+                  ))}
+                </select>
+                <span className="mt-1 block text-[0.6875rem] text-faint">
+                  {t("routineEdit.workflowHint")}
+                </span>
+              </label>
+            )}
+          </div>
 
           <div>
             <PopoverMenu
