@@ -112,6 +112,16 @@ struct AgentDocument {
     status: String,
     output: Option<String>,
     error: Option<String>,
+    /// The saved agent preset this agent's settings were flattened from;
+    /// absent when they were supplied inline at creation.
+    ///
+    /// A preset is flattened at creation — every field below is already the
+    /// resolved value — so this is not how a client learns what the agent
+    /// runs under. It is how a client learns what was *chosen*: a session
+    /// created by picking "reviewer" was configured by one decision, and
+    /// redrawing it as six independent channels reports something that never
+    /// happened.
+    preset: Option<String>,
     /// The model this agent runs under: the main agent's, a step's own
     /// preset, or a subagent's inherited tree root.
     model: String,

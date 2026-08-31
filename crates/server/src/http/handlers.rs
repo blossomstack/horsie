@@ -414,6 +414,10 @@ pub async fn get_agent(
         .find(|m| m.alias == detail.settings.model)
         .and_then(|m| m.context_window);
 
+    // Read before the settings are taken apart below: `source` names the
+    // preset the rest of these fields were flattened from.
+    let preset = detail.settings.source.preset().map(str::to_string);
+
     let agent = AgentDocument {
         id: agent_id,
         parent: detail.entry.parent.map(|id| id.to_string()),
@@ -423,6 +427,7 @@ pub async fn get_agent(
         status: detail.entry.status.as_wire().to_string(),
         output: detail.output,
         error: detail.entry.error,
+        preset,
         model: detail.settings.model,
         mcp_servers: detail.settings.mcp_servers,
         memory_spaces: detail.settings.memory_spaces,

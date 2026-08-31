@@ -559,6 +559,10 @@ const zhHans: typeof en = {
   modelChannel: {
     models: "模型",
     agents: "智能体",
+    resolved: "运行配置",
+    presetGone: "{{agent}} — 已删除",
+    presetGoneHint:
+      "该预设已不存在。会话仍保留创建时的设置（下方已冻结），但预设本身无法打开或再次使用。",
   },
 
   workflowChannel: {

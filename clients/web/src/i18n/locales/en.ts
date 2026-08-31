@@ -571,6 +571,11 @@ const en = {
   modelChannel: {
     models: "Models",
     agents: "Agents",
+    /** The heading over what a created session's preset resolved to. */
+    resolved: "Runs with",
+    presetGone: "{{agent}} \u2014 deleted",
+    presetGoneHint:
+      "This preset no longer exists. The session keeps the settings it was created with \u2014 they are frozen below \u2014 but the preset itself cannot be opened or reused.",
   },
 
   workflowChannel: {

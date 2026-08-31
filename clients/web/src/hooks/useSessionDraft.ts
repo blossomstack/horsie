@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import type {
+  AgentDocument,
   AgentInvokeRequest,
   ArtifactRef,
   CreateSessionRequest,
   EnvironmentSpec,
   EnvironmentView,
+  SessionDetail,
   WorkflowRunRequest,
 } from "../api/types";
 import {
@@ -409,5 +411,110 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
     buildRequest,
     buildAgentRequest,
     buildRunRequest,
+  };
+}
+
+/**
+ * A created session's configuration, in the shape the draft row already reads.
+ *
+ * Not a draft — every setter is inert. It exists so one function builds the
+ * channel row for both surfaces: `useConfigPickers(useFrozenDraft(…), "frozen")`
+ * produces the same keys, in the same order, showing the same lists as the
+ * new-session row, with the controls turned off.
+ *
+ * The alternative — a second hook that assembles its own readouts — is what
+ * used to be here, and the two pictures drifted apart exactly as you would
+ * expect: the frozen one flattened every list to a comma-joined string and
+ * dropped any channel that held nothing, so a session deliberately narrowed to
+ * no skills was indistinguishable from one nobody had narrowed.
+ *
+ * Every value is the session's own, never today's definition of what it names.
+ * A preset is flattened at creation, so an edit since then does not describe
+ * this session; an environment deleted since then is still where it runs.
+ */
+export function useFrozenDraft(
+  detail: SessionDetail,
+  agent: AgentDocument,
+): ConfigDraft & EnvironmentChannel & AgentChannel & WorkflowChannel {
+  const { data: settings } = useSettings();
+  const { data: workflows } = useWorkflows();
+  const { data: agents } = useAgents();
+  const models = settings?.models ?? [];
+  const card = models.find((m) => m.alias === agent.model);
+
+  // What the session resolved to, presented as the environment channel's own
+  // vocabulary. A predefined one carries its resolved vendor and repos as a
+  // one-entry catalogue, so the picker's read-only summary renders them
+  // without having to re-read a definition that may since have changed.
+  const environment: EnvironmentDraft = detail.environment
+    ? { kind: "named", name: detail.environment }
+    : {
+        kind: "runtime",
+        vendor: detail.vendor,
+        repos: Object.fromEntries(detail.repos.map((url) => [url, ""])),
+      };
+  const environments: EnvironmentView[] = detail.environment
+    ? [
+        {
+          name: detail.environment,
+          description: "",
+          vendor: detail.vendor,
+          repos: detail.repos.map((url) => ({ url })),
+          // The picker reads name, vendor and repos; the rest of the shape is
+          // filled to satisfy the type and never rendered.
+          envVars: [],
+          provision: [],
+          createdAt: "",
+          updatedAt: "",
+        },
+      ]
+    : [];
+
+  const noop = () => {};
+  return {
+    // A run names its workflow; an ordinary session names none, and the key
+    // is then absent exactly as it is on an unconfigured draft.
+    workflow: detail.workflow ?? "",
+    setWorkflow: noop,
+    workflows: (workflows ?? []).map((w) => w.name),
+    // The one decision item 2 is about: a session created by choosing a preset
+    // reports the preset, not the six channels it happened to expand into.
+    agent: agent.preset ?? "",
+    setAgent: noop,
+    agents: (agents ?? []).map((a) => a.name),
+    environment,
+    setEnvironment: noop,
+    environments,
+    // Always, so the popover keeps its shape. "Repos — none" is a true
+    // statement about every session, including one on a vendor that could
+    // never have had any, and a section that comes and goes is the thing this
+    // change exists to stop.
+    provisions: true,
+    // Frozen, the repo list is read out rather than picked, so there is no
+    // catalogue to go and connect.
+    githubConnected: true,
+    model: agent.model,
+    setModel: noop,
+    // Session-wide, unlike the rest: the bundle set is provisioned for the
+    // whole session rather than per agent, and `SessionDetail` is where it
+    // lives.
+    skills: new Set(detail.plugins),
+    setSkills: noop,
+    // The same map the draft's MCP picker reads: server name → the tools in
+    // scope, `null` meaning the whole server including ones it gains later.
+    // That distinction is the point of the shape, so the frozen row keeps it
+    // rather than flattening to a set of names.
+    mcp: new Map(agent.mcpServers.map((s) => [s.name, s.tools ?? null])),
+    setMcp: noop,
+    memorySpaces: new Set(agent.memorySpaces),
+    setMemorySpaces: noop,
+    // Absent is the server's default set, and says so — which is what tells
+    // you the tools were *not* the reason a call was refused.
+    tools: agent.allowedTools ? new Set(agent.allowedTools) : null,
+    setTools: noop,
+    thinkingEffort: agent.thinkingEffort ?? "",
+    setThinkingEffort: noop,
+    thinkingEfforts: card?.thinkingEfforts ?? [],
+    modelDefaultThinkingEffort: card?.thinkingEffort ?? "",
   };
 }

@@ -1,4 +1,4 @@
-import { projectRoot } from "./helpers";
+import { projectRoot, sendMessage } from "./helpers";
 // Group N — agent presets: the /agents page lists, edits, and deletes a
 // preset created through the API (the model alias comes from the harness's
 // seeded settings, since save-time validation requires a configured model).
@@ -60,6 +60,62 @@ test("N1: agents page lists, edits, and deletes an agent", async ({
   await page.getByTestId("delete-agent-e2e-agent").click();
   await page.getByTestId("confirm-accept").click();
   await expect(page.getByTestId("agent-row")).toHaveCount(0);
+});
+
+/**
+ * Item 2, end to end: the preset a session was invoked with has to survive the
+ * round trip and come back on the agent document, or the created session can
+ * only be drawn as the settings the preset happened to expand into.
+ *
+ * The whole path is under test here in a way no unit test reaches: the server
+ * records `AgentSource::Preset`, `GET /agents/:aid` reports it, and the frozen
+ * row collapses to it.
+ */
+test("N7: a session invoked from a preset reports the preset, not its settings", async ({
+  page,
+  appBase,
+  apiBase,
+  mock,
+}) => {
+  const cfg = (await (
+    await page.request.get(`${apiBase}/config`)
+  ).json()) as { models: { alias: string }[] };
+  const alias = cfg.models[0]?.alias;
+  const res = await page.request.post(`${apiBase}/agents`, {
+    data: { name: "e2e-invoked", model: alias, description: "invoked by e2e" },
+  });
+  expect(res.status()).toBe(201);
+
+  await mock.queueText("on it");
+  await page.goto(appBase);
+  // A preset is chosen from the Model key, as the mutually-exclusive
+  // alternative to naming a model directly.
+  await page.getByTestId("config-model").click();
+  await page
+    .locator('[data-testid="agent-option"][data-value="e2e-invoked"]')
+    .click();
+  await expect(page.getByTestId("config-model")).toHaveAttribute(
+    "aria-label",
+    "Model — e2e-invoked",
+  );
+  await sendMessage(page, "hello from a preset");
+
+  const bar = page.getByTestId("session-config-bar");
+  await expect(bar).toHaveAttribute("data-mode", "locked");
+  await expect(page.getByTestId("config-model")).toHaveAttribute(
+    "aria-label",
+    "Model — e2e-invoked",
+  );
+  // The channels the preset supplied are not separate decisions, so the row
+  // does not redraw them as separate keys.
+  await expect(page.getByTestId("config-mcp")).toHaveCount(0);
+  await expect(page.getByTestId("config-memory")).toHaveCount(0);
+
+  // Collapsing must not hide: the settings are inside the one key.
+  await page.getByTestId("config-model").click();
+  await expect(page.getByTestId("resolved-model")).toHaveText(alias!);
+
+  await page.request.delete(`${apiBase}/agents/e2e-invoked`);
 });
 
 test("N2: the sidebar links to the agents page", async ({ page, appBase }) => {

@@ -557,6 +557,10 @@ const zhHant: typeof en = {
   modelChannel: {
     models: "模型",
     agents: "智慧代理",
+    resolved: "執行組態",
+    presetGone: "{{agent}} — 已刪除",
+    presetGoneHint:
+      "此預設已不存在。工作階段仍保留建立時的設定（下方已凍結），但預設本身無法開啟或再次使用。",
   },
 
   workflowChannel: {
