@@ -30,6 +30,7 @@ pub mod routines;
 pub mod runtime_vendors;
 pub mod sessions;
 pub mod toolbox;
+pub mod tools;
 pub mod workflows;
 
 /// One manageable noun and everything you can do to it.
@@ -62,6 +63,7 @@ pub fn resources() -> Vec<Box<dyn Resource>> {
         Box::new(runtime_vendors::RuntimeVendors),
         Box::new(memory_spaces::MemorySpaces),
         Box::new(memories::Memories),
+        Box::new(tools::Tools),
     ]
 }
 

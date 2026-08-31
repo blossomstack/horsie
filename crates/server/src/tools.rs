@@ -237,7 +237,14 @@ fn control_group() -> ToolGroupView {
             .into_iter()
             .map(|(resource, writes)| ToolView {
                 name: control_tool_name(resource),
-                description: format!("Read and manage this server's {resource}."),
+                // Read from the same fact the access badge is: a resource with
+                // no write action cannot be managed, and saying it can is the
+                // one thing a one-line description has room to get wrong.
+                description: if writes {
+                    format!("Read and manage this server's {resource}.")
+                } else {
+                    format!("Read this server's {resource}.")
+                },
                 access: if writes {
                     ToolAccess::Write
                 } else {

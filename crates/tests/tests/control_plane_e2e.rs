@@ -159,6 +159,19 @@ impl Harness {
         (status, res.json().await.unwrap_or(serde_json::Value::Null))
     }
 
+    /// For the handful of routes that are not a project's contents. `path` is
+    /// absolute from the origin.
+    async fn get_unscoped(&self, path: &str) -> (u16, serde_json::Value) {
+        let res = self
+            .client
+            .get(format!("http://{}{path}", self.addr))
+            .send()
+            .await
+            .unwrap();
+        let status = res.status().as_u16();
+        (status, res.json().await.unwrap_or(serde_json::Value::Null))
+    }
+
     /// Poll the transcript until the turn's closing text lands.
     ///
     /// Never `wait_status(…, "Idle")`: a session reports `Idle` when
@@ -237,6 +250,35 @@ async fn the_routines_tool_reads_through_to_the_service() {
     let (status, routines) = h.get("/routines").await;
     assert_eq!(status, 200);
     assert_eq!(routines.as_array().map(Vec::len), Some(0));
+}
+
+/// The whole point of the resource: an agent asked to narrow a preset can find
+/// out what a legal tool name is instead of guessing one. A guess that misses
+/// is not an error — an unknown name is passed through ungoverned — so the only
+/// symptom used to be a preset quietly narrower than intended.
+#[tokio::test]
+async fn the_tools_tool_answers_the_names_a_selection_takes() {
+    let mock = MockLlmServer::builder().build().await;
+    mock.queue_tool_call("horsie_tools", serde_json::json!({"action": "list"}));
+    mock.queue_response("bash is one of them");
+    let h = Harness::start(&mock).await;
+
+    let id = h.session(true, "what tools can a preset name?").await;
+    h.wait_for_reply(&id, "bash is one of them").await;
+
+    // The same table the browser reads, at the address it reads it from: the
+    // tool mounts no route of its own.
+    let (status, catalog) = h.get_unscoped("/api/tools").await;
+    assert_eq!(status, 200);
+    let names: Vec<String> = catalog["groups"]
+        .as_array()
+        .expect("groups")
+        .iter()
+        .flat_map(|g| g["tools"].as_array().expect("tools").iter())
+        .map(|t| t["name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(names.iter().any(|n| n == "bash"), "{names:?}");
+    assert!(names.iter().any(|n| n == "horsie_tools"), "{names:?}");
 }
 
 #[tokio::test]
