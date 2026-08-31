@@ -25,11 +25,13 @@ test("N1: agents page lists, edits, and deletes an agent", async ({
   await expect(row).toHaveCount(1);
   await expect(row).toContainText("e2e-agent");
   await expect(row).toContainText("from e2e");
-  await expect(row).toContainText(alias);
+  // The model is not on the row any more — a roster row is a name and what it
+  // is for. It reads in the panel, below.
+  await expect(row).not.toContainText(alias);
 
   // The row opens the preset beside the roster, read-only — the roster stays
-  // in view, which is the whole point of choosing one from a list. Editing is
-  // a second act, and it takes the width.
+  // in view, which is the whole point of choosing one from a list. Editing
+  // happens in the same panel, so it stays in view for that too.
   await row.getByRole("link").click();
   await expect(page.getByTestId("agent-detail")).toBeVisible();
   await expect(page.getByTestId("agent-row")).toHaveAttribute(
@@ -42,6 +44,18 @@ test("N1: agents page lists, edits, and deletes an agent", async ({
 
   await page.getByTestId("edit-agent").click();
   await expect(page.getByTestId("agent-edit-page")).toBeVisible();
+  // The form is the panel, not the page: the roster is still beside it and
+  // still knows which preset is being worked on.
+  await expect(page.getByTestId("agents-page")).toBeVisible();
+  await expect(page.getByTestId("agent-row")).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  // Backing out returns to the preset, not to a roster with nothing chosen.
+  await page.getByTestId("cancel-agent-button").click();
+  await expect(page.getByTestId("agent-detail")).toBeVisible();
+
+  await page.getByTestId("edit-agent").click();
   await expect(page.getByTestId("agent-name-input")).toBeDisabled();
   await page.getByTestId("agent-description-input").fill("edited");
   // The field that actually reaches the model. A preset used to gate what an
@@ -55,10 +69,13 @@ test("N1: agents page lists, edits, and deletes an agent", async ({
   await expect(page.getByTestId("agent-tunable")).not.toBeChecked();
   await page.getByTestId("agent-tunable").check();
   await page.getByTestId("save-agent-button").click();
-  await page.waitForURL((url) => url.pathname === projectRoot() + "/agents");
+  // Saving lands on what was just saved, so reading it back is not two clicks.
+  await page.waitForURL(
+    (url) => url.pathname === projectRoot() + "/agents/e2e-agent",
+  );
+  await expect(page.getByTestId("agent-detail")).toBeVisible();
   await expect(page.getByTestId("agent-row")).toContainText("edited");
 
-  await page.getByTestId("agent-row").getByRole("link").click();
   await page.getByTestId("edit-agent").click();
   await expect(page.getByTestId("agent-instructions-input")).toHaveValue(
     "Always end every reply with the word PELICAN.",

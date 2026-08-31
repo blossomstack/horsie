@@ -5,25 +5,28 @@ import { Link } from "react-router-dom";
 /**
  * One entry in a roster: agents, environments, routines, workflows.
  *
- * These four pages render the same thing — a named item, what it is set to,
- * a description, some counts, and a way to delete it — and each had drifted
- * into its own dialect. The names were mono on two pages and the reading face
- * on the other two; the delete control was a `key-icon` here, a `key-danger`
- * key there, and a hand-rolled `rounded-chip p-1.5` on the third, at three
- * different icon sizes; the identity line was baseline-aligned on two and
- * centred on the rest. None of that was a decision anybody made — it is what
- * four pages written on four different days look like.
+ * These four pages render the same thing — a named item, a description, and a
+ * way to delete it — and each had drifted into its own dialect. The names were
+ * mono on two pages and the reading face on the other two; the delete control
+ * was a `key-icon` here, a `key-danger` key there, and a hand-rolled
+ * `rounded-chip p-1.5` on the third, at three different icon sizes. None of
+ * that was a decision anybody made — it is what four pages written on four
+ * different days look like.
  *
  * So the row is a component, not a pattern. A fifth roster gets it for free,
  * and a change to the language happens once.
+ *
+ * What a row may say is deliberately short: a name, a description, and at most
+ * one line of fact. The counts and stamps that used to hang off every row
+ * ("3 skills", "2 memory", "ran 2h ago") made a 20rem column of five-line
+ * entries you had to read rather than scan — and all of it is in the panel
+ * beside the roster, one click away.
  */
 export function RosterRow({
   to,
   name,
   meta,
   description,
-  facts,
-  aside,
   onDelete,
   deleteLabel,
   deleteTestId,
@@ -34,15 +37,10 @@ export function RosterRow({
   /** Where the name goes. */
   to: string;
   name: string;
-  /** What it is set to — the model, the vendor, the schedule. On its own line
-   * under the name, in the label voice, because it qualifies the name rather
-   * than describing the thing. */
+  /** The one fact worth scanning for, if there is one — a routine's schedule.
+   * Not "what it is set to": that belongs in the panel. */
   meta?: ReactNode;
   description?: string;
-  /** Counts and stamps under the description: "3 skills", "ran 2h ago". */
-  facts?: ReactNode;
-  /** Joined onto the end of the meta line — a relative time, usually. */
-  aside?: ReactNode;
   onDelete: () => void;
   deleteLabel: string;
   deleteTestId: string;
@@ -62,25 +60,16 @@ export function RosterRow({
     >
       <Link to={to} className="min-w-0 flex-1">
         {/* The name gets the line to itself. These rosters live in a 20rem
-            column now, and `meta` beside the name was eating it: a workflow
+            column now, and anything beside the name was eating it: a workflow
             called `nightly-release` read as `nightly…` next to "2 steps ·
             starts at build". A name is what you scan a roster for. */}
         <span className="item-title block truncate">{name}</span>
-        {(meta || aside) && (
-          <span className="legend mt-0.5 block truncate">
-            {meta}
-            {meta && aside ? " · " : ""}
-            {aside}
-          </span>
-        )}
         {description && (
           <span className="mt-0.5 block truncate text-xs text-dim">
             {description}
           </span>
         )}
-        {facts && (
-          <span className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5">{facts}</span>
-        )}
+        {meta && <span className="legend mt-0.5 block truncate">{meta}</span>}
       </Link>
       <button
         className="key-icon shrink-0 hover:!bg-red-quiet hover:!text-red-ink"

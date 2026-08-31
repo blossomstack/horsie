@@ -6,8 +6,15 @@ import { RosterRow } from "../../components/RosterRow";
 import { askConfirm } from "../../lib/confirm";
 import { useAgents, useDeleteAgent } from "../../hooks/useAgents";
 import { AgentDetail } from "./AgentDetail";
+import { AgentEditPage } from "./AgentEditPage";
 
-export function AgentsPage() {
+/**
+ * The roster, and beside it whichever agent is selected — read, or being
+ * edited. `editing` is set by the `new` and `:name/edit` routes: the form is
+ * the same width as the readout it replaces, so choosing another preset is
+ * still one click away while you fill it in.
+ */
+export function AgentsPage({ editing }: { editing?: boolean }) {
   const { t } = useTranslation();
   const { name } = useParams<{ name: string }>();
   const { data: agents, isLoading, isError } = useAgents();
@@ -39,7 +46,9 @@ export function AgentsPage() {
         </button>
       }
       detail={
-        selected ? (
+        editing ? (
+          <AgentEditPage />
+        ) : selected ? (
           <AgentDetail agent={selected} onDelete={() => void remove(selected.name)} />
         ) : (
           <NothingSelected>{t("agents.pickOne")}</NothingSelected>
@@ -74,28 +83,8 @@ export function AgentsPage() {
             key={a.name}
             to={`/agents/${encodeURIComponent(a.name)}`}
             name={a.name}
-            meta={a.model}
             description={a.description}
             selected={a.name === name}
-            facts={
-              <>
-                {a.plugins.length > 0 && (
-                  <span className="legend">
-                    {t("agents.skillCount", { count: a.plugins.length })}
-                  </span>
-                )}
-                {a.memorySpaces.length > 0 && (
-                  <span className="legend">
-                    {t("agents.memoryCount", { count: a.memorySpaces.length })}
-                  </span>
-                )}
-                {a.mcpServers.length > 0 && (
-                  <span className="legend">
-                    {t("agents.mcpCount", { count: a.mcpServers.length })}
-                  </span>
-                )}
-              </>
-            }
             testId="agent-row"
             nameAttr={{ "data-agent-name": a.name }}
             deleteLabel={t("common.deleteNamed", { name: a.name })}

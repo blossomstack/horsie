@@ -6,8 +6,15 @@ import { RosterRow } from "../../components/RosterRow";
 import { askConfirm } from "../../lib/confirm";
 import { useDeleteEnvironment, useEnvironments } from "../../hooks/useEnvironments";
 import { EnvironmentDetail } from "./EnvironmentDetail";
+import { EnvironmentEditPage } from "./EnvironmentEditPage";
 
-export function EnvironmentsPage() {
+/**
+ * The roster, and beside it whichever environment is selected — read, or being
+ * edited. `editing` is set by the `new` and `:name/edit` routes: the form is
+ * the same width as the readout it replaces, so choosing another environment is
+ * still one click away while you fill it in.
+ */
+export function EnvironmentsPage({ editing }: { editing?: boolean }) {
   const { t } = useTranslation();
   const { name } = useParams<{ name: string }>();
   const { data: environments, isLoading, isError } = useEnvironments();
@@ -37,7 +44,9 @@ export function EnvironmentsPage() {
         </button>
       }
       detail={
-        selected ? (
+        editing ? (
+          <EnvironmentEditPage />
+        ) : selected ? (
           <EnvironmentDetail
             environment={selected}
             onDelete={() => void remove(selected.name)}
@@ -73,22 +82,8 @@ export function EnvironmentsPage() {
             key={e.name}
             to={`/environments/${encodeURIComponent(e.name)}`}
             name={e.name}
-            meta={e.vendor}
             description={e.description}
             selected={e.name === name}
-            facts={
-              <>
-                {e.repos.length > 0 && (
-                  <span className="legend">{e.repos.length} repos</span>
-                )}
-                {e.envVars.length > 0 && (
-                  <span className="legend">{e.envVars.length} env</span>
-                )}
-                {e.provision.length > 0 && (
-                  <span className="legend">{e.provision.length} steps</span>
-                )}
-              </>
-            }
             testId="environment-row"
             nameAttr={{ "data-environment-name": e.name }}
             deleteLabel={t("common.deleteNamed", { name: e.name })}

@@ -169,7 +169,9 @@ function WorkflowEditor() {
         </h1>
         <button
           className="key key-blank key-sm"
-          onClick={() => navigate("/workflows")}
+          onClick={() =>
+            navigate(name ? `/workflows/${encodeURIComponent(name)}` : "/workflows")
+          }
           data-testid="cancel-workflow"
         >
           {t("common.cancel")}

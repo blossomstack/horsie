@@ -12,15 +12,12 @@ import { useEffect } from "react";
 import type { ReactNode } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { useAuthStatus } from "./hooks/useAuth";
-import { AgentEditPage } from "./pages/agents/AgentEditPage";
 import { AgentsPage } from "./pages/agents/AgentsPage";
 import { DeviceApprovalPage } from "./pages/DeviceApprovalPage";
-import { EnvironmentEditPage } from "./pages/environments/EnvironmentEditPage";
 import { EnvironmentsPage } from "./pages/environments/EnvironmentsPage";
 import { InboxPage } from "./pages/inbox/InboxPage";
 import { LoginPage } from "./pages/LoginPage";
 import { NewSessionView } from "./pages/NewSessionView";
-import { RoutineEditPage } from "./pages/routines/RoutineEditPage";
 import { RoutinesPage } from "./pages/routines/RoutinesPage";
 import { WorkflowEditPage } from "./pages/workflows/WorkflowEditPage";
 import { WorkflowsPage } from "./pages/workflows/WorkflowsPage";
@@ -129,30 +126,33 @@ function ProjectApp({ project }: { project: string }) {
               <Route path="inbox" element={<InboxPage />} />
               {/* The roster and what is selected in it are one page, so the
                   name is a parameter of that page rather than a route to
-                  somewhere else. Editing takes the whole width — a form beside
-                  a roster is two things competing for the same attention. */}
+                  somewhere else — and so is editing, which is a third thing the
+                  panel can hold rather than a page you leave the roster for.
+                  The workflow editor is the exception: it has a list and a
+                  panel of its own, and a second roster beside those is one
+                  column too many, so it takes the width. */}
               <Route path="agents" element={<AgentsPage />} />
-              <Route path="agents/new" element={<AgentEditPage />} />
+              <Route path="agents/new" element={<AgentsPage editing />} />
               <Route path="agents/:name" element={<AgentsPage />} />
-              <Route path="agents/:name/edit" element={<AgentEditPage />} />
+              <Route path="agents/:name/edit" element={<AgentsPage editing />} />
               <Route path="environments" element={<EnvironmentsPage />} />
-              <Route path="environments/new" element={<EnvironmentEditPage />} />
+              <Route
+                path="environments/new"
+                element={<EnvironmentsPage editing />}
+              />
               <Route path="environments/:name" element={<EnvironmentsPage />} />
               <Route
                 path="environments/:name/edit"
-                element={<EnvironmentEditPage />}
+                element={<EnvironmentsPage editing />}
               />
               <Route path="workflows" element={<WorkflowsPage />} />
               <Route path="workflows/new" element={<WorkflowEditPage />} />
               <Route path="workflows/:name" element={<WorkflowsPage />} />
               <Route path="workflows/:name/edit" element={<WorkflowEditPage />} />
               <Route path="routines" element={<RoutinesPage />} />
-              <Route path="routines/new" element={<RoutineEditPage />} />
+              <Route path="routines/new" element={<RoutinesPage editing />} />
               <Route path="routines/:name" element={<RoutinesPage />} />
-              <Route
-                path="routines/:name/edit"
-                element={<RoutineEditPage />}
-              />
+              <Route path="routines/:name/edit" element={<RoutinesPage editing />} />
               <Route path="settings" element={<SettingsLayout />}>
                 <Route index element={<Navigate to="models" replace />} />
                 <Route path="models" element={<ModelsSettings />} />

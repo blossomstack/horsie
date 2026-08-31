@@ -2,7 +2,6 @@ import { useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Plus, Trash2 } from "lucide-react";
 import { ApiRequestError } from "../../api/client";
-import { RailToggle } from "../../components/rail";
 import { ReadError } from "../../components/ReadError";
 import type {
   EnvironmentView,
@@ -54,6 +53,12 @@ function EnvironmentForm({ initial }: { initial?: EnvironmentView }) {
   const create = useCreateEnvironment();
   const update = useUpdateEnvironment();
   const navigate = useNavigate();
+  // Cancel and save both land back on the panel this was opened from,
+  // rather than on the roster with nothing selected.
+  const back = () =>
+    navigate(
+      initial ? `/environments/${encodeURIComponent(initial.name)}` : "/environments",
+    );
   const [envName, setEnvName] = useState(initial?.name ?? "");
   const [description, setDescription] = useState(initial?.description ?? "");
   const [vendor, setVendor] = useState(initial?.vendor ?? "");
@@ -120,7 +125,7 @@ function EnvironmentForm({ initial }: { initial?: EnvironmentView }) {
     try {
       if (editing) await update.mutateAsync({ name: envName.trim(), body });
       else await create.mutateAsync(body);
-      navigate("/environments");
+      navigate(`/environments/${encodeURIComponent(envName.trim())}`);
     } catch (e) {
       setError(
         e instanceof ApiRequestError
@@ -132,22 +137,21 @@ function EnvironmentForm({ initial }: { initial?: EnvironmentView }) {
 
   return (
     <div className="flex h-full flex-col" data-testid="environment-edit-page">
-      <header className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 bg-panel px-4 sm:px-6">
-        <RailToggle />
+      <header className="flex h-[var(--header-h)] shrink-0 items-center gap-2 bar-scroll px-6">
         <h1 className="page-title min-w-0 flex-1 truncate">
           {editing
             ? t("agentEdit.editTitle", { name: initial.name })
             : t("environments.new")}
         </h1>
         <button
-          className="key key-blank"
-          onClick={() => navigate("/environments")}
+          className="key key-blank key-sm"
+          onClick={back}
           data-testid="cancel-environment-button"
         >
           {t("common.cancel")}
         </button>
         <button
-          className="key key-go"
+          className="key key-go key-sm"
           disabled={!canSave}
           onClick={handleSave}
           data-testid="save-environment-button"
@@ -157,7 +161,7 @@ function EnvironmentForm({ initial }: { initial?: EnvironmentView }) {
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto" data-popover-boundary>
-        <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-6 sm:px-6">
+        <div className="w-full space-y-6 px-6 py-4">
           <section className="section space-y-4">
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <label className="block">

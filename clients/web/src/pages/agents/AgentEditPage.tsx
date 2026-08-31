@@ -2,7 +2,6 @@ import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ApiRequestError } from "../../api/client";
 import { ConfigFields } from "../../components/SessionConfigBar";
-import { RailToggle } from "../../components/rail";
 import type { AgentView } from "../../api/types";
 import { useAgent, useCreateAgent, useUpdateAgent } from "../../hooks/useAgents";
 import { useAgentDraft } from "../../hooks/useAgentDraft";
@@ -54,6 +53,11 @@ function AgentForm({ initial }: { initial?: AgentView }) {
   const [error, setError] = useState<string | null>(null);
   const draft = useAgentDraft(initial);
   const { t } = useTranslation();
+  // Both ways out of the form land on the panel the preset was being read in.
+  // Returning to the bare roster threw away the selection the person had just
+  // made, so saving an edit and then looking at what you saved was two clicks.
+  const back = () =>
+    navigate(initial ? `/agents/${encodeURIComponent(initial.name)}` : "/agents");
   const busy = create.isPending || update.isPending;
   // Name the requirement rather than just greying the button out: the Model
   // picker reads "Select" much like the optional Skills, MCP and Memory pickers
@@ -72,7 +76,7 @@ function AgentForm({ initial }: { initial?: AgentView }) {
     try {
       if (editing) await update.mutateAsync({ name: agentName.trim(), body });
       else await create.mutateAsync(body);
-      navigate("/agents");
+      navigate(`/agents/${encodeURIComponent(agentName.trim())}`);
     } catch (e) {
       setError(
         e instanceof ApiRequestError ? e.message : t("agentEdit.saveFailed"),
@@ -82,20 +86,19 @@ function AgentForm({ initial }: { initial?: AgentView }) {
 
   return (
     <div className="flex h-full flex-col" data-testid="agent-edit-page">
-      <header className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 bg-panel px-4 sm:px-6">
-        <RailToggle />
+      <header className="flex h-[var(--header-h)] shrink-0 items-center gap-2 bar-scroll px-6">
         <h1 className="page-title min-w-0 flex-1 truncate">
           {editing ? t("agentEdit.editTitle", { name: initial.name }) : t("agents.new")}
         </h1>
         <button
-          className="key key-blank"
-          onClick={() => navigate("/agents")}
+          className="key key-blank key-sm"
+          onClick={back}
           data-testid="cancel-agent-button"
         >
           {t("common.cancel")}
         </button>
         <button
-          className="key key-go"
+          className="key key-go key-sm"
           disabled={!canSave}
           onClick={handleSave}
           data-testid="save-agent-button"
@@ -105,7 +108,7 @@ function AgentForm({ initial }: { initial?: AgentView }) {
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto" data-popover-boundary>
-        <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-6 sm:px-6">
+        <div className="w-full space-y-6 px-6 py-4">
           <section className="section space-y-4">
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <label className="block">

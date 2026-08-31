@@ -54,16 +54,18 @@ function renderPage() {
 }
 
 describe("AgentsPage", () => {
-  it("renders one row per agent with its model and description", async () => {
+  // A row says what this is and nothing else. The model and the channel counts
+  // used to hang off every one of them, which in a 20rem column made a roster
+  // you read rather than scanned — and all of it is in the panel beside it.
+  it("renders one row per agent: the name and the description, and no more", async () => {
     const { findAllByTestId } = renderPage();
     const rows = await findAllByTestId("agent-row");
     expect(rows).toHaveLength(2);
     expect(rows[0].textContent).toContain("reviewer");
-    expect(rows[0].textContent).toContain("sonnet");
     expect(rows[0].textContent).toContain("reviewer description");
-    // English pluralises now that the count runs through the catalogue.
-    expect(rows[0].textContent).toContain("1 skill");
-    expect(rows[1].textContent).toContain("haiku");
+    expect(rows[0].textContent).not.toContain("sonnet");
+    expect(rows[0].textContent).not.toContain("skill");
+    expect(rows[1].textContent).toContain("fixer");
   });
 
   it("deletes the named agent once the confirm is accepted", async () => {
