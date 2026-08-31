@@ -107,7 +107,7 @@ const zhHant: typeof en = {
     noSuch: "工作階段不存在",
     loadFailed: "無法載入此工作階段",
     sessionId: "工作階段 ID",
-    goneHint: "它已被刪除，或從未存在過。你在此輸入的內容無法送達。",
+    goneHint: "它被刪除了，或者從來不存在。",
     readFailed: "讀取失敗。",
     yourSessionsList: "<lnk>你的工作階段</lnk>中列出了現存的項目。",
     thisRun: "此次執行",
@@ -115,19 +115,17 @@ const zhHant: typeof en = {
     confirmDelete: "刪除此工作階段？此操作無法復原。",
     view: "檢視",
     reconnecting: "正在重新連線",
-    reconnectingHint:
-      "已中斷即時推送。執行仍在伺服器上繼續；重新連線後會補播期間遺漏的內容。",
+    reconnectingHint: "即時連線斷開了。正在重新連線並補回錯過的內容。",
     loadingTranscript: "正在載入對話紀錄",
     loadingEarlier: "正在載入較早的訊息",
     scrollUp: "向上捲動查看較早的訊息",
     terminal: "此工作階段已無法執行：{{reason}}",
-    workflowStepHint: "這是一個工作流程步驟。它依據自身定義執行，而非依據訊息。",
+    workflowStepHint: "工作流程步驟按它的定義運作，不看訊息。",
   },
 
   ui: {
     showThinking: {
       label: "顯示思考過程",
-      description: "在對話紀錄中呈現模型的推理步驟。",
     },
   },
 
@@ -194,7 +192,7 @@ const zhHant: typeof en = {
     tokensKept: "保留了 {{retain}} 中的 {{used}} 個 token",
     noWindow: "此模型未宣告上下文視窗，因此沒有可壓縮的額度。",
     nothingToFold:
-      "本工作階段約有 {{used}} 個 token，而一次壓縮會原樣保留最近的 {{retain}} 個 —— 因此之前沒有可摺疊的內容。硬要壓縮只會拿真實訊息換一份摘要，去騰出並不緊缺的空間。",
+      "這個工作階段約 {{used}} tokens，而壓縮會原樣保留最近的 {{retain}} —— 所以前面沒有可以摺疊的內容。",
   },
 
   artifact: {
@@ -248,7 +246,7 @@ const zhHant: typeof en = {
     openTranscript: "開啟 {{label}} 的對話紀錄",
     showSpawned: "顯示 {{label}} 衍生出的內容 —— 已隱藏 {{count}} 個",
     hideSpawned: "隱藏 {{label}} 衍生出的內容",
-    empty: "此工作階段尚未記錄任何智慧代理。它們啟動後，圖會自動繪製。",
+    empty: "這個工作階段還沒有記錄到智慧代理。",
     ariaLabel: "智慧代理關係圖",
     nodeTitle: "{{label}} —— {{kind}}，{{detail}}",
     currentRun: " · 你正在閱讀的這次執行",
@@ -264,7 +262,7 @@ const zhHant: typeof en = {
     thisSession: "本工作階段",
     thisAgent: "此智慧代理",
     sessionCompacted: "工作階段已壓縮",
-    empty: "此工作階段尚無任何進展。智慧代理開始工作後，時間軸會自動繪製。",
+    empty: "這個工作階段還沒有發生任何事。",
     unplaced: "不在時間軸上 —— 沒有紀錄它們的執行時間",
   },
 
@@ -294,7 +292,7 @@ const zhHant: typeof en = {
     showWithCount: "顯示計畫 —— 已完成 {{done}}/{{total}}",
     toggle: "切換智慧代理的計畫",
     toggleWithCount: "切換智慧代理的計畫 —— 共 {{total}} 項，已完成 {{done}} 項",
-    empty: "還沒有計畫。當工作大到需要分步時，智慧代理會在這裡寫下計畫。",
+    empty: "還沒有計畫。",
   },
 
   thinking: {
@@ -307,16 +305,11 @@ const zhHant: typeof en = {
 
   projectsPage: {
     what: "專案",
-    readErrorDesc: "此帳戶的專案。",
-    desc: "每項工作一個專案。專案之間不共用任何內容。",
-    sectionDesc:
-      "此側邊欄中的其他一切都隸屬於某個專案：模型、執行環境、技能、記憶空間、整合、智慧代理與工作階段。新專案從空白開始，憑證也不例外。",
     empty: "還沒有專案。",
     defaultHint: "永遠存在，且無法刪除",
     cannotDelete: "預設專案無法刪除",
     saveName: "儲存名稱",
     newProject: "新增專案",
-    newProjectDesc: "它從空白開始 —— 建立後再為它加入模型與執行環境。",
     namePlaceholder: "這個專案是做什麼的？",
     confirmDelete:
       "刪除專案「{{name}}」？它的工作階段、智慧代理、設定與記憶都會一併刪除，其執行環境也會被銷毀。此操作無法復原。",
@@ -372,15 +365,13 @@ const zhHant: typeof en = {
 
   usage: {
     input: "輸入",
-    inputHint:
-      "完整的提示 token：系統提示、工具定義，以及到目前為止的工作階段歷史。下方的快取讀寫已計入此總數，並非額外。",
+    inputHint: "系統提示詞、工具定義和歷史記錄。快取讀寫已包含在內，不是額外的。",
     output: "輸出",
     outputHint: "模型產生回傳的 token。",
     cacheRead: "快取讀取",
-    cacheReadHint: "由供應商的提示快取以極低價格提供，而非按全價重新處理。",
+    cacheReadHint: "從服務方的提示詞快取讀取，價格更低。",
     cacheWrite: "快取寫入",
-    cacheWriteHint:
-      "本輪以溢價寫入供應商的提示快取 —— 在後續重用它的輪次中以快取讀取的形式回本。",
+    cacheWriteHint: "寫入服務方的提示詞快取，價格更高。",
   },
 
   gauge: {
@@ -394,14 +385,12 @@ const zhHant: typeof en = {
     filling: "正在填滿",
     roomToSpare: "餘裕充足",
     contextWindow: "上下文視窗",
-    windowHint:
-      "主智慧代理上下文中目前載入的 token 數，以及其上下文視窗上限。快取狀態不會減少這個數字 —— 它只影響價格與速度。",
+    windowHint: "主智慧代理內容中已載入的 tokens，相對於它的內容視窗。",
     used: "已使用的上下文視窗",
     compactsAt: "佔用約 {{percent}}% 時自動壓縮",
     thisTurn: "本輪",
     sessionTotal: "工作階段總計",
-    sessionTotalHint:
-      "本工作階段在其承載的所有智慧代理上的全部花費。這是成本，而非上下文佔用 —— 上方的錶盤才是上下文。",
+    sessionTotalHint: "這個工作階段在所有智慧代理上的全部花費。",
   },
 
   entryPanel: {
@@ -412,7 +401,7 @@ const zhHant: typeof en = {
     took: "耗時",
     tookHint: "產生這則訊息的供應商呼叫耗時。",
     message: "訊息",
-    noText: "此項目本身沒有文字 —— 它就是它所觸發的那些工作。",
+    noText: "這個項目本身沒有文字。",
     thinking: "思考",
     toolCalls: "工具呼叫",
     running: "執行中",
@@ -432,22 +421,20 @@ const zhHant: typeof en = {
     lastActivity: "最近活動",
     ended: "結束於",
     runningFor: "已執行",
-    runningForHint: "以目前時刻為準：此智慧代理尚未停止。",
+    runningForHint: "這個智慧代理還沒有停止。",
     took: "耗時",
     tookHint: "從開始到得出此結果之間的時長。",
     context: "上下文",
     inContext: "上下文中",
-    inContextHint: "此智慧代理的模型未設定視窗大小，因此無法給出佔比。",
+    inContextHint: "這個智慧代理的模型沒有設定內容視窗。",
     asOfLastTurn: "截至此智慧代理最近一輪結束時。",
     tokens: "Token",
-    inputHint:
-      "此智慧代理各輪次的完整提示 token。快取讀寫已計入此總數，並非額外。",
+    inputHint: "完整的提示詞 tokens。快取讀寫已包含在內，不是額外的。",
     outputHint: "此智慧代理產生回傳的 token。",
     cacheReadHint: "由供應商的提示快取以折扣價提供。",
     cacheWriteHint: "以溢價寫入供應商的提示快取。",
     withSubtree: "含子樹",
-    withSubtreeHint:
-      "此智慧代理加上它底下的一切：它衍生的子代理、由它分支出的子工作階段，以及它呼叫的任何工作流程的各個步驟。",
+    withSubtreeHint: "這個智慧代理，加上它下面的一切。",
     brief: "簡報",
     task: "任務",
     result: "結果",
@@ -548,10 +535,8 @@ const zhHant: typeof en = {
     noModels: "尚未設定模型 —— 請在設定中新增一個",
     defaultEffort: "預設（{{effort}}）",
     defaultLower: "預設",
-    defaultToolSet: "除控制層之外的所有內建工具 —— 本伺服器的預設集合。",
     modelMissing: "{{model}} —— 已遺失",
-    modelGoneHint:
-      "此模型已不在設定中，因此本工作階段的下一輪會失敗。請在「設定 → 模型」中還原該別名，或建立新的工作階段。",
+    modelGoneHint: "這個模型已不在設定中。請在設定 → 模型中還原該別名，或開始一個新的工作階段。",
   },
 
   modelChannel: {
@@ -586,9 +571,8 @@ const zhHant: typeof en = {
 
   notFound: {
     title: "找不到頁面",
-    desc: "此位址下沒有任何頁面。",
     requestedPath: "請求的路徑",
-    help: "請檢查位址是否有誤，或從<lnk>你的工作階段</lnk>接續先前的工作。左側側邊欄可以到達其他所有地方。",
+    help: "檢查一下網址，或者回到<lnk>你的工作階段</lnk>。",
   },
 
   layout: {
@@ -601,7 +585,7 @@ const zhHant: typeof en = {
     signingIn: "正在登入…",
     password: "密碼",
     passwordHint:
-      "此伺服器需要密碼。首次啟動時，horsie 會在其狀態目錄中產生一組密碼並寫入 <file>initial-admin-password</file>。",
+      "首次啟動時，horsie 會把產生的密碼寫入狀態目錄下的 <file>initial-admin-password</file>。",
     failed: "無法登入。請確認伺服器仍在執行，然後再試一次。",
   },
 
@@ -614,30 +598,26 @@ const zhHant: typeof en = {
   agents: {
     new: "新增智慧代理",
     loading: "正在載入智慧代理",
-    rosterTitle: "智慧代理清單",
-    rosterBlurb:
-      "智慧代理是一份儲存下來的工作階段設定 —— 執行環境、模型、儲存庫、技能、記憶 —— 這樣重複的執行就不必每次重新組裝。按<key>新增智慧代理</key>定義一個，然後在任一台機器上呼叫它：",
     skillCount_one: "{{count}} 個技能",
     skillCount_other: "{{count}} 個技能",
     memoryCount_one: "{{count}} 個記憶",
     memoryCount_other: "{{count}} 個記憶",
     mcpCount: "{{count}} 個 MCP",
     confirmDelete: "刪除智慧代理「{{name}}」？",
-    pickOne: "選擇一個智慧代理，檢視它的組態。",
+    pickOne: "選擇一個智慧代理。",
+    rosterEmpty: "還沒有智慧代理。按<key>新增智慧代理</key>來定義一個。",
   },
 
   environments: {
     confirmDelete: "刪除環境「{{name}}」？",
     new: "新增環境",
     loading: "正在載入環境",
-    rosterTitle: "環境清單",
-    rosterBlurb:
-      "環境是一份儲存下來的「執行環境 + 儲存庫」組合 —— 決定工作在哪裡執行、在那裡簽出什麼。按<key>新增環境</key>定義一個。",
-    pickOne: "選擇一個環境，檢視執行會從它繼承什麼。",
+    pickOne: "選擇一個環境。",
+    rosterEmpty: "還沒有環境。按<key>新增環境</key>來定義一個。",
   },
 
   routines: {
-    pickOne: "選擇一個例行任務，檢視它執行什麼，以及它的執行紀錄。",
+    pickOne: "選擇一個例行工作。",
     confirmDelete: "刪除例行工作「{{name}}」及它建立的所有工作階段？",
     new: "新增例行工作",
     noSuch: "例行工作不存在：{{name}}。",
@@ -653,28 +633,21 @@ const zhHant: typeof en = {
     notScheduled: "未排程",
     prompt: "提示詞",
     lastTriggerFailed: "上次觸發失敗：{{error}}",
-    noRuns:
-      "還沒有執行紀錄。執行紀錄出現在這裡而不是側邊欄，且每次執行只依據提示詞工作 —— 它無法向你提問。",
-    rosterTitle: "例行工作清單",
-    rosterBlurb:
-      "例行工作讓一個智慧代理針對固定提示詞執行 —— 可以定時、透過 API，或在你按下執行時觸發。它的工作階段位於它自己的頁面，而不是側邊欄。按<key>新增例行工作</key>定義一個。",
+    noRuns: "還沒有執行記錄。",
+    rosterEmpty: "還沒有例行工作。按<key>新增例行工作</key>來定義一個。",
   },
 
   workflows: {
     rowMeta_one: "{{count}} 個步驟 · 起始於 {{start}}",
     rowMeta_other: "{{count}} 個步驟 · 起始於 {{start}}",
-    pickOne: "選擇一個工作流程，檢視它的圖和它的執行紀錄。",
+    pickOne: "選擇一個工作流程。",
     confirmDelete: "刪除工作流程「{{name}}」？它的執行紀錄會繼續留在工作階段側邊欄中。",
     new: "新增工作流程",
     noSuch: "工作流程不存在。",
     graph: "流程圖",
-    graphBlurb:
-      "每個步驟共用同一個執行環境與同一個工作區。<step>{{start}}</step> 會收到本次執行的初始輸入。",
     runsRead: "此工作流程的執行紀錄",
     noRuns: "還沒有執行紀錄。",
-    rosterTitle: "工作流程清單",
-    rosterBlurb:
-      "工作流程讓多個智慧代理依序執行，每一個都決定下一個往哪裡去。所有步驟共用一個工作區，因此前一個寫下的內容後一個就讀得到。執行紀錄會與你的工作階段一同出現在側邊欄。按<key>新增工作流程</key>定義一個。",
+    rosterEmpty: "還沒有工作流程。按<key>新增工作流程</key>來定義一個。",
   },
 
   inbox: {
@@ -683,15 +656,14 @@ const zhHant: typeof en = {
     filterAll: "全部",
     filterUnread: "未讀",
     filterOpen: "待回答",
-    empty:
-      "這裡還什麼都沒有。智慧代理有話要說、或者卡在一個問題上時，會寫到這個收件匣。",
+    empty: "這裡還沒有內容。",
     noneInView: "目前檢視下沒有內容。",
     kindNotice: "通知",
     kindAsk: "問題",
     unread: "未讀",
     waiting: "等你回答",
     openSession: "打開工作階段",
-    pickOne: "選一則訊息來閱讀。",
+    pickOne: "選一則訊息。",
     select: "選擇「{{title}}」",
     selectAll: "選取全部訊息",
     deleteSelected_one: "刪除 {{count}} 則訊息",
@@ -705,8 +677,7 @@ const zhHant: typeof en = {
     declineWarning_other:
       "其中 {{count}} 則是智慧代理仍在等待的問題。刪掉它們就等於拒絕回答：每個智慧代理都會被告知沒人會回答，然後在沒有答案的情況下繼續。",
     answered: "你已經回答過了。",
-    declined:
-      "你拒絕了這個問題。智慧代理被告知沒人會回答，已經在沒有答案的情況下繼續了。",
+    declined: "你拒絕了這個提問 —— 智慧代理沒有得到回答就繼續了。",
     closed: "從未作答 —— 工作階段裡後來的事情已經越過了它。",
     replyPlaceholder: "回覆這個智慧代理……",
     send: "送出",
@@ -730,7 +701,7 @@ const zhHant: typeof en = {
 
   device: {
     title: "授權一次命令列登入",
-    desc: "請核對此代碼與終端機中顯示的一致。核准後，那台機器將以你的身分存取此伺服器。",
+    desc: "確認這個代碼和終端機裡印出的一致。核准後，那台機器將以你的身分存取本伺服器。",
     approved: "已核准。你的終端機應會在幾秒內繼續 —— 可以關閉此頁面了。",
     denied: "已拒絕。該次登入嘗試被駁回。",
     codePlaceholder: "XXXX-XXXX",
@@ -745,8 +716,7 @@ const zhHant: typeof en = {
     signIn: "使用 ChatGPT 登入",
     starting: "正在啟動…",
     openAndEnter: "開啟 <here>{{url}}</here> 並輸入此代碼：",
-    waiting:
-      "正在等待核准…你可以在任何裝置上完成。用量會計入此 ChatGPT 方案的 Codex 額度。",
+    waiting: "等待核准 —— 你可以在任何裝置上完成。",
   },
 
   skills: {
@@ -767,33 +737,28 @@ const zhHant: typeof en = {
     confirmDeletePlugin:
       "刪除「{{name}}」？這會移除其中的每個技能，以及它在技能包庫中的項目。",
     title: "在此創作",
-    desc: "技能存放在本伺服器資料庫中的外掛。智慧代理透過創作工具寫入它們；你可以在這裡閱讀、還原與移除。",
     loadingHistory: "正在載入歷史…",
     historyFailed: "無法讀取此技能的歷史。",
     deleted: "已刪除",
     restore: "還原",
     newPlugin: "新增外掛",
     newPluginPlaceholder: "field-notes",
-    empty: "還沒有創作內容。選取創作工具的工作階段可以在這裡寫入技能。",
+    empty: "還沒有撰寫任何內容。",
   },
 
   run: {
     interrupt: "\u4e2d\u65b7",
     retry: "\u91cd\u8a66",
-    confirmRetry:
-      "\u91cd\u8a66 {{step}}\uff1f\u5b83\u6703\u5728\u4e0a\u4e00\u6b21\u5617\u8a66\u7559\u4e0b\u7684\u5de5\u4f5c\u5340\u72c0\u614b\u4e0a\u91cd\u65b0\u57f7\u884c\u3002",
+    confirmRetry: "重試 {{step}}？工作區不會回復。",
     steps: "\u6b65\u9a5f",
     stepRunning: "\u6709\u6b65\u9a5f\u6b63\u5728\u57f7\u884c\u3002",
-    retryHint: "\u91cd\u65b0\u57f7\u884c\u6b64\u6b65\u9a5f\u3002\u5de5\u4f5c\u5340\u4e0d\u6703\u56de\u5fa9\u3002",
+    retryHint: "工作區不會回復。",
     noRunTranscript: "\u57f7\u884c\u672c\u8eab\u6c92\u6709\u5c0d\u8a71\u7d00\u9304 \u2014\u2014 \u958b\u555f\u67d0\u500b\u6b65\u9a5f\u624d\u80fd\u95b1\u8b80",
-    runHint: "\u9019\u5f35\u5716\u5c31\u662f\u672c\u6b21\u57f7\u884c\u3002\u958b\u555f\u4e00\u500b\u6b65\u9a5f\u6aa2\u8996\u5b83\u505a\u4e86\u4ec0\u9ebc\u3002",
+    runHint: "打開一個步驟來查看它做了什麼。",
   },
 
   skillsPage: {
-    desc: "可共用的技能包，從 git 儲存庫安裝 —— 可依工作階段選用。",
     installTitle: "安裝技能包",
-    installDesc:
-      "可以是一個技能包，也可以是一個技能市集 —— horsie 會自行判斷。這可能需要幾秒。",
     gitUrl: "Git 位址",
     gitUrlPlaceholder: "https://github.com/owner/skills-bundle",
     ref: "分支或標籤（選填）",
@@ -801,16 +766,13 @@ const zhHant: typeof en = {
     install: "安裝",
     marketplaces: "市集",
     marketplacesWhat: "市集",
-    marketplacesDesc: "你新增過的目錄。移除其中一個不會影響已從中安裝的技能包。",
     installedTitle: "已安裝的技能包",
     installedDesc: "開啟某個技能包的開關，即可讓新工作階段預設選取它。",
     empty: "尚未安裝任何技能包。",
   },
 
   memoryPage: {
-    desc: "智慧代理儲存並回讀的持久筆記 —— 歸入可依工作階段選用的空間。",
     spaces: "記憶空間",
-    spacesDesc: "空間是記憶的命名空間。工作階段可以選擇自己能讀寫哪些空間。",
     newSpace: "新增空間",
     newSpacePlaceholder: "ops",
     createSpaceFailed: "建立空間失敗。",
@@ -818,7 +780,6 @@ const zhHant: typeof en = {
     memories: "記憶",
     memoriesIn: "{{space}} 中的記憶",
     memoriesWhat: "記憶",
-    memoriesDesc: "這些由智慧代理自己寫入。凡是有誤或不再有用的，都可以編輯或刪除。",
     createSpaceFirst: "請先建立一個記憶空間。",
     addMemory: "新增記憶",
     noMemories: "此空間中還沒有記憶。",
@@ -844,11 +805,9 @@ const zhHant: typeof en = {
   },
 
   account: {
-    desc: "此伺服器的登入方式。",
     tokens: "機器權杖",
     tokensWhat: "機器權杖",
-    tokensDesc:
-      "供無人看管執行的執行環境供應方程序使用。在你自己的機器上，<cmd>horsie auth login</cmd> 就夠了 —— 只有在無人核准的場合才需要權杖。機器權杖只能連接執行環境，其他什麼都做不了：它不能讀取工作階段、變更設定，也不能再建立權杖。",
+    tokensDesc: "供無人看管的執行環境程序使用。機器權杖只能用來連接執行環境。",
     tokenLabelPlaceholder: "這組權杖給哪一台機器用？",
     copyNow: "請立即複製 —— 它不會再次顯示。",
     noTokens: "還沒有機器權杖。",
@@ -858,8 +817,7 @@ const zhHant: typeof en = {
     confirmRevoke: "撤銷機器權杖「{{label}}」？仍在使用它的一切都將無法連線。",
     disabled:
       "此部署未啟用身分驗證，因此沒有需要管理的帳戶。任何能連上此伺服器的人都擁有完整權限。",
-    mustChange:
-      "此伺服器仍在使用首次啟動時產生的密碼。請在下方變更 —— 這也會從狀態目錄中刪除 <file>initial-admin-password</file> 檔案。",
+    mustChange: "本伺服器仍在使用首次啟動時產生的密碼。請在下面修改。",
     external: "此伺服器的登入由別處管理，因此這裡沒有可變更的密碼。",
     currentPassword: "目前密碼",
     newPassword: "新密碼（至少 8 個字元）",
@@ -870,16 +828,11 @@ const zhHant: typeof en = {
   runtimesPage: {
     vendorExists:
       "已存在名為「{{name}}」的雲端供應商。請從清單中編輯它，或另取一個名稱。",
-    absentDefault:
-      "已設為預設，但它的智慧代理尚未連線。在它接入之前，以它為預設的工作階段都會啟動失敗。",
+    absentDefault: "已設為預設，但它的 agent 還沒有連線。",
     loading: "正在載入執行環境",
     loadFailed: "無法載入設定。請確認 horsie-server 正在執行，然後重新載入。",
-    desc: "工作階段在哪裡執行。智慧代理程序會連線至此伺服器，並在其所在處完成設定；雲端供應商則在這裡設定。",
     vendors: "供應商",
-    vendorsDesc:
-      "在某台機器上執行 horsie connect，或啟動 horsie-velos-runtime 之類的供應方程序，它就會出現在這裡。雲端供應商不需要你自己的程序 —— 每個沙箱都會回撥它的回呼位址，因此該位址必須能從此伺服器之外連線。新工作階段在未指定時會使用預設項。",
-    empty:
-      "還沒有執行環境，因此工作階段無法執行任何一輪。請連接一個智慧代理，或在下方新增雲端供應商。",
+    empty: "還沒有執行環境。連接一個 agent，或在下面新增雲端供應方。",
     cloudVendors: "雲端供應商",
     checking: "檢查中…",
     answering: "有回應",
@@ -902,8 +855,7 @@ const zhHant: typeof en = {
     imagePlaceholder: "ghcr.io/you/horsie-runtime:latest",
     workspaceRootPlaceholder: "/workspaces",
     flyApp: "Fly 應用程式",
-    flyAppHint:
-      "必須已經存在 —— 請用 `fly apps create` 建立。horsie 只會在其中建立機器。",
+    flyAppHint: "必須已經存在。",
     velosUrl: "velos 伺服器位址",
     apiToken: "API 權杖",
     leaveBlank: "留空表示保持不變",
@@ -916,21 +868,15 @@ const zhHant: typeof en = {
     memoryMb: "記憶體（MB）",
     cpus: "CPU 核心數",
     volumeSizeGb: "磁碟區大小（GB）",
-    volumesHint: "為每個執行環境配置一個磁碟區，這樣停止後仍能保留其工作區",
-    velosNoVolumes:
-      "velos 沒有磁碟區：停止工作階段會刪除其容器，下一則訊息會排入一個全新的容器並重新執行佈建流程。",
+    volumesHint: "給每個執行環境一個磁碟區",
   },
 
   githubApp: {
-    desc: "此伺服器所扮演的 GitHub App 的註冊資訊。設定一次即可；使用者隨後可在「設定 → 整合」中連接自己的帳戶。",
     credentials: "憑證",
-    credentialsDesc:
-      "來自該應用程式在 GitHub 上的頁面。密鑰與私鑰只寫不讀 —— 伺服器只會回報它們是否已設定。",
     clientId: "Client ID",
     clientIdError: "Client ID 是用來識別該應用程式的。",
     clientSecret: "Client Secret",
     appId: "App ID",
-    appIdHint: "該應用程式在 GitHub 頁面上顯示的數字。",
     appIdError: "App ID 是該應用程式在 GitHub 頁面上顯示的數字。",
     privateKey: "私鑰（PEM 或 base64）",
     privateKeyHint: "請貼上完整的 PEM，包含 BEGIN 與 END 行。",
@@ -940,8 +886,7 @@ const zhHant: typeof en = {
     configured: "應用程式已設定。<lnk>連接一個帳戶</lnk>",
     notConfigured: "尚未設定 —— 在設定好之前，工作階段無法複製任何儲存庫。",
     callback: "回呼",
-    callbackDesc:
-      "GitHub 在使用者授權後將其送回的位址。horsie 會依據請求推導它，並遵循 X-Forwarded-Proto，因此設定正確的反向代理不需在此填寫。只有當 horsie 無法得知自己的公開位址時才需要設定 —— 例如代理不轉送協定，或存在路徑前綴。",
+    callbackDesc: "只有在 horsie 無法得知自己的公開位址時才需要填寫。",
     callbackBase: "回呼基礎位址",
     callbackPlaceholder: "https://horsie.example.com",
     callbackError: "需要一個絕對位址，例如 https://horsie.example.com。",
@@ -955,24 +900,17 @@ const zhHant: typeof en = {
     saveFailed: "儲存智慧代理失敗。",
     namePlaceholder: "reviewer",
     descriptionPlaceholder: "這個智慧代理是做什麼的",
-    descriptionHint: "用於清單顯示。智慧代理本身看不到它。",
     instructions: "指示",
     instructionsPlaceholder: "該智慧代理應如何工作 —— 會加入它的系統提示",
-    instructionsHint: "每一輪都會送給模型，位於工作區自帶的指示檔案之後。",
     configuration: "設定",
-    configurationHint: "由此預設集啟動的每個工作階段所使用的設定。",
     tuning: "調校",
     tunable: "允許調校智慧代理改進此預設集",
-    tunableHint:
-      "排程的智慧代理可以讀取由此預設集產生的工作階段紀錄並改寫它 —— 包括指示、技能、工具與記憶。除非你開啟，否則不會啟用。",
   },
 
   modelCards: {
     nameRequired: "名稱為必填欄位。",
     mustBePositive: "{{label}}必須是正整數。",
-    desc: "常見模型及其 token 上限。「設定 → 模型」會據此自動完成模型 ID 並預先填入空白的上限欄位；編輯模型卡永遠不會更動已設定好的模型。",
     catalog: "目錄",
-    catalogDesc: "每個常見模型一筆紀錄。",
     empty: "還沒有模型卡。",
     loadFailed: "無法載入模型卡。",
     filterPlaceholder: "依模型 ID 或名稱篩選…",
@@ -994,14 +932,13 @@ const zhHant: typeof en = {
     thinkingDialectOptional: "思考協定方言（選填）",
     thinkingEfforts: "思考強度",
     thinkingEffortsOptional: "思考強度（選填）",
-    thinkingEffortsHint: "此模型接受的取值，由低到高。不支援思考控制的模型請留空。",
+    thinkingEffortsHint: "由低到高。沒有思考控制的模型請留空。",
     defaultEffort: "預設強度",
     defaultEffortOptional: "預設思考強度（選填）",
     forcedTools: "固定工具選擇時停用思考",
     supportsImages: "可以接收圖片",
     supportsDocuments: "可以接收文件（PDF）",
-    forcedToolsHint:
-      "適用於在開啟思考時拒絕強制 <mono>tool_choice</mono> 的後端 —— DeepSeek 會回傳 400「Thinking mode does not support this tool_choice」。",
+    forcedToolsHint: "DeepSeek 需要開啟。",
     addCard: "新增模型卡",
     confirmDelete: "刪除模型卡「{{name}}」？已設定的模型會保留目前的取值。",
   },
@@ -1016,8 +953,6 @@ const zhHant: typeof en = {
     vendor: "執行環境供應商",
     selectVendor: "選擇一個執行環境供應商",
     vendorNotConnected: "{{name}} —— 未連線",
-    vendorHint:
-      "只有能自行佈建工作區的供應商才能執行環境，因此本機執行環境不會列出。",
     noProvisioningVendor:
       "已連線的供應商中沒有一個能自行佈建工作區，因此目前無法執行任何環境。請在<lnk>設定 › 執行環境</lnk>中新增一個。",
     envVars: "環境變數",
@@ -1027,8 +962,7 @@ const zhHant: typeof en = {
     removeEnvVar: "移除環境變數",
     addEnvVar: "新增環境變數",
     provision: "佈建步驟",
-    provisionHint:
-      "一個由 {name, uses, with} 步驟組成的 JSON 陣列。目前還沒有任何東西會執行它們。",
+    provisionHint: "目前還不會執行。",
     provisionInvalid: "佈建步驟必須是由 {name, uses, with} 組成的 JSON 陣列。",
     reposFromGithub:
       "儲存庫來自你的 GitHub App 安裝。<lnk>連接 GitHub</lnk> 即可選擇。",
@@ -1048,14 +982,7 @@ const zhHant: typeof en = {
     chooseAgent: "選擇一個智慧代理…",
     runs: "執行",
     chooseWorkflow: "選擇一個工作流程…",
-    workflowHint:
-      "每次觸發都會啟動這個工作流程的一次執行，並把下面的提示詞作為它的輸入。每個步驟都自帶智慧代理預設。",
-    agentHint:
-      "例行工作會使用該智慧代理的模型、技能與記憶。這些請在「智慧代理」頁面編輯。",
-    environmentHint:
-      "每次執行發生的地方。若某次執行的環境已不存在 —— 執行環境離線、環境被刪除 —— 該次執行會失敗並在此說明。",
-    promptPlaceholder:
-      "執行時會收到的全部說明。它無法向你提問，因此請寫明遇到取捨時該怎麼做。",
+    promptPlaceholder: "這次執行要做什麼。它沒辦法向你提問。",
     trigger: "觸發方式",
     kindManual: "僅在我手動執行時",
     kindEvery: "依間隔重複",
@@ -1081,8 +1008,7 @@ const zhHant: typeof en = {
     shortestInterval_one: "最短間隔為 {{count}} 分鐘。",
     shortestInterval_other: "最短間隔為 {{count}} 分鐘。",
     timerActive: "啟用定時",
-    timerHint:
-      "無論是否啟用定時，執行按鈕與 API 都可用 —— 暫停只會停掉定時器。執行之間不會互相阻擋重疊，因此請留出足夠的間隔讓它跑完。",
+    timerHint: "暫停只停掉計時器 —— 立即執行和 API 仍然可用。",
   },
 
   stepForm: {
@@ -1091,8 +1017,7 @@ const zhHant: typeof en = {
       "名為 <name>{{agent}}</name> 的智慧代理已不存在，因此工作流程執行時該步驟會失敗。請另選一個，或重新建立它。",
     promptPlaceholder: "此步驟應做什麼。它的輸入會附加在下方。",
     outcomes: "結果",
-    outcomesHint:
-      "此步驟可能的結束方式。步驟會選定其中之一，而這也是流程轉移唯一讀取的東西。每一項都需要描述 —— 模型正是靠它來做選擇。",
+    outcomesHint: "每一項都需要說明 —— 模型靠它來選擇。",
     outcomePlaceholder: "success",
     outcomeDescPlaceholder: "它代表什麼",
     removeOutcome: "移除結果 {{name}}",
@@ -1108,11 +1033,8 @@ const zhHant: typeof en = {
     removeField: "移除欄位 {{name}}",
     addField: "新增欄位",
     canAsk: "可以向人提問",
-    canAskHint:
-      "為此步驟提供 ask_user 工具。沒有它，步驟就無法提問，只能自行決定。",
     goesTo: "轉移至",
-    goesToHint:
-      "依序嘗試，第一個符合的生效。未指定結果的那一列即為後備。若都不符合，執行結束。",
+    goesToHint: "按順序比對，第一條命中的生效。都不符合則結束執行。",
     opAlways: "總是",
     opIn: "結果屬於",
     opNotIn: "結果不屬於",
@@ -1123,8 +1045,6 @@ const zhHant: typeof en = {
     maxIterations: "最大輪數",
     unlimited: "不限",
     retries: "重試次數",
-    limitsHint:
-      "此步驟在失敗前最多可進行多少輪，以及其中的暫時性供應商錯誤最多重試幾次。兩項留空即使用預設值。",
   },
 
   workflowEdit: {
@@ -1141,8 +1061,6 @@ const zhHant: typeof en = {
     namePlaceholder: "fix-bug",
     stepBudget: "步驟預算",
     stepBudgetPlaceholder: "100（預設）",
-    stepBudgetHint:
-      "一次執行最多可執行的步驟數。它用來終止那些條件永遠不翻轉的迴圈；若某個圖確實需要多次繞行，請調高它。",
     startsAt: "起始步驟",
     chooseAStep: "—— 請選擇一個步驟 ——",
     noSuchStep: "{{name}}（此步驟不存在）",
@@ -1156,10 +1074,8 @@ const zhHant: typeof en = {
     noProviders: "還沒有供應商。",
     noModelsFor: "還沒有模型經由 {{provider}} 路由。",
     title: "模型與供應商",
-    desc: "API 端點，以及工作階段可選用的模型別名。每個供應商與每個模型各自獨立儲存 —— 開啟一個、編輯它、按它自己的「儲存」。",
     loadFailed: "無法載入設定。<cmd>horsie serve</cmd> 正在執行嗎？",
     providers: "供應商",
-    providersDesc: "API 端點。選擇其中一個即可查看經由它路由的模型。",
     kind: {
       anthropic: "Anthropic",
       openai: "OpenAI 相容",
@@ -1192,29 +1108,22 @@ const zhHant: typeof en = {
     chatgptSignInFor: "{{name}} 的 ChatGPT 登入",
     connect: "連接",
     modelsFor: "模型 · {{provider}}",
-    modelsDesc: "工作階段可選用的別名。每個別名都指向此供應商上的一個模型 ID。",
     providerNamePlaceholder: "anthropic",
-    baseUrlHint:
-      "只填主機 —— horsie 會自行補上 API 路徑。應填 {{example}}，而不是 {{example}}/v1。",
+    baseUrlHint: "只填主機名稱 —— {{example}}，不是 {{example}}/v1。",
     inlineKey: "內嵌金鑰",
     willBeCleared: "儲存時將被清除",
     notSetLower: "未設定",
     clearKey: "儲存時清除已儲存的金鑰",
-    chatgptHint: "ChatGPT 方案透過登入授權，而非金鑰。請在清單中它所在的那一列連接。",
-    chatgptHintNew:
-      "ChatGPT 方案透過登入授權，而非金鑰。儲存之後，請在清單中它所在的那一列連接。",
+    chatgptHint: "在清單中它那一列連接。",
+    chatgptHintNew: "儲存後，在清單中它那一列連接。",
     keepSignatures: "保留思考簽章",
-    keepSignaturesHint:
-      "api.anthropic.com 必需，它會在重播時驗證這些簽章。對於 Anthropic 相容端點請關閉 —— 每個思考區塊的簽章有好幾 KB，而且沒有任何東西會讀它們。",
+    keepSignaturesHint: "api.anthropic.com 需要開啟。",
     alias: "別名",
     aliasPlaceholder: "sonnet",
     provider: "供應商",
     thinkingEfforts: "此模型提供的思考強度",
     wireDialect: "傳輸協定方言",
-    forcedToolsHint:
-      "DeepSeek 必需，它在開啟思考時會拒絕強制的工具選擇。必須呼叫交接工具的子代理將在不思考的情況下執行。",
-    visionHint:
-      "只有能夠接收附件的模型才會載入附件內容。兩項都未勾選的模型只會被告知附件已被略過，而不會收到它讀不了的位元組。",
+    forcedToolsHint: "DeepSeek 需要開啟。",
   },
 
   mcpChannel: {
@@ -1225,9 +1134,7 @@ const zhHant: typeof en = {
     toolCount_other: "{{count}} 個工具",
   },
   integrations: {
-    desc: "GitHub、MCP 伺服器，以及此伺服器的建置資訊。",
     github: "GitHub",
-    githubDesc: "連接你的 GitHub 帳戶，讓工作階段可以複製你的儲存庫。",
     connectedAs: "已連接為 <login>@{{login}}</login>",
     disconnect: "中斷連接",
     appConfigured: "應用程式已設定 —— 連接你的帳戶。",
@@ -1235,8 +1142,6 @@ const zhHant: typeof en = {
       "此伺服器尚未註冊 GitHub App。請在<lnk>管理 → GitHub App</lnk>中設定一個。",
     registerFirst: "請先在「管理」中註冊 GitHub App",
     githubTools: "GitHub 工具（MCP）",
-    githubToolsDesc:
-      "讓工作階段透過此連接呼叫 GitHub MCP 伺服器（建立 PR、搜尋 issue 等）。",
     enable: "啟用",
     disable: "停用",
     test: "測試",
@@ -1248,20 +1153,16 @@ const zhHant: typeof en = {
     toolCount_other: "{{count}} 個工具",
     description: "描述",
     descriptionPlaceholder: "這個伺服器的用途",
-    descriptionHint:
-      "在列出該伺服器的地方都會顯示。留空則使用伺服器自述。",
+    descriptionHint: "留空則使用伺服器自己的說明。",
     serverInstructions: "伺服器的說明",
     tools: "工具列表",
     noTools: "該伺服器未提供任何工具。",
     noToolDescription: "無描述",
     notTested: "未測試",
-    mcpDesc:
-      "遠端 Model Context Protocol 伺服器。工作階段可選擇使用哪些；它們的工具會以 <mono/> 的形式出現。",
     addServer: "新增伺服器",
     noServers: "尚未設定 MCP 伺服器。",
     namePlaceholder: "linear",
-    nameHint:
-      "字母、數字、「-」與「_」。它會成為每個工具 ID 的一部分：mcp__<name>__<tool>。",
+    nameHint: "字母、數字、'-' 和 '_'。",
     url: "位址",
     urlPlaceholder: "https://mcp.example.com/",
     auth: "驗證",
@@ -1292,38 +1193,26 @@ const zhHant: typeof en = {
 
   appearance: {
     title: "外觀",
-    desc: "此瀏覽器如何呈現 horsie。設定儲存在本機而非伺服器，因此你用的每個瀏覽器可以各不相同。",
     themeTitle: "主題",
-    themeDesc:
-      "版面相同，質感不同。每個主題都提供淺色與深色，且兩者都經過 WCAG AA 實測。",
     themeGroup: "主題",
     modeTitle: "淺色或深色",
-    modeDesc: "「跟隨系統」會採用你的作業系統設定，並在此分頁開啟期間持續跟隨。",
     modeGroup: "模式",
     modeLight: "淺色",
     modeDark: "深色",
     modeSystem: "跟隨系統",
     textSizeTitle: "文字大小",
-    textSizeDesc:
-      "會縮放介面中的每一處尺寸，讓間距隨字級一起變化，而不是讓字撐破它的位置。",
     textSizeGroup: "文字大小",
     transcriptTitle: "對話紀錄",
-    transcriptDesc:
-      "工作階段檢視顯示什麼。這些是顯示開關，而不是工作階段設定 —— 它們完全不會改變智慧代理的執行方式。",
     languageTitle: "語言",
-    languageDesc: "此介面所使用的語言。「跟隨系統」會採用你的瀏覽器設定並持續跟隨。",
     languageGroup: "語言",
     languageSystem: "跟隨系統",
     languageSystemNote: "跟隨瀏覽器",
     skin: {
       paper: {
         name: "紙感",
-        blurb:
-          "由內到外的暖調 —— 淺色下是骨白，深色下是暖炭黑，只有那一個提交操作用朱紅。",
       },
       signal: {
         name: "訊號",
-        blurb: "與之相反的冷調 —— 藍黑底色配單一的萊姆綠強調色。版面相同，色溫不同。",
       },
     },
     textSize: {

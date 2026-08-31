@@ -50,7 +50,6 @@ export function ProjectsSettings() {
     return (
       <SettingsPage
         title={t("settingsNav.projects")}
-        desc={t("projectsPage.readErrorDesc")}
       >
         <ReadError error={projects.error} what={t("projectsPage.what")} />
       </SettingsPage>
@@ -60,11 +59,9 @@ export function ProjectsSettings() {
   return (
     <SettingsPage
       title={t("settingsNav.projects")}
-      desc={t("projectsPage.desc")}
     >
       <Section
         title={t("settingsNav.projects")}
-        desc={t("projectsPage.sectionDesc")}
         empty={
           projects.data && projects.data.length === 0
             ? t("projectsPage.empty")
@@ -153,7 +150,6 @@ export function ProjectsSettings() {
 
       <Section
         title={t("projectsPage.newProject")}
-        desc={t("projectsPage.newProjectDesc")}
       >
         <form
           className="flex gap-2"

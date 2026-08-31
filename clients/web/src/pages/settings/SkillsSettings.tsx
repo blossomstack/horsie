@@ -59,16 +59,12 @@ export function SkillsSettings() {
   return (
     <SettingsPage
         title={t("settingsNav.skills")}
-        desc={t("skillsPage.desc")}
     >
         <section className="section">
           <div className="mb-3 flex items-start gap-2">
             <Download size={15} className="mt-0.5 text-faint" />
             <div>
               <h2 className="section-title">{t("skillsPage.installTitle")}</h2>
-              <p className="mt-0.5 text-xs text-faint">
-{t("skillsPage.installDesc")}
-              </p>
             </div>
           </div>
 
@@ -119,9 +115,6 @@ export function SkillsSettings() {
               <Store size={15} className="mt-0.5 text-faint" />
               <div>
                 <h2 className="section-title">{t("skillsPage.marketplaces")}</h2>
-                <p className="mt-0.5 text-xs text-faint">
-{t("skillsPage.marketplacesDesc")}
-                </p>
               </div>
             </div>
 

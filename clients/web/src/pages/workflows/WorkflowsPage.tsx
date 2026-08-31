@@ -52,15 +52,15 @@ export function WorkflowsPage() {
         </p>
       )}
       {workflows && workflows.length === 0 && (
-        <section className="section m-1" data-testid="workflows-empty">
-          <h2 className="legend">{t("workflows.rosterTitle")}</h2>
-          <p className="mt-3 text-sm leading-relaxed text-dim">
-            <Trans
-              i18nKey="workflows.rosterBlurb"
-              components={{ key: <span className="text-legend" /> }}
-            />
-          </p>
-        </section>
+        <p
+          className="px-2.5 py-6 text-sm text-faint"
+          data-testid="workflows-empty"
+        >
+          <Trans
+            i18nKey="workflows.rosterEmpty"
+            components={{ key: <span className="text-legend" /> }}
+          />
+        </p>
       )}
       <div className="list-divided">
         {(workflows ?? []).map((w) => (

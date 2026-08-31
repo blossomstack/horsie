@@ -30,7 +30,8 @@ export function SettingsPage({
   children,
 }: {
   title: string;
-  desc: string;
+  /** Only where the title alone leaves something the page cannot show. */
+  desc?: string;
   dirty?: boolean;
   saved?: boolean;
   saving?: boolean;
@@ -79,8 +80,8 @@ function SettingsPane({ children }: { children: ReactNode }) {
   );
 }
 
-/** A titled block of the settings panel: what it configures, what it holds,
- * and one control to add to it. */
+/** A titled block of the settings panel: what it holds, and one control to add
+ * to it. */
 export function Section({
   title,
   desc,
@@ -93,7 +94,8 @@ export function Section({
   empty,
 }: {
   title: string;
-  desc: string;
+  /** Only where the title alone leaves something the panel cannot show. */
+  desc?: string;
   children: ReactNode;
   onAdd?: () => void;
   addLabel?: string;
@@ -114,9 +116,11 @@ export function Section({
             `Models · <long-name>` inside the panel. */}
         <div className="min-w-0">
           <h2 className="section-title break-words">{title}</h2>
-          <p className="mt-1 max-w-prose text-xs leading-snug text-faint">
-            {desc}
-          </p>
+          {desc && (
+            <p className="mt-1 max-w-prose text-xs leading-snug text-faint">
+              {desc}
+            </p>
+          )}
         </div>
         {onAdd && (
           <button

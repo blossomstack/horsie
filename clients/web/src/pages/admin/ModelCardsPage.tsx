@@ -18,7 +18,6 @@ export function ModelCardsPage() {
   return (
     <SettingsPage
         title={t("adminNav.modelCards")}
-        desc={t("modelCards.desc")}
     >
         <ModelCardsSection />
       </SettingsPage>
@@ -54,7 +53,6 @@ function ModelCardsSection() {
   return (
     <Section
       title={t("modelCards.catalog")}
-      desc={t("modelCards.catalogDesc")}
       onAdd={() => {
         setAdding(true);
         setEditing(null);

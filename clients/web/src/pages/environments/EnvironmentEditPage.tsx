@@ -200,8 +200,8 @@ function EnvironmentForm({ initial }: { initial?: EnvironmentView }) {
                   </option>
                 ))}
               </select>
-              <p className="mt-1 text-xs leading-relaxed text-faint">
-                {vendorOptions.length === 0 ? (
+              {vendorOptions.length === 0 && (
+                <p className="mt-1 text-xs leading-relaxed text-faint">
                   <Trans
                     i18nKey="environmentEdit.noProvisioningVendor"
                     components={{
@@ -213,10 +213,8 @@ function EnvironmentForm({ initial }: { initial?: EnvironmentView }) {
                       ),
                     }}
                   />
-                ) : (
-                  t("environmentEdit.vendorHint")
-                )}
-              </p>
+                </p>
+              )}
             </label>
           </section>
 
@@ -377,11 +375,6 @@ function RepoPicker({
 {t("channel.selectedCount", { count: repos.length })}
         </span>
       </div>
-      <p className="text-xs leading-relaxed text-faint">
-        Cloned into the runtime workspace at provision time. Leave a ref blank
-        to take the repo's default branch.
-      </p>
-
       {/* Above the chain rather than inside it: the repos already ticked still
           render below, so a failed listing does not take away the only control
           that can untick one. */}

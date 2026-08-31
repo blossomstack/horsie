@@ -55,18 +55,16 @@ export function AgentsPage() {
       {isError && (
         <p className="px-2.5 py-6 text-sm text-red-ink">{t("rail.unreachable")}</p>
       )}
-      {/* Not a centred icon-in-a-box: an empty roster is a labelled blank slot
-          on the panel, and the label is the command that fills it. */}
       {agents && agents.length === 0 && (
-        <section className="section m-1" data-testid="agents-empty">
-          <h2 className="legend">{t("agents.rosterTitle")}</h2>
-          <p className="mt-3 text-sm leading-relaxed text-dim">
-            <Trans
-              i18nKey="agents.rosterBlurb"
-              components={{ key: <span className="text-legend" /> }}
-            />
-          </p>
-        </section>
+        <p
+          className="px-2.5 py-6 text-sm text-faint"
+          data-testid="agents-empty"
+        >
+          <Trans
+            i18nKey="agents.rosterEmpty"
+            components={{ key: <span className="text-legend" /> }}
+          />
+        </p>
       )}
       <div className="list-divided">
         {(agents ?? []).map((a) => (

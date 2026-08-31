@@ -23,9 +23,6 @@ export function NotFoundPage() {
         <RailToggle />
         <div className="min-w-0 flex-1">
           <h1 className="page-title">{t("notFound.title")}</h1>
-          <p className="mt-0.5 text-xs text-faint">
-{t("notFound.desc")}
-          </p>
         </div>
       </div>
       <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-6">

@@ -95,10 +95,9 @@ export function AppearanceSettings() {
   ];
 
   return (
-    <SettingsPage title={t("appearance.title")} desc={t("appearance.desc")}>
+    <SettingsPage title={t("appearance.title")}>
         <Section
           title={t("appearance.themeTitle")}
-          desc={t("appearance.themeDesc")}
         >
           <div
             className="grid grid-cols-1 gap-2.5 sm:grid-cols-2"
@@ -129,9 +128,6 @@ export function AppearanceSettings() {
                     <Check size={13} className="text-accent" aria-hidden />
                   )}
                 </span>
-                <span className="text-xs leading-snug text-faint">
-                  {t(`appearance.skin.${s}.blurb`)}
-                </span>
               </button>
             ))}
           </div>
@@ -139,7 +135,6 @@ export function AppearanceSettings() {
 
         <Section
           title={t("appearance.modeTitle")}
-          desc={t("appearance.modeDesc")}
         >
           <div
             className="flex flex-wrap gap-2"
@@ -173,7 +168,6 @@ export function AppearanceSettings() {
 
         <Section
           title={t("appearance.languageTitle")}
-          desc={t("appearance.languageDesc")}
         >
           <div
             className="flex flex-wrap gap-2"
@@ -208,7 +202,6 @@ export function AppearanceSettings() {
 
         <Section
           title={t("appearance.textSizeTitle")}
-          desc={t("appearance.textSizeDesc")}
         >
           <div
             className="flex flex-wrap gap-2"
@@ -234,7 +227,6 @@ export function AppearanceSettings() {
 
         <Section
           title={t("appearance.transcriptTitle")}
-          desc={t("appearance.transcriptDesc")}
         >
           {SETTINGS.map((def) => (
             <button
@@ -259,13 +251,8 @@ export function AppearanceSettings() {
               >
                 {values[def.key] && <Check size={11} strokeWidth={3} />}
               </span>
-              <span className="min-w-0">
-                <span className="block text-[0.8125rem] text-legend">
-                  {t(`ui.${def.key}.label`)}
-                </span>
-                <span className="mt-0.5 block text-xs leading-snug text-faint">
-                  {t(`ui.${def.key}.description`)}
-                </span>
+              <span className="min-w-0 text-[0.8125rem] text-legend">
+                {t(`ui.${def.key}.label`)}
               </span>
             </button>
           ))}

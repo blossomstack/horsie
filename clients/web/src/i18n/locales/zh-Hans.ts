@@ -107,7 +107,7 @@ const zhHans: typeof en = {
     noSuch: "会话不存在",
     loadFailed: "无法加载此会话",
     sessionId: "会话 ID",
-    goneHint: "它已被删除，或从未存在过。你在此输入的内容无法送达。",
+    goneHint: "它被删除了，或者从来不存在。",
     readFailed: "读取失败。",
     yourSessionsList: "<lnk>你的会话</lnk>中列出了现存的会话。",
     thisRun: "此次运行",
@@ -115,19 +115,17 @@ const zhHans: typeof en = {
     confirmDelete: "删除此会话？此操作无法撤销。",
     view: "视图",
     reconnecting: "正在重连",
-    reconnectingHint:
-      "已断开实时推送。运行仍在服务器上继续；重连后会补播期间遗漏的内容。",
+    reconnectingHint: "实时连接断开了。正在重连并补回错过的内容。",
     loadingTranscript: "正在加载对话记录",
     loadingEarlier: "正在加载更早的消息",
     scrollUp: "向上滚动查看更早的消息",
     terminal: "此会话已无法运行：{{reason}}",
-    workflowStepHint: "这是一个工作流步骤。它依据自身定义运行，而非依据消息。",
+    workflowStepHint: "工作流步骤按它的定义工作，不看消息。",
   },
 
   ui: {
     showThinking: {
       label: "显示思考过程",
-      description: "在对话记录中展示模型的推理步骤。",
     },
   },
 
@@ -194,7 +192,7 @@ const zhHans: typeof en = {
     tokensKept: "保留了 {{retain}} 中的 {{used}} 个 token",
     noWindow: "此模型未声明上下文窗口，因此没有可压缩的额度。",
     nothingToFold:
-      "本会话约有 {{used}} 个 token，而一次压缩会原样保留最近的 {{retain}} 个 —— 因此之前没有可折叠的内容。强行压缩只会用真实消息换取一份摘要，去腾出并不紧缺的空间。",
+      "这个会话约 {{used}} tokens，而压缩会原样保留最近的 {{retain}} —— 所以前面没有可以折叠的内容。",
   },
 
   artifact: {
@@ -248,7 +246,7 @@ const zhHans: typeof en = {
     openTranscript: "打开 {{label}} 的对话记录",
     showSpawned: "显示 {{label}} 派生出的内容 —— 已隐藏 {{count}} 个",
     hideSpawned: "隐藏 {{label}} 派生出的内容",
-    empty: "此会话尚未记录任何智能体。它们启动后，图会自动绘制。",
+    empty: "这个会话还没有记录到智能体。",
     ariaLabel: "智能体关系图",
     nodeTitle: "{{label}} —— {{kind}}，{{detail}}",
     currentRun: " · 你正在阅读的这次运行",
@@ -264,7 +262,7 @@ const zhHans: typeof en = {
     thisSession: "本会话",
     thisAgent: "此智能体",
     sessionCompacted: "会话已压缩",
-    empty: "此会话尚无任何进展。智能体开始工作后，时间线会自动绘制。",
+    empty: "这个会话还没有发生任何事。",
     unplaced: "不在时间线上 —— 没有记录它们的运行时间",
   },
 
@@ -294,7 +292,7 @@ const zhHans: typeof en = {
     showWithCount: "显示计划 —— 已完成 {{done}}/{{total}}",
     toggle: "切换智能体的计划",
     toggleWithCount: "切换智能体的计划 —— 共 {{total}} 项，已完成 {{done}} 项",
-    empty: "还没有计划。当任务大到需要分步时，智能体会在这里写下计划。",
+    empty: "还没有计划。",
   },
 
   thinking: {
@@ -307,16 +305,11 @@ const zhHans: typeof en = {
 
   projectsPage: {
     what: "项目",
-    readErrorDesc: "此账户的项目。",
-    desc: "每项工作一个项目。项目之间不共享任何内容。",
-    sectionDesc:
-      "此侧栏中的其他一切都归属于某个项目：模型、运行时、技能、记忆空间、集成、智能体与会话。新项目从空白开始，凭据也不例外。",
     empty: "还没有项目。",
     defaultHint: "始终存在，且无法删除",
     cannotDelete: "默认项目无法删除",
     saveName: "保存名称",
     newProject: "新建项目",
-    newProjectDesc: "它从空白开始 —— 创建后再为它添加模型与运行时。",
     namePlaceholder: "这个项目是做什么的？",
     confirmDelete:
       "删除项目“{{name}}”？它的会话、智能体、设置与记忆都会一并删除，其运行时也会被销毁。此操作无法撤销。",
@@ -372,16 +365,13 @@ const zhHans: typeof en = {
 
   usage: {
     input: "输入",
-    inputHint:
-      "完整的提示 token：系统提示、工具定义，以及到目前为止的会话历史。下方的缓存读写已计入此总数，不是额外的。",
+    inputHint: "系统提示词、工具定义和历史记录。缓存读写已包含在内，不是额外的。",
     output: "输出",
     outputHint: "模型生成返回的 token。",
     cacheRead: "缓存读取",
-    cacheReadHint:
-      "由服务商的提示缓存以极低价格提供，而不是按全价重新处理。",
+    cacheReadHint: "从服务方的提示词缓存读取，价格更低。",
     cacheWrite: "缓存写入",
-    cacheWriteHint:
-      "本轮以溢价写入服务商的提示缓存 —— 在后续复用它的轮次中以缓存读取的形式收回成本。",
+    cacheWriteHint: "写入服务方的提示词缓存，价格更高。",
   },
 
   gauge: {
@@ -395,14 +385,12 @@ const zhHans: typeof en = {
     filling: "正在填充",
     roomToSpare: "余量充足",
     contextWindow: "上下文窗口",
-    windowHint:
-      "主智能体上下文中当前载入的 token 数，及其上下文窗口上限。缓存状态不会减少这个数字 —— 它只影响价格与速度。",
+    windowHint: "主智能体上下文中已加载的 tokens，相对于它的上下文窗口。",
     used: "已使用的上下文窗口",
     compactsAt: "占用约 {{percent}}% 时自动压缩",
     thisTurn: "本轮",
     sessionTotal: "会话总计",
-    sessionTotalHint:
-      "本会话在其承载的所有智能体上的全部花费。这是成本，而非上下文占用 —— 上方的表盘才是上下文。",
+    sessionTotalHint: "这个会话在所有智能体上的全部花费。",
   },
 
   entryPanel: {
@@ -413,7 +401,7 @@ const zhHans: typeof en = {
     took: "耗时",
     tookHint: "生成这条消息的服务商调用耗时。",
     message: "消息",
-    noText: "此条目本身没有文本 —— 它就是它触发的那些工作。",
+    noText: "这个条目本身没有文本。",
     thinking: "思考",
     toolCalls: "工具调用",
     running: "运行中",
@@ -433,22 +421,20 @@ const zhHans: typeof en = {
     lastActivity: "最近活动",
     ended: "结束于",
     runningFor: "已运行",
-    runningForHint: "以当前时刻为准：此智能体尚未停止。",
+    runningForHint: "这个智能体还没有停止。",
     took: "耗时",
     tookHint: "从开始到得出此结果之间的时长。",
     context: "上下文",
     inContext: "上下文中",
-    inContextHint: "此智能体的模型未配置窗口大小，因此无法给出占比。",
+    inContextHint: "这个智能体的模型没有配置上下文窗口。",
     asOfLastTurn: "截至此智能体最近一轮结束时。",
     tokens: "Token",
-    inputHint:
-      "此智能体各轮次的完整提示 token。缓存读写已计入此总数，不是额外的。",
+    inputHint: "完整的提示词 tokens。缓存读写已包含在内，不是额外的。",
     outputHint: "此智能体生成返回的 token。",
     cacheReadHint: "由服务商的提示缓存以折扣价提供。",
     cacheWriteHint: "以溢价写入服务商的提示缓存。",
     withSubtree: "含子树",
-    withSubtreeHint:
-      "此智能体加上它下方的一切：它派生的子智能体、由它分支出的子会话，以及它调用的任何工作流的各个步骤。",
+    withSubtreeHint: "这个智能体，加上它下面的一切。",
     brief: "简报",
     task: "任务",
     result: "结果",
@@ -550,10 +536,8 @@ const zhHans: typeof en = {
     noModels: "尚未配置模型 —— 请在设置中添加一个",
     defaultEffort: "默认（{{effort}}）",
     defaultLower: "默认",
-    defaultToolSet: "除控制面之外的所有内置工具 —— 本服务器的默认集合。",
     modelMissing: "{{model}} —— 已缺失",
-    modelGoneHint:
-      "此模型已不在配置中，因此本会话的下一轮会失败。请在“设置 → 模型”中恢复该别名，或新建一个会话。",
+    modelGoneHint: "这个模型已不在配置中。请在设置 → 模型中恢复该别名，或开始一个新会话。",
   },
 
   modelChannel: {
@@ -588,9 +572,8 @@ const zhHans: typeof en = {
 
   notFound: {
     title: "未找到",
-    desc: "此地址下没有任何页面。",
     requestedPath: "请求的路径",
-    help: "请检查地址是否有笔误，或从<lnk>你的会话</lnk>继续之前的工作。左侧侧栏可以到达其他所有地方。",
+    help: "检查一下地址，或者回到<lnk>你的会话</lnk>。",
   },
 
   layout: {
@@ -603,7 +586,7 @@ const zhHans: typeof en = {
     signingIn: "正在登录…",
     password: "密码",
     passwordHint:
-      "此服务器需要密码。首次启动时，horsie 会在其状态目录中生成一个密码并写入 <file>initial-admin-password</file>。",
+      "首次启动时，horsie 会把生成的密码写入状态目录下的 <file>initial-admin-password</file>。",
     failed: "无法登录。请确认服务器仍在运行，然后重试。",
   },
 
@@ -616,30 +599,26 @@ const zhHans: typeof en = {
   agents: {
     new: "新建智能体",
     loading: "正在加载智能体",
-    rosterTitle: "智能体清单",
-    rosterBlurb:
-      "智能体是一份保存下来的会话配置 —— 运行时、模型、仓库、技能、记忆 —— 这样重复的运行就不必每次重新拼装。按<key>新建智能体</key>定义一个，然后在任意机器上调用它：",
     skillCount_one: "{{count}} 个技能",
     skillCount_other: "{{count}} 个技能",
     memoryCount_one: "{{count}} 个记忆",
     memoryCount_other: "{{count}} 个记忆",
     mcpCount: "{{count}} 个 MCP",
     confirmDelete: "删除智能体“{{name}}”？",
-    pickOne: "选择一个智能体，查看它的配置。",
+    pickOne: "选择一个智能体。",
+    rosterEmpty: "还没有智能体。按<key>新建智能体</key>来定义一个。",
   },
 
   environments: {
     confirmDelete: "删除环境“{{name}}”？",
     new: "新建环境",
     loading: "正在加载环境",
-    rosterTitle: "环境清单",
-    rosterBlurb:
-      "环境是一份保存下来的“运行时 + 仓库”组合 —— 决定工作在哪里运行、在那里检出什么。按<key>新建环境</key>定义一个。",
-    pickOne: "选择一个环境，查看运行会从它继承什么。",
+    pickOne: "选择一个环境。",
+    rosterEmpty: "还没有环境。按<key>新建环境</key>来定义一个。",
   },
 
   routines: {
-    pickOne: "选择一个例行任务，查看它运行什么，以及它的运行记录。",
+    pickOne: "选择一个例行任务。",
     confirmDelete: "删除例行任务“{{name}}”及它创建的所有会话？",
     new: "新建例行任务",
     noSuch: "例行任务不存在：{{name}}。",
@@ -655,28 +634,21 @@ const zhHans: typeof en = {
     notScheduled: "未排期",
     prompt: "提示词",
     lastTriggerFailed: "上次触发失败：{{error}}",
-    noRuns:
-      "还没有运行记录。运行记录出现在这里而不是侧栏，且每次运行只依据提示词工作 —— 它无法向你提问。",
-    rosterTitle: "例行任务清单",
-    rosterBlurb:
-      "例行任务让一个智能体针对固定提示词运行 —— 可以定时、经由 API，或在你按下运行时触发。它的会话位于它自己的页面，而不是侧栏。按<key>新建例行任务</key>定义一个。",
+    noRuns: "还没有运行记录。",
+    rosterEmpty: "还没有例行任务。按<key>新建例行任务</key>来定义一个。",
   },
 
   workflows: {
     rowMeta_one: "{{count}} 个步骤 · 起始于 {{start}}",
     rowMeta_other: "{{count}} 个步骤 · 起始于 {{start}}",
-    pickOne: "选择一个工作流，查看它的图和它的运行记录。",
+    pickOne: "选择一个工作流。",
     confirmDelete: "删除工作流“{{name}}”？它的运行记录会继续留在会话侧栏中。",
     new: "新建工作流",
     noSuch: "工作流不存在。",
     graph: "流程图",
-    graphBlurb:
-      "每个步骤共享同一个运行时与同一个工作区。<step>{{start}}</step> 会收到本次运行的初始输入。",
     runsRead: "此工作流的运行记录",
     noRuns: "还没有运行记录。",
-    rosterTitle: "工作流清单",
-    rosterBlurb:
-      "工作流让多个智能体依次运行，每一个都决定下一个去哪里。所有步骤共享一个工作区，因此前一个写下的内容后一个就能读到。运行记录会与你的会话一同出现在侧栏。按<key>新建工作流</key>定义一个。",
+    rosterEmpty: "还没有工作流。按<key>新建工作流</key>来定义一个。",
   },
 
   inbox: {
@@ -685,15 +657,14 @@ const zhHans: typeof en = {
     filterAll: "全部",
     filterUnread: "未读",
     filterOpen: "待回答",
-    empty:
-      "这里还什么都没有。智能体有话要说、或者卡在一个问题上时，会写到这个收件箱。",
+    empty: "这里还没有内容。",
     noneInView: "当前视图下没有内容。",
     kindNotice: "通知",
     kindAsk: "问题",
     unread: "未读",
     waiting: "等你回答",
     openSession: "打开会话",
-    pickOne: "选一条消息来阅读。",
+    pickOne: "选一条消息。",
     select: "选择“{{title}}”",
     selectAll: "选中全部消息",
     deleteSelected_one: "删除 {{count}} 条消息",
@@ -707,8 +678,7 @@ const zhHans: typeof en = {
     declineWarning_other:
       "其中 {{count}} 条是智能体仍在等待的问题。删掉它们就等于拒绝回答：每个智能体都会被告知没人会回答，然后在没有答案的情况下继续。",
     answered: "你已经回答过了。",
-    declined:
-      "你拒绝了这个问题。智能体被告知没人会回答，已经在没有答案的情况下继续了。",
+    declined: "你拒绝了这个提问 —— 智能体没有得到回答就继续了。",
     closed: "从未作答 —— 会话里后来的事情已经越过了它。",
     replyPlaceholder: "回复这个智能体……",
     send: "发送",
@@ -732,7 +702,7 @@ const zhHans: typeof en = {
 
   device: {
     title: "授权一次命令行登录",
-    desc: "请核对此代码与终端中显示的一致。批准后，那台机器将以你的身份访问此服务器。",
+    desc: "确认这个代码和终端里打印的一致。批准后，那台机器将以你的身份访问本服务器。",
     approved: "已批准。你的终端应会在几秒内继续 —— 可以关闭此页面了。",
     denied: "已拒绝。该次登录尝试被驳回。",
     codePlaceholder: "XXXX-XXXX",
@@ -747,8 +717,7 @@ const zhHans: typeof en = {
     signIn: "使用 ChatGPT 登录",
     starting: "正在启动…",
     openAndEnter: "打开 <here>{{url}}</here> 并输入此代码：",
-    waiting:
-      "正在等待批准…你可以在任意设备上完成。用量会计入此 ChatGPT 套餐的 Codex 额度。",
+    waiting: "等待批准 —— 你可以在任何设备上完成。",
   },
 
   skills: {
@@ -771,32 +740,28 @@ const zhHans: typeof en = {
     confirmDeletePlugin:
       "删除“{{name}}”？这会移除其中的每个技能，以及它在技能包库中的条目。",
     title: "在此创作",
-    desc: "技能存放在本服务器数据库中的插件。智能体通过创作工具写入它们；你可以在这里阅读、回滚与删除。",
     loadingHistory: "正在加载历史…",
     historyFailed: "无法读取此技能的历史。",
     deleted: "已删除",
     restore: "恢复",
     newPlugin: "新建插件",
     newPluginPlaceholder: "field-notes",
-    empty: "还没有创作内容。选中创作工具的会话可以在这里写入技能。",
+    empty: "还没有编写任何内容。",
   },
 
   run: {
     interrupt: "\u4e2d\u65ad",
     retry: "\u91cd\u8bd5",
-    confirmRetry:
-      "\u91cd\u8bd5 {{step}}\uff1f\u5b83\u4f1a\u5728\u4e0a\u4e00\u6b21\u5c1d\u8bd5\u7559\u4e0b\u7684\u5de5\u4f5c\u533a\u72b6\u6001\u4e0a\u91cd\u65b0\u8fd0\u884c\u3002",
+    confirmRetry: "重试 {{step}}？工作区不会回滚。",
     steps: "\u6b65\u9aa4",
     stepRunning: "\u6709\u6b65\u9aa4\u6b63\u5728\u8fd0\u884c\u3002",
-    retryHint: "\u91cd\u65b0\u8fd0\u884c\u6b64\u6b65\u9aa4\u3002\u5de5\u4f5c\u533a\u4e0d\u4f1a\u56de\u6eda\u3002",
+    retryHint: "工作区不会回滚。",
     noRunTranscript: "\u8fd0\u884c\u672c\u8eab\u6ca1\u6709\u5bf9\u8bdd\u8bb0\u5f55 \u2014\u2014 \u6253\u5f00\u67d0\u4e2a\u6b65\u9aa4\u624d\u80fd\u9605\u8bfb",
-    runHint: "\u8fd9\u5f20\u56fe\u5c31\u662f\u672c\u6b21\u8fd0\u884c\u3002\u6253\u5f00\u4e00\u4e2a\u6b65\u9aa4\u67e5\u770b\u5b83\u505a\u4e86\u4ec0\u4e48\u3002",
+    runHint: "打开一个步骤来查看它做了什么。",
   },
 
   skillsPage: {
-    desc: "可共享的技能包，从 git 仓库安装 —— 可按会话选用。",
     installTitle: "安装技能包",
-    installDesc: "可以是一个技能包，也可以是一个技能市场 —— horsie 会自行判断。这可能需要几秒。",
     gitUrl: "Git 地址",
     gitUrlPlaceholder: "https://github.com/owner/skills-bundle",
     ref: "分支或标签（可选）",
@@ -804,16 +769,13 @@ const zhHans: typeof en = {
     install: "安装",
     marketplaces: "市场",
     marketplacesWhat: "市场",
-    marketplacesDesc: "你添加过的目录。移除其中一个不会影响已从中安装的技能包。",
     installedTitle: "已安装的技能包",
     installedDesc: "打开某个技能包的开关，即可让新会话默认选中它。",
     empty: "尚未安装任何技能包。",
   },
 
   memoryPage: {
-    desc: "智能体保存并回读的持久笔记 —— 归入可按会话选用的空间。",
     spaces: "记忆空间",
-    spacesDesc: "空间是记忆的命名空间。会话可以选择自己能读写哪些空间。",
     newSpace: "新建空间",
     newSpacePlaceholder: "ops",
     createSpaceFailed: "创建空间失败。",
@@ -821,7 +783,6 @@ const zhHans: typeof en = {
     memories: "记忆",
     memoriesIn: "{{space}} 中的记忆",
     memoriesWhat: "记忆",
-    memoriesDesc: "这些由智能体自己写入。凡是有误或不再有用的，都可以编辑或删除。",
     createSpaceFirst: "请先创建一个记忆空间。",
     addMemory: "添加记忆",
     noMemories: "此空间中还没有记忆。",
@@ -847,11 +808,9 @@ const zhHans: typeof en = {
   },
 
   account: {
-    desc: "此服务器的登录方式。",
     tokens: "机器令牌",
     tokensWhat: "机器令牌",
-    tokensDesc:
-      "供无人值守运行的运行时供应方进程使用。在你自己的机器上，<cmd>horsie auth login</cmd> 就够了 —— 只有在无人批准的场景才需要令牌。机器令牌只能连接运行时，别的什么都做不了：它不能读取会话、修改设置，也不能再创建令牌。",
+    tokensDesc: "供无人值守的运行时进程使用。机器令牌只能用来连接运行时。",
     tokenLabelPlaceholder: "这个令牌给哪台机器用？",
     copyNow: "请立即复制 —— 它不会再次显示。",
     noTokens: "还没有机器令牌。",
@@ -861,8 +820,7 @@ const zhHans: typeof en = {
     confirmRevoke: "吊销机器令牌“{{label}}”？仍在使用它的一切都将无法连接。",
     disabled:
       "此部署未启用身份验证，因此没有需要管理的账户。任何能访问此服务器的人都拥有完全权限。",
-    mustChange:
-      "此服务器仍在使用首次启动时生成的密码。请在下方修改 —— 这也会从状态目录中删除 <file>initial-admin-password</file> 文件。",
+    mustChange: "本服务器仍在使用首次启动时生成的密码。请在下面修改。",
     external: "此服务器的登录由别处管理，因此这里没有可修改的密码。",
     currentPassword: "当前密码",
     newPassword: "新密码（至少 8 个字符）",
@@ -873,15 +831,11 @@ const zhHans: typeof en = {
   runtimesPage: {
     vendorExists:
       "已存在名为“{{name}}”的云端供应方。请从列表中编辑它，或另取一个名称。",
-    absentDefault:
-      "已设为默认，但它的智能体尚未连接。在它接入之前，以它为默认的会话都会启动失败。",
+    absentDefault: "已设为默认，但它的 agent 还没有连接。",
     loading: "正在加载运行时",
     loadFailed: "无法加载设置。请确认 horsie-server 正在运行，然后重新加载。",
-    desc: "会话在哪里执行。智能体进程会连接到此服务器，并在其所在处完成配置；云端供应方则在这里配置。",
     vendors: "供应方",
-    vendorsDesc:
-      "在某台机器上运行 horsie connect，或启动 horsie-velos-runtime 之类的供应方进程，它就会出现在这里。云端供应方无需你自己的进程 —— 每个沙箱都会回拨其回调地址，因此该地址必须能从此服务器之外访问。新会话在未指定时会使用默认项。",
-    empty: "还没有运行时，因此会话无法执行任何一轮。请连接一个智能体，或在下方添加云端供应方。",
+    empty: "还没有运行时。连接一个 agent，或在下面添加云端供应方。",
     cloudVendors: "云端供应方",
     checking: "检查中…",
     answering: "有响应",
@@ -904,8 +858,7 @@ const zhHans: typeof en = {
     imagePlaceholder: "ghcr.io/you/horsie-runtime:latest",
     workspaceRootPlaceholder: "/workspaces",
     flyApp: "Fly 应用",
-    flyAppHint:
-      "必须已经存在 —— 请用 `fly apps create` 创建。horsie 只在其中创建机器。",
+    flyAppHint: "必须已经存在。",
     velosUrl: "velos 服务器地址",
     apiToken: "API 令牌",
     leaveBlank: "留空表示保持不变",
@@ -918,21 +871,15 @@ const zhHans: typeof en = {
     memoryMb: "内存（MB）",
     cpus: "CPU 核数",
     volumeSizeGb: "卷大小（GB）",
-    volumesHint: "为每个运行时分配一个卷，这样停止后仍能保留其工作区",
-    velosNoVolumes:
-      "velos 没有卷：停止会话会删除其容器，下一条消息会调度一个全新的容器并重新执行预置流程。",
+    volumesHint: "给每个运行时一个卷",
   },
 
   githubApp: {
-    desc: "此服务器所扮演的 GitHub App 的注册信息。设置一次即可；用户随后可在“设置 → 集成”中连接自己的账户。",
     credentials: "凭据",
-    credentialsDesc:
-      "来自该应用在 GitHub 上的页面。密钥与私钥只写不读 —— 服务器只会报告它们是否已设置。",
     clientId: "Client ID",
     clientIdError: "Client ID 是用来标识该应用的。",
     clientSecret: "Client Secret",
     appId: "App ID",
-    appIdHint: "该应用在 GitHub 页面上显示的数字。",
     appIdError: "App ID 是该应用在 GitHub 页面上显示的数字。",
     privateKey: "私钥（PEM 或 base64）",
     privateKeyHint: "请粘贴完整的 PEM，包含 BEGIN 与 END 行。",
@@ -942,8 +889,7 @@ const zhHans: typeof en = {
     configured: "应用已配置。<lnk>连接一个账户</lnk>",
     notConfigured: "尚未配置 —— 在配置好之前，会话无法克隆任何仓库。",
     callback: "回调",
-    callbackDesc:
-      "GitHub 在用户授权后将其送回的地址。horsie 会依据请求推导它，并遵循 X-Forwarded-Proto，因此配置正确的反向代理无需在此设置。只有当 horsie 无法得知自己的公开地址时才需要设置 —— 例如代理不转发协议，或存在路径前缀。",
+    callbackDesc: "只有在 horsie 无法得知自己的公开地址时才需要填写。",
     callbackBase: "回调基础地址",
     callbackPlaceholder: "https://horsie.example.com",
     callbackError: "需要一个绝对地址，例如 https://horsie.example.com。",
@@ -957,24 +903,17 @@ const zhHans: typeof en = {
     saveFailed: "保存智能体失败。",
     namePlaceholder: "reviewer",
     descriptionPlaceholder: "这个智能体是做什么的",
-    descriptionHint: "用于清单展示。智能体本身看不到它。",
     instructions: "指令",
     instructionsPlaceholder: "该智能体应如何工作 —— 会加入它的系统提示",
-    instructionsHint: "每一轮都会发送给模型，位于工作区自带的指令文件之后。",
     configuration: "配置",
-    configurationHint: "由此预设启动的每个会话所使用的配置。",
     tuning: "调优",
     tunable: "允许调优智能体改进此预设",
-    tunableHint:
-      "定时智能体可以读取由此预设产生的会话记录并改写它 —— 包括指令、技能、工具与记忆。除非你打开，否则不会启用。",
   },
 
   modelCards: {
     nameRequired: "名称为必填项。",
     mustBePositive: "{{label}}必须是正整数。",
-    desc: "常见模型及其 token 上限。“设置 → 模型”会据此自动补全模型 ID 并预填空白的上限字段；编辑模型卡永远不会改动已配置好的模型。",
     catalog: "目录",
-    catalogDesc: "每个常见模型一条记录。",
     empty: "还没有模型卡。",
     loadFailed: "无法加载模型卡。",
     filterPlaceholder: "按模型 ID 或名称筛选…",
@@ -996,14 +935,13 @@ const zhHans: typeof en = {
     thinkingDialectOptional: "思考协议方言（可选）",
     thinkingEfforts: "思考强度",
     thinkingEffortsOptional: "思考强度（可选）",
-    thinkingEffortsHint: "此模型接受的取值，由低到高。不支持思考控制的模型请留空。",
+    thinkingEffortsHint: "从低到高。没有思考控制的模型请留空。",
     defaultEffort: "默认强度",
     defaultEffortOptional: "默认思考强度（可选）",
     forcedTools: "固定工具选择时禁用思考",
     supportsImages: "可以接收图片",
     supportsDocuments: "可以接收文档（PDF）",
-    forcedToolsHint:
-      "适用于在开启思考时拒绝强制 <mono>tool_choice</mono> 的后端 —— DeepSeek 会返回 400“Thinking mode does not support this tool_choice”。",
+    forcedToolsHint: "DeepSeek 需要开启。",
     addCard: "添加模型卡",
     confirmDelete: "删除模型卡“{{name}}”？已配置的模型会保留当前取值。",
   },
@@ -1018,7 +956,6 @@ const zhHans: typeof en = {
     vendor: "运行时供应方",
     selectVendor: "选择一个运行时供应方",
     vendorNotConnected: "{{name}} —— 未连接",
-    vendorHint: "只有能自行预置工作区的供应方才能运行环境，因此本地运行时不会列出。",
     noProvisioningVendor:
       "已连接的供应方中没有一个能自行预置工作区，因此目前无法运行任何环境。请在<lnk>设置 › 运行时</lnk>中添加一个。",
     envVars: "环境变量",
@@ -1028,7 +965,7 @@ const zhHans: typeof en = {
     removeEnvVar: "移除环境变量",
     addEnvVar: "添加环境变量",
     provision: "预置步骤",
-    provisionHint: "一个由 {name, uses, with} 步骤组成的 JSON 数组。目前还没有任何东西会执行它们。",
+    provisionHint: "目前还不会执行。",
     provisionInvalid: "预置步骤必须是由 {name, uses, with} 组成的 JSON 数组。",
     reposFromGithub:
       "仓库来自你的 GitHub App 安装。<lnk>连接 GitHub</lnk> 即可选择。",
@@ -1048,12 +985,7 @@ const zhHans: typeof en = {
     chooseAgent: "选择一个智能体…",
     runs: "运行",
     chooseWorkflow: "选择一个工作流…",
-    workflowHint:
-      "每次触发都会启动这个工作流的一次运行，并把下面的提示词作为它的输入。每个步骤都自带智能体预设。",
-    agentHint: "例行任务会使用该智能体的模型、技能与记忆。这些请在“智能体”页面编辑。",
-    environmentHint:
-      "每次运行发生的地方。若某次运行的环境已不存在 —— 运行时离线、环境被删除 —— 该次运行会失败并在此说明。",
-    promptPlaceholder: "运行时会收到的全部说明。它无法向你提问，因此请写明遇到取舍时该怎么做。",
+    promptPlaceholder: "这次运行要做什么。它没法向你提问。",
     trigger: "触发方式",
     kindManual: "仅在我手动运行时",
     kindEvery: "按间隔重复",
@@ -1079,8 +1011,7 @@ const zhHans: typeof en = {
     shortestInterval_one: "最短间隔为 {{count}} 分钟。",
     shortestInterval_other: "最短间隔为 {{count}} 分钟。",
     timerActive: "启用定时",
-    timerHint:
-      "无论是否启用定时，运行按钮与 API 都可用 —— 暂停只会停掉定时器。运行之间不会互相阻止重叠，因此请留出足够的间隔让它跑完。",
+    timerHint: "暂停只停掉定时器 —— 立即运行和 API 仍然可用。",
   },
 
   stepForm: {
@@ -1089,8 +1020,7 @@ const zhHans: typeof en = {
       "名为 <name>{{agent}}</name> 的智能体已不存在，因此工作流运行时该步骤会失败。请另选一个，或重新创建它。",
     promptPlaceholder: "此步骤应做什么。它的输入会附加在下方。",
     outcomes: "结果",
-    outcomesHint:
-      "此步骤可能的结束方式。步骤会选定其中之一，而这也是流转判断唯一读取的东西。每一项都需要描述 —— 模型正是靠它来做选择。",
+    outcomesHint: "每一项都需要说明 —— 模型靠它来选择。",
     outcomePlaceholder: "success",
     outcomeDescPlaceholder: "它代表什么",
     removeOutcome: "移除结果 {{name}}",
@@ -1106,10 +1036,8 @@ const zhHans: typeof en = {
     removeField: "移除字段 {{name}}",
     addField: "添加字段",
     canAsk: "可以向人提问",
-    canAskHint: "为此步骤提供 ask_user 工具。没有它，步骤就无法提问，只能自行决定。",
     goesTo: "流转到",
-    goesToHint:
-      "按顺序尝试，第一个匹配的生效。未指定结果的一行即为兜底。若都不匹配，运行结束。",
+    goesToHint: "按顺序匹配，第一条命中的生效。都不匹配则结束运行。",
     opAlways: "总是",
     opIn: "结果属于",
     opNotIn: "结果不属于",
@@ -1120,8 +1048,6 @@ const zhHans: typeof en = {
     maxIterations: "最大轮数",
     unlimited: "不限",
     retries: "重试次数",
-    limitsHint:
-      "此步骤在失败前最多可进行多少轮，以及其中的临时性服务商错误最多重试几次。两项留空即使用默认值。",
   },
 
   workflowEdit: {
@@ -1138,8 +1064,6 @@ const zhHans: typeof en = {
     namePlaceholder: "fix-bug",
     stepBudget: "步骤预算",
     stepBudgetPlaceholder: "100（默认）",
-    stepBudgetHint:
-      "一次运行最多可执行的步骤数。它用来终止那些条件永远不翻转的循环；若某个图确实需要多次循环，请调高它。",
     startsAt: "起始步骤",
     chooseAStep: "—— 请选择一个步骤 ——",
     noSuchStep: "{{name}}（此步骤不存在）",
@@ -1153,10 +1077,8 @@ const zhHans: typeof en = {
     noProviders: "还没有服务商。",
     noModelsFor: "还没有模型经由 {{provider}} 路由。",
     title: "模型与服务商",
-    desc: "API 端点，以及会话可选用的模型别名。每个服务商与每个模型各自独立保存 —— 打开一个、编辑它、按它自己的“保存”。",
     loadFailed: "无法加载设置。<cmd>horsie serve</cmd> 在运行吗？",
     providers: "服务商",
-    providersDesc: "API 端点。选择其中一个即可查看经由它路由的模型。",
     kind: {
       anthropic: "Anthropic",
       openai: "OpenAI 兼容",
@@ -1189,28 +1111,22 @@ const zhHans: typeof en = {
     chatgptSignInFor: "{{name}} 的 ChatGPT 登录",
     connect: "连接",
     modelsFor: "模型 · {{provider}}",
-    modelsDesc: "会话可选用的别名。每个别名都指向此服务商上的一个模型 ID。",
     providerNamePlaceholder: "anthropic",
-    baseUrlHint: "只填主机 —— horsie 会自行补上 API 路径。应填 {{example}}，而不是 {{example}}/v1。",
+    baseUrlHint: "只填主机名 —— {{example}}，不是 {{example}}/v1。",
     inlineKey: "内联密钥",
     willBeCleared: "保存时将被清除",
     notSetLower: "未设置",
     clearKey: "保存时清除已存储的密钥",
-    chatgptHint: "ChatGPT 套餐通过登录授权，而非密钥。请在列表中它所在的那一行连接。",
-    chatgptHintNew:
-      "ChatGPT 套餐通过登录授权，而非密钥。保存之后，请在列表中它所在的那一行连接。",
+    chatgptHint: "在列表中它那一行连接。",
+    chatgptHintNew: "保存后，在列表中它那一行连接。",
     keepSignatures: "保留思考签名",
-    keepSignaturesHint:
-      "api.anthropic.com 必需，它会在重放时校验这些签名。对于 Anthropic 兼容端点请关闭 —— 每个思考块的签名有好几 KB，而且没有任何东西会读它们。",
+    keepSignaturesHint: "api.anthropic.com 需要开启。",
     alias: "别名",
     aliasPlaceholder: "sonnet",
     provider: "服务商",
     thinkingEfforts: "此模型提供的思考强度",
     wireDialect: "协议方言",
-    forcedToolsHint:
-      "DeepSeek 必需，它在开启思考时会拒绝强制的工具选择。必须调用交接工具的子智能体将在不思考的情况下运行。",
-    visionHint:
-      "只有能够接收附件的模型才会加载附件内容。两项都未勾选的模型只会被告知附件已被略过，而不会收到它读不了的字节。",
+    forcedToolsHint: "DeepSeek 需要开启。",
   },
 
   mcpChannel: {
@@ -1221,9 +1137,7 @@ const zhHans: typeof en = {
     toolCount_other: "{{count}} 个工具",
   },
   integrations: {
-    desc: "GitHub、MCP 服务器，以及此服务器的构建信息。",
     github: "GitHub",
-    githubDesc: "连接你的 GitHub 账户，让会话可以克隆你的仓库。",
     connectedAs: "已连接为 <login>@{{login}}</login>",
     disconnect: "断开连接",
     appConfigured: "应用已配置 —— 连接你的账户。",
@@ -1231,8 +1145,6 @@ const zhHans: typeof en = {
       "此服务器尚未注册 GitHub App。请在<lnk>管理 → GitHub App</lnk>中设置一个。",
     registerFirst: "请先在“管理”中注册 GitHub App",
     githubTools: "GitHub 工具（MCP）",
-    githubToolsDesc:
-      "让会话通过此连接调用 GitHub MCP 服务器（创建 PR、搜索 issue 等）。",
     enable: "启用",
     disable: "停用",
     test: "测试",
@@ -1244,20 +1156,16 @@ const zhHans: typeof en = {
     toolCount_other: "{{count}} 个工具",
     description: "描述",
     descriptionPlaceholder: "这个服务器的用途",
-    descriptionHint:
-      "在列出该服务器的地方都会显示。留空则使用服务器自述。",
+    descriptionHint: "留空则使用服务器自己的说明。",
     serverInstructions: "服务器的说明",
     tools: "工具列表",
     noTools: "该服务器未提供任何工具。",
     noToolDescription: "无描述",
     notTested: "未测试",
-    mcpDesc:
-      "远程 Model Context Protocol 服务器。会话可选择使用哪些；它们的工具会以 <mono/> 的形式出现。",
     addServer: "添加服务器",
     noServers: "尚未配置 MCP 服务器。",
     namePlaceholder: "linear",
-    nameHint:
-      "字母、数字、“-”与“_”。它会成为每个工具 ID 的一部分：mcp__<name>__<tool>。",
+    nameHint: "字母、数字、'-' 和 '_'。",
     url: "地址",
     urlPlaceholder: "https://mcp.example.com/",
     auth: "鉴权",
@@ -1288,38 +1196,26 @@ const zhHans: typeof en = {
 
   appearance: {
     title: "外观",
-    desc: "此浏览器如何呈现 horsie。设置保存在本地而非服务器，因此你用的每个浏览器可以各不相同。",
     themeTitle: "主题",
-    themeDesc:
-      "布局相同，质感不同。每个主题都提供浅色与深色，且两者都经过 WCAG AA 实测。",
     themeGroup: "主题",
     modeTitle: "浅色或深色",
-    modeDesc: "“跟随系统”会采用你的操作系统设置，并在此标签页打开期间持续跟随。",
     modeGroup: "模式",
     modeLight: "浅色",
     modeDark: "深色",
     modeSystem: "跟随系统",
     textSizeTitle: "文字大小",
-    textSizeDesc:
-      "会缩放界面中的每一处尺寸，让间距随字号一起变化，而不是让字撑破它的位置。",
     textSizeGroup: "文字大小",
     transcriptTitle: "对话记录",
-    transcriptDesc:
-      "会话视图显示什么。这些是显示开关，而不是会话设置 —— 它们完全不会改变智能体的运行方式。",
     languageTitle: "语言",
-    languageDesc: "此界面所使用的语言。“跟随系统”会采用你的浏览器设置并持续跟随。",
     languageGroup: "语言",
     languageSystem: "跟随系统",
     languageSystemNote: "跟随浏览器",
     skin: {
       paper: {
         name: "纸感",
-        blurb:
-          "由内到外的暖调 —— 浅色下是骨白，深色下是暖炭黑，只有那一个提交操作用朱红。",
       },
       signal: {
         name: "信号",
-        blurb: "与之相反的冷调 —— 蓝黑底色配单一的青柠强调色。布局相同，色温不同。",
       },
     },
     textSize: {

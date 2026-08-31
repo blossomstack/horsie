@@ -361,7 +361,6 @@ export function ModelsSettings() {
   return (
     <SettingsPage
         title={t("modelsPage.title")}
-        desc={t("modelsPage.desc")}
         saving={busy}
         saved={wroteOk}
     >
@@ -389,7 +388,6 @@ export function ModelsSettings() {
           <>
             <Section
               title={t("modelsPage.providers")}
-              desc={t("modelsPage.providersDesc")}
               onAdd={() => {
                 setAddingProvider(true);
                 setEditingProvider(null);
@@ -529,7 +527,6 @@ export function ModelsSettings() {
             {selected && (
               <Section
                 title={t("modelsPage.modelsFor", { provider: selected })}
-                desc={t("modelsPage.modelsDesc")}
                 onAdd={() => {
                   setAddingModel(true);
                   setEditingModel(null);
@@ -1031,7 +1028,6 @@ function ModelEditor({
               {t("modelCards.supportsDocuments")}
             </label>
           </div>
-          <p className="mt-1 text-xs text-dim">{t("modelsPage.visionHint")}</p>
         </div>
       </div>
     </Editor>

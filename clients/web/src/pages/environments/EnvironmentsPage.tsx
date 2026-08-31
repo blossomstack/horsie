@@ -57,15 +57,15 @@ export function EnvironmentsPage() {
         <p className="px-2.5 py-6 text-sm text-red-ink">{t("rail.unreachable")}</p>
       )}
       {environments && environments.length === 0 && (
-        <section className="section m-1" data-testid="environments-empty">
-          <h2 className="legend">{t("environments.rosterTitle")}</h2>
-          <p className="mt-3 text-sm leading-relaxed text-dim">
-            <Trans
-              i18nKey="environments.rosterBlurb"
-              components={{ key: <span className="text-legend" /> }}
-            />
-          </p>
-        </section>
+        <p
+          className="px-2.5 py-6 text-sm text-faint"
+          data-testid="environments-empty"
+        >
+          <Trans
+            i18nKey="environments.rosterEmpty"
+            components={{ key: <span className="text-legend" /> }}
+          />
+        </p>
       )}
       <div className="list-divided">
         {(environments ?? []).map((e) => (
