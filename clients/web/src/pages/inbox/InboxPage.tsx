@@ -4,9 +4,8 @@ import { useTranslation } from "react-i18next";
 import type { InboxScope } from "../../api/client";
 import { InboxState, type InboxMessageView } from "../../api/types";
 import { InboxMessage } from "../../components/InboxMessage";
-import { RailToggle } from "../../components/rail";
+import { ListDetail, NothingSelected } from "../../components/ListDetail";
 import { useDeleteInboxMessages, useInbox, useMarkInboxRead } from "../../hooks/useInbox";
-import { useScrolledUnder } from "../../hooks/useScrolledUnder";
 import { useSessionList } from "../../hooks/useSessions";
 import { askConfirm } from "../../lib/confirm";
 import { cn } from "../../lib/cn";
@@ -32,7 +31,6 @@ const VIEW_LABELS = {
 
 export function InboxPage() {
   const { t } = useTranslation();
-  const { onScroll, barProps } = useScrolledUnder();
   const [view, setView] = useState<View>("all");
   const [picked, setPicked] = useState<ReadonlySet<string>>(new Set());
   // The message being read, kept rather than looked up by id alone: opening an
@@ -106,26 +104,22 @@ export function InboxPage() {
   };
 
   return (
-    <div className="flex h-full" data-testid="inbox-page">
-      <div className="column-edge-r flex h-full w-[20rem] shrink-0 flex-col bg-panel">
-        <header
-          {...barProps}
-          className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 px-4"
-        >
-          <RailToggle />
-          <h1 className="page-title">{t("inbox.title")}</h1>
-          {picked.size > 0 && (
-            <button
-              className="key key-stop key-sm ml-auto"
-              onClick={remove}
-              data-testid="inbox-delete-selected"
-            >
-              <Trash2 size={14} aria-hidden />
-              {t("inbox.deleteSelected", { count: picked.size })}
-            </button>
-          )}
-        </header>
-
+    <ListDetail
+      testId="inbox-page"
+      title={t("inbox.title")}
+      action={
+        picked.size > 0 && (
+          <button
+            className="key key-stop key-sm shrink-0"
+            onClick={remove}
+            data-testid="inbox-delete-selected"
+          >
+            <Trash2 size={14} aria-hidden />
+            {t("inbox.deleteSelected", { count: picked.size })}
+          </button>
+        )
+      }
+      filters={
         <div className="flex items-center gap-1.5 px-3 pb-2">
           {(Object.keys(VIEWS) as View[]).map((v) => (
             <button
@@ -140,8 +134,20 @@ export function InboxPage() {
             </button>
           ))}
         </div>
-
-        <div className="flex-1 space-y-px overflow-y-auto px-2 pb-2" onScroll={onScroll}>
+      }
+      detail={
+        current ? (
+          <InboxMessage
+            key={current.id}
+            message={current}
+            sessionName={sessionName(current.sessionId)}
+          />
+        ) : (
+          <NothingSelected>{t("inbox.pickOne")}</NothingSelected>
+        )
+      }
+    >
+      <div className="space-y-px">
           {isLoading && (
             <p className="px-2.5 py-6 text-sm text-faint">{t("common.loading")}</p>
           )}
@@ -214,20 +220,7 @@ export function InboxPage() {
               </div>
             );
           })}
-        </div>
       </div>
-
-      <div className="min-w-0 flex-1 overflow-y-auto">
-        {current ? (
-          <InboxMessage
-            key={current.id}
-            message={current}
-            sessionName={sessionName(current.sessionId)}
-          />
-        ) : (
-          <p className="px-6 py-8 text-sm text-faint">{t("inbox.pickOne")}</p>
-        )}
-      </div>
-    </div>
+    </ListDetail>
   );
 }

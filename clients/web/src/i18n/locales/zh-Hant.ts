@@ -623,6 +623,7 @@ const zhHant: typeof en = {
     memoryCount_other: "{{count}} 個記憶",
     mcpCount: "{{count}} 個 MCP",
     confirmDelete: "刪除智慧代理「{{name}}」？",
+    pickOne: "選擇一個智慧代理，檢視它的組態。",
   },
 
   environments: {
@@ -632,9 +633,11 @@ const zhHant: typeof en = {
     rosterTitle: "環境清單",
     rosterBlurb:
       "環境是一份儲存下來的「執行環境 + 儲存庫」組合 —— 決定工作在哪裡執行、在那裡簽出什麼。按<key>新增環境</key>定義一個。",
+    pickOne: "選擇一個環境，檢視執行會從它繼承什麼。",
   },
 
   routines: {
+    pickOne: "選擇一個例行任務，檢視它執行什麼，以及它的執行紀錄。",
     confirmDelete: "刪除例行工作「{{name}}」及它建立的所有工作階段？",
     new: "新增例行工作",
     noSuch: "例行工作不存在：{{name}}。",
@@ -660,6 +663,7 @@ const zhHant: typeof en = {
   workflows: {
     rowMeta_one: "{{count}} 個步驟 · 起始於 {{start}}",
     rowMeta_other: "{{count}} 個步驟 · 起始於 {{start}}",
+    pickOne: "選擇一個工作流程，檢視它的圖和它的執行紀錄。",
     confirmDelete: "刪除工作流程「{{name}}」？它的執行紀錄會繼續留在工作階段側邊欄中。",
     new: "新增工作流程",
     noSuch: "工作流程不存在。",

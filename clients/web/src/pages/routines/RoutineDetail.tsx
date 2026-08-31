@@ -1,11 +1,10 @@
-import { ArrowLeft, Pencil, Play } from "lucide-react";
+import { Pencil, Play, Trash2 } from "lucide-react";
 import { targetOf } from "../../lib/routineTarget";
-import { Link, useParams } from "react-router-dom";
+import { Link } from "react-router-dom";
 import { StatusDot } from "../../components/StatusBadge";
 import { ApiRequestError } from "../../api/client";
 import { useState } from "react";
 import { absoluteTime, relativeTime, sessionTitle } from "../../lib/format";
-import { RailToggle } from "../../components/rail";
 import { ReadError } from "../../components/ReadError";
 import { describeSchedule } from "../../lib/schedule";
 import {
@@ -15,8 +14,13 @@ import {
 } from "../../hooks/useRoutines";
 import { useTranslation } from "react-i18next";
 
-export function RoutineDetailPage() {
-  const { name } = useParams<{ name: string }>();
+export function RoutineDetail({
+  name,
+  onDelete,
+}: {
+  name: string;
+  onDelete: () => void;
+}) {
   const { data: routine, isLoading, isError } = useRoutine(name);
   const {
     data: runs,
@@ -50,17 +54,8 @@ export function RoutineDetailPage() {
   const target = targetOf(routine.target);
   return (
     <div className="flex h-full flex-col" data-testid="routine-detail-page">
-      <div className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
-        <RailToggle />
-        <Link
-          to="/routines"
-          className="key key-sm"
-          data-testid="return-to-routines"
-        >
-          <ArrowLeft size={15} />
-          {t("common.return")}
-        </Link>
-        <h1 className="page-title min-w-0 flex-1 truncate">{routine.name}</h1>
+      <header className="flex h-[var(--header-h)] shrink-0 items-center gap-2 bar-scroll px-6">
+        <h2 className="page-title min-w-0 flex-1 truncate">{routine.name}</h2>
         {!routine.enabled && (
           <span className="rounded-full px-2 py-0.5 text-[0.6875rem] text-faint">
             {t("routines.paused")}
@@ -68,7 +63,7 @@ export function RoutineDetailPage() {
         )}
         <Link
           to={`/routines/${encodeURIComponent(routine.name)}/edit`}
-          className="key ml-auto key-sm"
+          className="key key-sm"
           data-testid="edit-routine-link"
         >
           <Pencil size={15} />
@@ -83,10 +78,19 @@ export function RoutineDetailPage() {
           <Play size={15} />
           {run.isPending ? t("routines.starting") : t("routines.runNow")}
         </button>
-      </div>
+        <button
+          className="key-icon hover:!bg-red-quiet hover:!text-red-ink"
+          onClick={onDelete}
+          title={t("common.deleteNamed", { name: routine.name })}
+          aria-label={t("common.deleteNamed", { name: routine.name })}
+          data-testid="delete-routine"
+        >
+          <Trash2 size={15} aria-hidden />
+        </button>
+      </header>
 
       <div className="flex-1 overflow-y-auto px-6 py-4">
-        <div className="mx-auto w-full max-w-3xl space-y-5">
+        <div className="w-full space-y-5">
           {routine.description && (
             <p className="text-sm text-dim">{routine.description}</p>
           )}

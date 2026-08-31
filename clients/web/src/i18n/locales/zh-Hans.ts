@@ -625,6 +625,7 @@ const zhHans: typeof en = {
     memoryCount_other: "{{count}} 个记忆",
     mcpCount: "{{count}} 个 MCP",
     confirmDelete: "删除智能体“{{name}}”？",
+    pickOne: "选择一个智能体，查看它的配置。",
   },
 
   environments: {
@@ -634,9 +635,11 @@ const zhHans: typeof en = {
     rosterTitle: "环境清单",
     rosterBlurb:
       "环境是一份保存下来的“运行时 + 仓库”组合 —— 决定工作在哪里运行、在那里检出什么。按<key>新建环境</key>定义一个。",
+    pickOne: "选择一个环境，查看运行会从它继承什么。",
   },
 
   routines: {
+    pickOne: "选择一个例行任务，查看它运行什么，以及它的运行记录。",
     confirmDelete: "删除例行任务“{{name}}”及它创建的所有会话？",
     new: "新建例行任务",
     noSuch: "例行任务不存在：{{name}}。",
@@ -662,6 +665,7 @@ const zhHans: typeof en = {
   workflows: {
     rowMeta_one: "{{count}} 个步骤 · 起始于 {{start}}",
     rowMeta_other: "{{count}} 个步骤 · 起始于 {{start}}",
+    pickOne: "选择一个工作流，查看它的图和它的运行记录。",
     confirmDelete: "删除工作流“{{name}}”？它的运行记录会继续留在会话侧栏中。",
     new: "新建工作流",
     noSuch: "工作流不存在。",

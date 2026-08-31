@@ -27,9 +27,20 @@ test("N1: agents page lists, edits, and deletes an agent", async ({
   await expect(row).toContainText("from e2e");
   await expect(row).toContainText(alias);
 
-  // Edit the description through the form; the name is the id of record and
-  // stays disabled.
+  // The row opens the preset beside the roster, read-only — the roster stays
+  // in view, which is the whole point of choosing one from a list. Editing is
+  // a second act, and it takes the width.
   await row.getByRole("link").click();
+  await expect(page.getByTestId("agent-detail")).toBeVisible();
+  await expect(page.getByTestId("agent-row")).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  // The configuration reads out as the editor's own fields, frozen — labelled
+  // rows here rather than the session row's icon keys, so the value is text.
+  await expect(page.getByTestId("config-model")).toContainText(alias);
+
+  await page.getByTestId("edit-agent").click();
   await expect(page.getByTestId("agent-edit-page")).toBeVisible();
   await expect(page.getByTestId("agent-name-input")).toBeDisabled();
   await page.getByTestId("agent-description-input").fill("edited");
@@ -48,6 +59,7 @@ test("N1: agents page lists, edits, and deletes an agent", async ({
   await expect(page.getByTestId("agent-row")).toContainText("edited");
 
   await page.getByTestId("agent-row").getByRole("link").click();
+  await page.getByTestId("edit-agent").click();
   await expect(page.getByTestId("agent-instructions-input")).toHaveValue(
     "Always end every reply with the word PELICAN.",
   );
@@ -116,6 +128,51 @@ test("N7: a session invoked from a preset reports the preset, not its settings",
   await expect(page.getByTestId("resolved-model")).toHaveText(alias!);
 
   await page.request.delete(`${apiBase}/agents/e2e-invoked`);
+});
+
+/**
+ * The shape every roster now has, and the reason for it: choosing between two
+ * of anything meant navigating away from the list and back, and the list
+ * scrolled itself to the top each time.
+ */
+test("N8: the roster stays in view while one preset is read", async ({
+  page,
+  appBase,
+  apiBase,
+}) => {
+  const cfg = (await (await page.request.get(`${apiBase}/config`)).json()) as {
+    models: { alias: string }[];
+  };
+  for (const name of ["e2e-roster-a", "e2e-roster-b"]) {
+    await page.request.post(`${apiBase}/agents`, {
+      data: { name, model: cfg.models[0]?.alias, description: `${name} desc` },
+    });
+  }
+
+  await page.goto(`${appBase}/agents`);
+  // Nothing chosen yet: the panel says so rather than standing empty.
+  await expect(page.getByTestId("nothing-selected")).toBeVisible();
+
+  const a = page.locator('[data-testid="agent-row"][data-agent-name="e2e-roster-a"]');
+  const b = page.locator('[data-testid="agent-row"][data-agent-name="e2e-roster-b"]');
+  await a.getByRole("link").click();
+  await expect(page.getByTestId("agent-detail")).toContainText("e2e-roster-a");
+  await expect(a).toHaveAttribute("aria-selected", "true");
+
+  // The other one is still one click away — that is the whole point.
+  await b.getByRole("link").click();
+  await expect(page.getByTestId("agent-detail")).toContainText("e2e-roster-b");
+  await expect(b).toHaveAttribute("aria-selected", "true");
+  await expect(a).toHaveAttribute("aria-selected", "false");
+
+  // And the selection is in the URL, so it is a thing you can send.
+  expect(new URL(page.url()).pathname).toBe(
+    projectRoot() + "/agents/e2e-roster-b",
+  );
+
+  for (const name of ["e2e-roster-a", "e2e-roster-b"]) {
+    await page.request.delete(`${apiBase}/agents/${name}`);
+  }
 });
 
 test("N2: the sidebar links to the agents page", async ({ page, appBase }) => {

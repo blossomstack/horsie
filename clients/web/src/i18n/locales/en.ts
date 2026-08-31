@@ -639,10 +639,12 @@ const en = {
     memoryCount_other: "{{count}} memory",
     mcpCount: "{{count}} MCP",
     confirmDelete: "Delete agent '{{name}}'?",
+    pickOne: "Choose an agent to read what it is set to.",
   },
 
   environments: {
     confirmDelete: "Delete environment '{{name}}'?",
+    pickOne: "Choose an environment to read what a run inherits from it.",
     new: "New environment",
     loading: "Loading environments",
     rosterTitle: "Environment roster",
@@ -651,6 +653,7 @@ const en = {
   },
 
   routines: {
+    pickOne: "Choose a routine to read what it runs and what its runs did.",
     confirmDelete: "Delete routine '{{name}}' and every session it created?",
     new: "New routine",
     noSuch: "No such routine: {{name}}.",
@@ -676,6 +679,7 @@ const en = {
   workflows: {
     rowMeta_one: "{{count}} step \u00b7 starts at {{start}}",
     rowMeta_other: "{{count}} steps \u00b7 starts at {{start}}",
+    pickOne: "Choose a workflow to read its graph and its runs.",
     confirmDelete:
       'Delete workflow "{{name}}"? Its runs stay in the session rail.',
     new: "New workflow",
