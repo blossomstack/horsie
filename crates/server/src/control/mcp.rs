@@ -25,12 +25,30 @@ impl Resource for Mcp {
                 Method::Get,
                 "/mcp/servers",
                 "Every configured MCP server, with its tokens redacted to a \
-                 has-token flag.",
+                 has-token flag, and a description of what each is for. Tool \
+                 lists are not included; ask `get` for one server's tools.",
                 Expose::ApiAndTool,
                 |s: Arc<ProjectServices>, _i: NoInput| async move {
                     let servers = s.mcp.list().await.map_err(ControlError::Internal)?;
                     // The route answers an object, not a bare array.
                     Ok::<McpServerList, ControlError>(McpServerList { servers })
+                },
+            ),
+            op(
+                "get",
+                Method::Get,
+                "/mcp/servers/{name}",
+                "One server with the tools it advertised at its last successful \
+                 connect, each with its description. `list` deliberately omits \
+                 these — a few servers with forty tools apiece would be a wall \
+                 of text — so this is how to find out what a server can \
+                 actually do.",
+                Expose::ApiAndTool,
+                |s: Arc<ProjectServices>, i: NameRef| async move {
+                    let found = s.mcp.get(&i.name).await.map_err(ControlError::Internal)?;
+                    found.ok_or_else(|| {
+                        ControlError::NotFound(format!("no MCP server '{}'", i.name))
+                    })
                 },
             ),
             op(
@@ -101,7 +119,7 @@ mod tests {
     fn every_action_is_declared_once_on_one_resource() {
         let mut actions: Vec<&str> = operations().iter().map(|o| o.action).collect();
         actions.sort_unstable();
-        assert_eq!(actions, ["delete", "list", "test", "upsert"]);
+        assert_eq!(actions, ["delete", "get", "list", "test", "upsert"]);
         assert_eq!(Mcp.name(), "mcp");
     }
 

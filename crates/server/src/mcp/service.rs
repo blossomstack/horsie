@@ -10,15 +10,14 @@ use std::time::{Duration, Instant};
 
 use crate::agent_loop::{ArtifactSink, McpToolbox, McpToolboxes, McpUnavailable};
 use async_trait::async_trait;
-use horsie_agentcore::Toolbox;
 use horsie_models::mcp::{
-    McpAuthView, McpBearerView, McpConnectResult, McpGithubAppAuth, McpNoAuth, McpServerInput,
-    McpServerView,
+    McpAuthView, McpBearerView, McpConnectResult, McpGithubAppAuth, McpNoAuth, McpServerDetail,
+    McpServerInput, McpServerView,
 };
 use horsie_support::mcp::{BearerProvider, HttpTransport, McpClient, McpError};
 
 use super::oauth::{AsMetadata, McpOAuthClient, build_authorize_url, gen_pkce, gen_state};
-use super::store::{McpServerRow, McpStore, StoredAuth};
+use super::store::{ConnectOutcome, McpServerRow, McpStore, StoredAuth};
 use crate::github::GithubService;
 
 /// How long an in-flight OAuth authorization is honored before it is pruned.
@@ -61,9 +60,21 @@ impl McpService {
         }
     }
 
-    /// The configured servers, redacted for display.
+    /// The configured servers, redacted for display. No tool lists — see
+    /// [`McpService::get`].
     pub async fn list(&self) -> Result<Vec<McpServerView>, String> {
         Ok(self.store.list().await?.iter().map(server_view).collect())
+    }
+
+    /// One server with the tools it advertised at its last successful connect.
+    ///
+    /// `Ok(None)` for a server that is not configured, which the caller turns
+    /// into a 404.
+    pub async fn get(&self, name: &str) -> Result<Option<McpServerDetail>, String> {
+        Ok(self.store.get(name).await?.map(|row| McpServerDetail {
+            server: server_view(&row),
+            tools: row.tools,
+        }))
     }
 
     /// Upsert a server (re-arms it: a `test` is required before it is usable).
@@ -88,23 +99,40 @@ impl McpService {
         };
         match self.build_toolbox(&row).await {
             Ok(tb) => {
-                let count = u32::try_from(tb.specs().len()).unwrap_or(u32::MAX);
-                self.store.set_status(name, true, Some(count), None).await?;
+                self.record_reached(name, &tb).await?;
                 Ok(Some(McpConnectResult {
                     ok: true,
-                    tool_count: Some(count),
+                    tool_count: Some(u32::try_from(tb.tool_defs().len()).unwrap_or(u32::MAX)),
+                    discovered_title: tb.info().title.clone(),
                     error: None,
                 }))
             }
             Err(e) => {
-                self.store.set_status(name, false, None, Some(&e)).await?;
+                self.store
+                    .record_connect(name, ConnectOutcome::Failed(&e))
+                    .await?;
                 Ok(Some(McpConnectResult {
                     ok: false,
                     tool_count: None,
+                    discovered_title: None,
                     error: Some(e),
                 }))
             }
         }
+    }
+
+    /// Persist what a successful connect learned: the server's own description
+    /// and the tools it advertised.
+    async fn record_reached(&self, name: &str, tb: &McpToolbox) -> Result<(), String> {
+        self.store
+            .record_connect(
+                name,
+                ConnectOutcome::Reached {
+                    info: tb.info(),
+                    tools: tb.tool_defs(),
+                },
+            )
+            .await
     }
 
     /// Build a live [`McpToolbox`] per named server for an agent spawn.
@@ -127,13 +155,17 @@ impl McpService {
             };
             match self.build_toolbox(&row).await {
                 Ok(tb) => {
-                    let count = u32::try_from(tb.specs().len()).unwrap_or(u32::MAX);
-                    let _ = self.store.set_status(name, true, Some(count), None).await;
+                    // Every turn reconnects, so every turn is also a free
+                    // refresh of what this server is and what it offers.
+                    let _ = self.record_reached(name, &tb).await;
                     out.boxes.push(Arc::new(tb));
                 }
                 Err(e) => {
                     tracing::warn!(server = %name, error = %e, "MCP server connect failed; skipping");
-                    let _ = self.store.set_status(name, false, None, Some(&e)).await;
+                    let _ = self
+                        .store
+                        .record_connect(name, ConnectOutcome::Failed(&e))
+                        .await;
                     out.unavailable.push(McpUnavailable::Unreachable {
                         server: name.clone(),
                         reason: e,
@@ -444,7 +476,10 @@ fn server_view(row: &McpServerRow) -> McpServerView {
         url: row.url.clone(),
         enabled: row.enabled,
         auth,
-        tool_count: row.tool_count,
+        description: row.effective_description(),
+        user_description: row.description.clone(),
+        instructions: row.discovered_instructions.clone(),
+        tool_count: row.tool_count(),
         last_error: row.last_error.clone(),
     }
 }
@@ -495,7 +530,8 @@ mod tests {
                 "initialize" => json!({
                     "protocolVersion": "2025-06-18",
                     "capabilities": {},
-                    "serverInfo": { "name": "mock", "version": "0" }
+                    "serverInfo": { "name": "mock", "title": "Mock Server", "version": "0" },
+                    "instructions": "echo before you ping"
                 }),
                 "tools/list" => json!({ "tools": [
                     { "name": "echo", "description": "echo", "inputSchema": { "type": "object" } },
@@ -520,6 +556,7 @@ mod tests {
         McpServerInput {
             name: name.into(),
             url: url.into(),
+            description: None,
             auth: McpAuthInput::None(McpNoAuth {}),
         }
     }
@@ -572,6 +609,7 @@ mod tests {
         svc.upsert(McpServerInput {
             name: "generic".into(),
             url: mcp.clone(),
+            description: None,
             auth: McpAuthInput::OAuth(horsie_models::mcp::McpOAuthInput {
                 client_id: Some("cid".into()),
                 client_secret: None,
@@ -617,6 +655,7 @@ mod tests {
         svc.upsert(McpServerInput {
             name: "g".into(),
             url: "http://127.0.0.1:0/".into(),
+            description: None,
             auth: McpAuthInput::OAuth(horsie_models::mcp::McpOAuthInput {
                 client_id: Some("cid".into()),
                 client_secret: None,
@@ -642,6 +681,7 @@ mod tests {
         svc.upsert(McpServerInput {
             name: "o".into(),
             url: "https://mcp.example/".into(),
+            description: None,
             auth: McpAuthInput::OAuth(horsie_models::mcp::McpOAuthInput {
                 client_id: Some("cid".into()),
                 client_secret: None,
@@ -700,6 +740,53 @@ mod tests {
         assert!(view[0].enabled);
         assert_eq!(view[0].tool_count, Some(2));
         assert!(view[0].last_error.is_none());
+    }
+
+    /// The handshake and the tool list are both remembered, so the settings
+    /// page and the picker can say what a server is and what it does without
+    /// dialling it again.
+    #[tokio::test]
+    async fn a_test_remembers_what_the_server_said_and_what_it_offers() {
+        let (svc, _t) = service().await;
+        let url = mock_mcp_server().await;
+        svc.upsert(none_input("mock", &url)).await.unwrap();
+
+        let result = svc.test("mock").await.unwrap().expect("configured");
+        assert_eq!(result.discovered_title.as_deref(), Some("Mock Server"));
+
+        let view = &svc.list().await.unwrap()[0];
+        assert_eq!(view.description.as_deref(), Some("Mock Server"));
+        // Nobody typed one, so the edit form must show an empty box.
+        assert_eq!(view.user_description, None);
+        assert_eq!(view.instructions.as_deref(), Some("echo before you ping"));
+
+        let detail = svc.get("mock").await.unwrap().expect("configured");
+        let tools = detail.tools.expect("connected, so it has a catalogue");
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].name, "echo");
+        assert_eq!(tools[0].description, "echo");
+    }
+
+    /// A turn's connect is a free refresh: nobody has to press Test for the
+    /// catalogue to keep up with the server.
+    #[tokio::test]
+    async fn building_a_turns_toolboxes_refreshes_the_catalogue() {
+        let (svc, _t) = service().await;
+        let url = mock_mcp_server().await;
+        svc.upsert(none_input("mock", &url)).await.unwrap();
+        assert_eq!(svc.get("mock").await.unwrap().unwrap().tools, None);
+
+        svc.toolboxes_for(&["mock".into()]).await.unwrap();
+
+        let detail = svc.get("mock").await.unwrap().unwrap();
+        assert_eq!(detail.tools.map(|t| t.len()), Some(2));
+        assert_eq!(detail.server.description.as_deref(), Some("Mock Server"));
+    }
+
+    #[tokio::test]
+    async fn getting_a_server_that_is_not_configured_is_not_an_error() {
+        let (svc, _t) = service().await;
+        assert!(svc.get("never-existed").await.unwrap().is_none());
     }
 
     // "Not configured" and "configured but unreachable" are different answers.

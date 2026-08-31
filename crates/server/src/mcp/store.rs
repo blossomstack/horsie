@@ -8,7 +8,8 @@
 use crate::db::Db;
 use crate::projects::ProjectId;
 use horsie_agentcore::Secret;
-use horsie_models::mcp::{McpAuthInput, McpOAuthInput, McpServerInput};
+use horsie_models::mcp::{McpAuthInput, McpOAuthInput, McpServerInput, McpToolInfo};
+use horsie_support::mcp::{McpServerInfo, McpToolDef};
 use sqlx::Row;
 use sqlx::any::AnyRow;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -67,8 +68,51 @@ pub struct McpServerRow {
     pub url: String,
     pub enabled: bool,
     pub auth: StoredAuth,
-    pub tool_count: Option<u32>,
+    /// What someone typed this server is for. Wins over `discovered_title`
+    /// wherever a description is shown.
+    pub description: Option<String>,
+    /// What the server called itself at the last successful connect.
+    pub discovered_title: Option<String>,
+    /// The server's own `instructions` from that same connect.
+    pub discovered_instructions: Option<String>,
+    /// The tools it advertised there. `None` means it has never connected;
+    /// `Some(vec![])` means it connected and advertised nothing.
+    pub tools: Option<Vec<McpToolInfo>>,
     pub last_error: Option<String>,
+}
+
+impl McpServerRow {
+    /// The description to show: the typed one, else the server's own title.
+    ///
+    /// The fallback is what stops the field being blank on the servers nobody
+    /// has got round to describing, which is most of them.
+    #[must_use]
+    pub fn effective_description(&self) -> Option<String> {
+        self.description
+            .clone()
+            .or_else(|| self.discovered_title.clone())
+    }
+
+    /// How many tools it advertised last time it connected, or `None` if it
+    /// never has.
+    #[must_use]
+    pub fn tool_count(&self) -> Option<u32> {
+        self.tools
+            .as_ref()
+            .map(|t| u32::try_from(t.len()).unwrap_or(u32::MAX))
+    }
+}
+
+/// What a connect learned, as [`McpStore::record_connect`] takes it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConnectOutcome<'a> {
+    /// Reached it: what it said about itself, and what it offers.
+    Reached {
+        info: &'a McpServerInfo,
+        tools: &'a [McpToolDef],
+    },
+    /// Did not reach it, and why.
+    Failed(&'a str),
 }
 
 /// What an MCP server may be called.
@@ -120,7 +164,7 @@ impl McpStore {
         let rows = sqlx::query(&self.db.q(
             "SELECT name, url, enabled, auth_kind, bearer_token, \
              oauth_client_id, oauth_client_secret, oauth_access_token, oauth_refresh_token, oauth_expires_at, oauth_meta, \
-             tool_count, last_error \
+             description, discovered_title, discovered_instructions, tools, last_error \
              FROM mcp_servers WHERE project_id = ? ORDER BY name",
         ))
         .bind(self.project.as_str())
@@ -140,7 +184,7 @@ impl McpStore {
         let row = sqlx::query(&self.db.q(
             "SELECT name, url, enabled, auth_kind, bearer_token, \
              oauth_client_id, oauth_client_secret, oauth_access_token, oauth_refresh_token, oauth_expires_at, oauth_meta, \
-             tool_count, last_error \
+             description, discovered_title, discovered_instructions, tools, last_error \
              FROM mcp_servers WHERE project_id = ? AND name = ?",
         ))
         .bind(self.project.as_str())
@@ -166,13 +210,21 @@ impl McpStore {
         horsie_support::remote_url::check_fetch_url(url)?;
         let existing = self.get(name).await?;
         let auth = auth_from_input(&input.auth, existing.as_ref());
+        let description = resolve_text(
+            &input.description,
+            existing.as_ref().and_then(|r| r.description.as_deref()),
+        );
         let now = now_secs().to_string();
+        // The catalogue is deliberately *not* cleared here. Editing a URL or a
+        // token re-arms the server (a `test` is required before it is usable
+        // again), but what it said about itself last time is still the best
+        // answer to "what is this" until the next connect replaces it.
         sqlx::query(&self.db.q(
             "INSERT INTO mcp_servers \
              (project_id, name, url, enabled, auth_kind, bearer_token, \
               oauth_client_id, oauth_client_secret, oauth_access_token, oauth_refresh_token, oauth_expires_at, oauth_meta, \
-              tool_count, last_error, created_at, updated_at) \
-             VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?) \
+              description, last_error, created_at, updated_at) \
+             VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?) \
              ON CONFLICT(project_id, name) DO UPDATE SET \
              url = excluded.url, auth_kind = excluded.auth_kind, \
              bearer_token = excluded.bearer_token, \
@@ -182,7 +234,8 @@ impl McpStore {
              oauth_refresh_token = excluded.oauth_refresh_token, \
              oauth_expires_at = excluded.oauth_expires_at, \
              oauth_meta = excluded.oauth_meta, \
-             enabled = 0, tool_count = NULL, last_error = NULL, updated_at = excluded.updated_at",
+             description = excluded.description, \
+             enabled = 0, last_error = NULL, updated_at = excluded.updated_at",
         ))
         .bind(self.project.as_str())
         .bind(name)
@@ -195,6 +248,7 @@ impl McpStore {
         .bind(oauth_secret(&auth, |o| o.refresh_token.clone()))
         .bind(oauth_field(&auth, |o| o.expires_at.clone()))
         .bind(oauth_field(&auth, |o| o.meta.clone()))
+        .bind(description)
         .bind(&now)
         .bind(&now)
         .execute(self.db.pool())
@@ -220,23 +274,49 @@ impl McpStore {
         Ok(())
     }
 
-    /// Record the outcome of a connect/test: usability, tool count, and the last
-    /// error (mutually: `enabled` ⇒ `last_error` cleared).
-    pub async fn set_status(
+    /// Record what a connect/test learned: usability, the last error
+    /// (mutually: reached ⇒ `last_error` cleared), and — on success — what the
+    /// server says it is and what it offers.
+    ///
+    /// A failure updates only the status. Wiping the catalogue whenever a
+    /// server was briefly unreachable would empty its tool picker for everyone
+    /// configuring a session in the meantime, over a fault that may already
+    /// have passed.
+    pub async fn record_connect(
         &self,
         name: &str,
-        enabled: bool,
-        tool_count: Option<u32>,
-        last_error: Option<&str>,
+        outcome: ConnectOutcome<'_>,
     ) -> Result<(), String> {
-        sqlx::query(&self.db.q(
-            "UPDATE mcp_servers SET enabled = ?, tool_count = ?, last_error = ?, updated_at = ? \
-             WHERE project_id = ? AND name = ?",
-        ))
-        .bind(i64::from(enabled))
-        .bind(tool_count.map(i64::from))
-        .bind(last_error)
-        .bind(now_secs().to_string())
+        let now = now_secs().to_string();
+        match outcome {
+            ConnectOutcome::Reached { info, tools } => {
+                let catalogue: Vec<McpToolInfo> = tools
+                    .iter()
+                    .map(|t| McpToolInfo {
+                        name: t.name.clone(),
+                        description: t.description.clone(),
+                    })
+                    .collect();
+                let tools_json = serde_json::to_string(&catalogue).map_err(|e| e.to_string())?;
+                sqlx::query(
+                    &self
+                        .db
+                        .q("UPDATE mcp_servers SET enabled = 1, last_error = NULL, \
+                     discovered_title = ?, discovered_instructions = ?, tools = ?, updated_at = ? \
+                     WHERE project_id = ? AND name = ?"),
+                )
+                .bind(info.title.clone())
+                .bind(info.instructions.clone())
+                .bind(tools_json)
+                .bind(&now)
+            }
+            ConnectOutcome::Failed(error) => sqlx::query(&self.db.q(
+                "UPDATE mcp_servers SET enabled = 0, last_error = ?, updated_at = ? \
+                 WHERE project_id = ? AND name = ?",
+            ))
+            .bind(error)
+            .bind(&now),
+        }
         .bind(self.project.as_str())
         .bind(name)
         .execute(self.db.pool())
@@ -407,7 +487,10 @@ fn row_to_server(row: &AnyRow) -> Result<McpServerRow, String> {
             .map_err(|e| e.to_string())?
             != 0,
         auth,
-        tool_count: opt_u32(row, "tool_count")?,
+        description: opt_string(row, "description")?,
+        discovered_title: opt_string(row, "discovered_title")?,
+        discovered_instructions: opt_string(row, "discovered_instructions")?,
+        tools: opt_tools(row)?,
         last_error: opt_string(row, "last_error")?,
     })
 }
@@ -424,12 +507,34 @@ fn opt_secret(row: &AnyRow, col: &str) -> Result<Option<Secret>, String> {
         .map(Secret::from))
 }
 
-/// A `u32` column round-tripped through SQLite's signed `INTEGER`.
-fn opt_u32(row: &AnyRow, col: &str) -> Result<Option<u32>, String> {
-    let v = row
-        .try_get::<Option<i64>, _>(col)
-        .map_err(|e| e.to_string())?;
-    Ok(v.and_then(|n| u32::try_from(n).ok()))
+/// The remembered tool catalogue, or `None` where nothing has been recorded.
+///
+/// Unreadable JSON reads as "never connected" rather than failing the row: a
+/// catalogue is a convenience, and one bad blob must not make a configured
+/// server disappear from the settings page.
+fn opt_tools(row: &AnyRow) -> Result<Option<Vec<McpToolInfo>>, String> {
+    let Some(raw) = opt_string(row, "tools")? else {
+        return Ok(None);
+    };
+    match serde_json::from_str(&raw) {
+        Ok(tools) => Ok(Some(tools)),
+        Err(e) => {
+            tracing::warn!(error = %e, "unreadable MCP tool catalogue; reporting it as unknown");
+            Ok(None)
+        }
+    }
+}
+
+/// Write-only plain text: `None` keeps the stored value, `Some("")` clears,
+/// `Some(v)` sets. The secrets' convention, applied to a field that is not one
+/// — the reason is the same either way, that a form which does not send a
+/// field must not be read as asking to erase it.
+fn resolve_text(input: &Option<String>, existing: Option<&str>) -> Option<String> {
+    match input {
+        None => existing.map(str::to_string),
+        Some(v) if !v.trim().is_empty() => Some(v.trim().to_string()),
+        Some(_) => None,
+    }
 }
 
 /// Write-only secret input: `None` keeps the stored value, `Some("")` clears,
@@ -473,6 +578,7 @@ mod tests {
         McpServerInput {
             name: name.into(),
             url: "https://mcp.example/".into(),
+            description: None,
             auth: McpAuthInput::Bearer(McpBearerInput {
                 token: token.map(str::to_string),
             }),
@@ -485,6 +591,7 @@ mod tests {
         let with_url = |url: &str| McpServerInput {
             name: "x".into(),
             url: url.into(),
+            description: None,
             auth: McpAuthInput::None(McpNoAuth {}),
         };
         for url in ["not a url", "file:///etc/passwd", "ftp://example.com/x"] {
@@ -517,6 +624,7 @@ mod tests {
         s.upsert(&McpServerInput {
             name: "b".into(),
             url: "https://b.example/".into(),
+            description: None,
             auth: McpAuthInput::None(McpNoAuth {}),
         })
         .await
@@ -557,6 +665,7 @@ mod tests {
             .upsert(&McpServerInput {
                 name: "a".into(),
                 url: "https://mcp.example/".into(),
+                description: None,
                 auth: McpAuthInput::GithubApp(McpGithubAppAuth {}),
             })
             .await
@@ -564,24 +673,124 @@ mod tests {
         assert_eq!(row.auth, StoredAuth::GithubApp);
     }
 
+    fn tool(name: &str, description: &str) -> McpToolDef {
+        McpToolDef {
+            name: name.into(),
+            description: description.into(),
+            input_schema: serde_json::json!({ "type": "object" }),
+        }
+    }
+
+    fn reached<'a>(info: &'a McpServerInfo, tools: &'a [McpToolDef]) -> ConnectOutcome<'a> {
+        ConnectOutcome::Reached { info, tools }
+    }
+
     #[tokio::test]
-    async fn set_status_records_test_outcome_and_upsert_rearms() {
+    async fn record_connect_records_the_outcome_and_upsert_rearms() {
         let (s, _t) = store().await;
         s.upsert(&bearer_input("a", Some("tok"))).await.unwrap();
-        s.set_status("a", true, Some(5), None).await.unwrap();
+        let info = McpServerInfo {
+            title: Some("Linear".into()),
+            version: Some("1.0".into()),
+            instructions: Some("search first".into()),
+        };
+        let tools = vec![tool("search", "find issues"), tool("create", "open one")];
+        s.record_connect("a", reached(&info, &tools)).await.unwrap();
+
         let row = s.get("a").await.unwrap().unwrap();
         assert!(row.enabled);
-        assert_eq!(row.tool_count, Some(5));
+        assert_eq!(row.tool_count(), Some(2));
+        assert_eq!(row.discovered_title.as_deref(), Some("Linear"));
+        assert_eq!(row.discovered_instructions.as_deref(), Some("search first"));
+        assert_eq!(
+            row.tools.as_ref().map(|t| t[0].description.clone()),
+            Some("find issues".to_string())
+        );
         assert!(row.last_error.is_none());
 
-        // Editing re-arms: enabled/tool_count/last_error reset.
+        // Editing re-arms: a test is required again. The catalogue survives,
+        // because what the server last said it was is still the best answer to
+        // "what is this" until the next connect.
         let row = s.upsert(&bearer_input("a", None)).await.unwrap();
         assert!(!row.enabled);
-        assert_eq!(row.tool_count, None);
+        assert_eq!(row.tool_count(), Some(2));
 
-        s.set_status("a", false, None, Some("boom")).await.unwrap();
+        s.record_connect("a", ConnectOutcome::Failed("boom"))
+            .await
+            .unwrap();
         let row = s.get("a").await.unwrap().unwrap();
         assert_eq!(row.last_error.as_deref(), Some("boom"));
+        assert!(!row.enabled);
+        // A server that is down is still describable.
+        assert_eq!(row.tool_count(), Some(2));
+        assert_eq!(row.discovered_title.as_deref(), Some("Linear"));
+    }
+
+    /// A server nobody has connected to offers no catalogue at all, which is
+    /// not the same as one that connected and advertised nothing.
+    #[tokio::test]
+    async fn an_unconnected_server_has_no_catalogue_and_an_empty_one_is_not_none() {
+        let (s, _t) = store().await;
+        let row = s.upsert(&bearer_input("a", Some("tok"))).await.unwrap();
+        assert_eq!(row.tools, None);
+        assert_eq!(row.tool_count(), None);
+
+        s.record_connect("a", reached(&McpServerInfo::default(), &[]))
+            .await
+            .unwrap();
+        let row = s.get("a").await.unwrap().unwrap();
+        assert_eq!(row.tools, Some(vec![]));
+        assert_eq!(row.tool_count(), Some(0));
+    }
+
+    /// Omit to keep, "" to clear, a value to set — the secrets' convention,
+    /// because a form that does not send the field must not erase it.
+    #[tokio::test]
+    async fn a_description_follows_keep_clear_set() {
+        let (s, _t) = store().await;
+        let described = |d: Option<&str>| McpServerInput {
+            name: "a".into(),
+            url: "https://mcp.example/".into(),
+            description: d.map(str::to_string),
+            auth: McpAuthInput::None(McpNoAuth {}),
+        };
+        let row = s.upsert(&described(Some("  our tracker  "))).await.unwrap();
+        assert_eq!(row.description.as_deref(), Some("our tracker"));
+        // Omitted → kept.
+        let row = s.upsert(&described(None)).await.unwrap();
+        assert_eq!(row.description.as_deref(), Some("our tracker"));
+        // Empty → cleared.
+        let row = s.upsert(&described(Some(""))).await.unwrap();
+        assert_eq!(row.description, None);
+    }
+
+    /// What a person typed wins; the server's own title fills the gap when
+    /// nobody has typed anything, which is the usual case.
+    #[tokio::test]
+    async fn the_typed_description_wins_over_the_discovered_one() {
+        let (s, _t) = store().await;
+        s.upsert(&bearer_input("a", Some("tok"))).await.unwrap();
+        let info = McpServerInfo {
+            title: Some("Linear".into()),
+            ..McpServerInfo::default()
+        };
+        s.record_connect("a", reached(&info, &[])).await.unwrap();
+        let row = s.get("a").await.unwrap().unwrap();
+        assert_eq!(row.effective_description().as_deref(), Some("Linear"));
+
+        let row = s
+            .upsert(&McpServerInput {
+                name: "a".into(),
+                url: "https://mcp.example/".into(),
+                description: Some("our issue tracker".into()),
+                auth: McpAuthInput::None(McpNoAuth {}),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            row.effective_description().as_deref(),
+            Some("our issue tracker")
+        );
     }
 
     fn oauth_input(name: &str, client_id: Option<&str>, secret: Option<&str>) -> McpServerInput {
@@ -589,6 +798,7 @@ mod tests {
         McpServerInput {
             name: name.into(),
             url: "https://mcp.example/".into(),
+            description: None,
             auth: McpAuthInput::OAuth(McpOAuthInput {
                 client_id: client_id.map(str::to_string),
                 client_secret: secret.map(str::to_string),
@@ -665,6 +875,7 @@ mod tests {
         let named = |n: &str| McpServerInput {
             name: n.into(),
             url: "https://mcp.example/".into(),
+            description: None,
             auth: McpAuthInput::None(McpNoAuth {}),
         };
         for bad in ["my server", "a/b", "café", "x.y", "a:b"] {
@@ -687,6 +898,7 @@ mod tests {
         s.upsert(&McpServerInput {
             name: "  linear  ".into(),
             url: "https://mcp.example/".into(),
+            description: None,
             auth: McpAuthInput::None(McpNoAuth {}),
         })
         .await

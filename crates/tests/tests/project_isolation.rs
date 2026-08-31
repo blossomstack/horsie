@@ -266,7 +266,8 @@ async fn environments_are_isolated() {
 #[tokio::test]
 async fn mcp_servers_are_isolated() {
     use horsie_models::mcp::{McpAuthInput, McpNoAuth, McpServerInput};
-    use horsie_server::mcp::McpStore;
+    use horsie_server::mcp::{ConnectOutcome, McpStore};
+    use horsie_support::mcp::{McpServerInfo, McpToolDef};
     let db = testing::db().await;
     let (a, b) = two();
     let mine = McpStore::new(db.clone(), a);
@@ -275,6 +276,7 @@ async fn mcp_servers_are_isolated() {
     let server = |url: &str| McpServerInput {
         name: "jira".into(),
         url: url.into(),
+        description: None,
         auth: McpAuthInput::None(McpNoAuth {}),
     };
     mine.upsert(&server("https://mine.example")).await.unwrap();
@@ -291,12 +293,30 @@ async fn mcp_servers_are_isolated() {
         "https://mine.example"
     );
 
-    // A status write against the other project's name changes nothing.
+    // A connect recorded against the other project's name changes nothing —
+    // not its status, and not the tools it is remembered as offering.
+    let info = McpServerInfo {
+        title: Some("Theirs".into()),
+        ..McpServerInfo::default()
+    };
+    let tools = vec![McpToolDef {
+        name: "search".into(),
+        description: "theirs".into(),
+        input_schema: serde_json::json!({ "type": "object" }),
+    }];
     theirs
-        .set_status("jira", true, Some(7), None)
+        .record_connect(
+            "jira",
+            ConnectOutcome::Reached {
+                info: &info,
+                tools: &tools,
+            },
+        )
         .await
         .unwrap();
-    assert_eq!(mine.get("jira").await.unwrap().unwrap().tool_count, None);
+    let ours = mine.get("jira").await.unwrap().unwrap();
+    assert_eq!(ours.tool_count(), None);
+    assert_eq!(ours.discovered_title, None);
 
     theirs.delete("jira").await.unwrap();
     assert!(mine.get("jira").await.unwrap().is_some());

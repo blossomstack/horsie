@@ -20,4 +20,4 @@ pub use client::McpClient;
 pub use error::McpError;
 pub use stdio::StdioTransport;
 pub use transport::{BearerProvider, HttpTransport, McpTransport};
-pub use types::{McpCallOutcome, McpImage, McpToolDef};
+pub use types::{McpCallOutcome, McpImage, McpServerInfo, McpToolDef};

@@ -18,6 +18,8 @@ per session. Their tools appear to the agent as
 - **Name** — the id, fixed once saved. It is how the server is referred to
   everywhere.
 - **URL** — the server's endpoint.
+- **Description** — what the server is for, in your own words. Optional: leave
+  it blank and horsie shows what the server calls itself instead.
 - **Auth** — **None**, a **bearer token** you paste in, or **OAuth 2.1**.
 
 Save it.
@@ -25,8 +27,17 @@ Save it.
 ## Check it works
 
 Press **Test** on the row. horsie connects and lists the tools it found,
-showing something like **enabled · 12 tools**. Do this before relying on it in
-a session — a wrong URL and a wrong token look identical from a transcript.
+showing something like **12 tools**. Do this before relying on it in a session
+— a wrong URL and a wrong token look identical from a transcript.
+
+Click that count to see the tools, each with its own description, so you can
+tell what the server actually does before switching it on. The list is what
+the server advertised the last time horsie reached it, so it is still there to
+read when the server is down.
+
+A connect also picks up whatever the server says about itself — its name and
+any instructions it publishes — which is what fills the description in when
+you have not written one.
 
 ## OAuth servers
 

@@ -8,4 +8,4 @@ mod service;
 mod store;
 
 pub use service::McpService;
-pub use store::{McpServerRow, McpStore, StoredAuth};
+pub use store::{ConnectOutcome, McpServerRow, McpStore, StoredAuth};

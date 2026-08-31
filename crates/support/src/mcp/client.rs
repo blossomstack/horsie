@@ -1,6 +1,6 @@
 use crate::mcp::error::McpError;
 use crate::mcp::transport::McpTransport;
-use crate::mcp::types::{McpCallOutcome, McpImage, McpToolDef};
+use crate::mcp::types::{McpCallOutcome, McpImage, McpServerInfo, McpToolDef};
 use base64::Engine;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -21,17 +21,21 @@ impl McpClient {
 
     /// Perform the MCP handshake: `initialize`, then the
     /// `notifications/initialized` notification.
-    pub async fn initialize(&self) -> Result<(), McpError> {
+    ///
+    /// Returns what the server said about itself. That reply was previously
+    /// discarded, which is why a configured server could only ever be shown as
+    /// a name and a URL.
+    pub async fn initialize(&self) -> Result<McpServerInfo, McpError> {
         let params = json!({
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {},
             "clientInfo": { "name": "horsie", "version": env!("CARGO_PKG_VERSION") },
         });
-        self.transport.request("initialize", params).await?;
+        let result = self.transport.request("initialize", params).await?;
         self.transport
             .notify("notifications/initialized", json!({}))
             .await?;
-        Ok(())
+        Ok(server_info(&result))
     }
 
     /// List the server's tools.
@@ -85,6 +89,31 @@ impl McpClient {
             text,
             images,
         })
+    }
+}
+
+/// Read `serverInfo` and `instructions` out of an `initialize` result.
+///
+/// Nothing here is required, so nothing here can fail. A blank string is read
+/// as absent: a server sending `"title": ""` means the same thing as one
+/// sending no title at all, and only one of those two should have to be
+/// handled downstream.
+fn server_info(result: &Value) -> McpServerInfo {
+    let field = |v: Option<&Value>| {
+        v.and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let info = result.get("serverInfo");
+    McpServerInfo {
+        // `name` is the required one; `title` is the display name added in
+        // 2025-06-18. Preferring title and falling back keeps a pre-2025-06-18
+        // server describable.
+        title: field(info.and_then(|i| i.get("title")))
+            .or_else(|| field(info.and_then(|i| i.get("name")))),
+        version: field(info.and_then(|i| i.get("version"))),
+        instructions: field(result.get("instructions")),
     }
 }
 
@@ -177,7 +206,42 @@ mod tests {
             "initialize",
             json!({ "protocolVersion": PROTOCOL_VERSION }),
         )]);
-        c.initialize().await.unwrap();
+        // A server that says nothing about itself still handshakes.
+        assert_eq!(c.initialize().await.unwrap(), McpServerInfo::default());
+    }
+
+    #[tokio::test]
+    async fn initialize_captures_what_the_server_says_about_itself() {
+        let c = client(vec![(
+            "initialize",
+            json!({
+                "protocolVersion": PROTOCOL_VERSION,
+                "serverInfo": { "name": "linear", "title": "Linear", "version": "1.4.0" },
+                "instructions": "Search issues before creating one.",
+            }),
+        )]);
+        let info = c.initialize().await.unwrap();
+        assert_eq!(info.title.as_deref(), Some("Linear"));
+        assert_eq!(info.version.as_deref(), Some("1.4.0"));
+        assert_eq!(
+            info.instructions.as_deref(),
+            Some("Search issues before creating one.")
+        );
+    }
+
+    /// `title` arrived in 2025-06-18; `name` is required and has always been
+    /// there. A server predating the field must still be describable.
+    #[tokio::test]
+    async fn initialize_falls_back_to_the_server_name() {
+        let c = client(vec![(
+            "initialize",
+            json!({ "serverInfo": { "name": "sentry", "title": "  " } }),
+        )]);
+        let info = c.initialize().await.unwrap();
+        assert_eq!(info.title.as_deref(), Some("sentry"));
+        // Blank is absent, not an empty title someone downstream has to test for.
+        assert_eq!(info.version, None);
+        assert_eq!(info.instructions, None);
     }
 
     #[tokio::test]
