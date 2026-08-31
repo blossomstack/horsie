@@ -19,14 +19,7 @@ import { useMemorySpaces } from "../hooks/useMemory";
 import { usePlugins } from "../hooks/usePlugins";
 import { useSettings } from "../hooks/useSettings";
 import { allTools, defaultSelection, useTools } from "../hooks/useTools";
-import type {
-  AgentDocument,
-  McpServerSelection,
-  McpServerView,
-  SessionDetail,
-  ToolCatalog,
-  ToolGroupView,
-} from "../api/types";
+import type { McpServerView, ToolCatalog, ToolGroupView } from "../api/types";
 import { ToolAccess } from "../api/types";
 import { i18n } from "../i18n";
 import { cn } from "../lib/cn";
@@ -69,14 +62,31 @@ export interface PickerSpec {
   body: (close: () => void) => ReactNode;
 }
 
+/**
+ * Whether this row configures something or reports it.
+ *
+ * One flag rather than two hooks. A created session's configuration is frozen,
+ * but it is still the thing you check when something surprises you — so it must
+ * be the *same* row, with the same keys in the same order showing the same
+ * lists, and only the controls turned off. The two used to be built by separate
+ * functions and drifted into two different pictures of one fact: the frozen one
+ * flattened every list to a comma-joined string and dropped any channel that
+ * held nothing, so a session narrowed to no skills looked exactly like a
+ * session nobody had narrowed.
+ */
+export type ConfigMode = "edit" | "frozen";
+
 /** Keep selected picker choices legible without changing the compact menu
  * layout. Every button that wears this also carries `data-popover-option`, which
  * is what tells `PopoverMenu` to give the list arrow keys and one tab stop —
- * the checklists and the radio group get that from their native controls. */
-function optionClass(selected: boolean): string {
+ * the checklists and the radio group get that from their native controls.
+ *
+ * A frozen option loses its hover: nothing happens when you press it, and a row
+ * that lights up under the pointer promises otherwise. */
+function optionClass(selected: boolean, frozen = false): string {
   return cn(
     "flex w-full items-center gap-2 rounded-[var(--radius-chip)] px-2 py-1.5 text-left text-sm",
-    selected ? "bg-accent-quiet text-legend" : "hover:bg-raised",
+    selected ? "bg-accent-quiet text-legend" : frozen ? "" : "hover:bg-raised",
   );
 }
 
@@ -85,31 +95,56 @@ function SelectedMark() {
 }
 
 /** A list of tickable names — repos, skills, MCP servers, memory spaces all
- * present the same way, so they are one function rather than four copies. */
+ * present the same way, so they are one function rather than four copies.
+ *
+ * Frozen, the list is what the session actually got: anything it selected is
+ * shown ticked even when the catalogue no longer offers it. A bundle
+ * uninstalled since the session started is still what that session is running,
+ * and reading the live catalogue alone would quietly drop it. */
 function checkList<T extends string>({
   items,
   selected,
   onToggle,
   empty,
+  frozen = false,
 }: {
   items: T[];
   selected: Set<T> | Map<T, string>;
   onToggle: (name: T, checked: boolean) => void;
   empty: ReactNode;
+  frozen?: boolean;
 }): ReactNode {
-  if (items.length === 0) return empty;
+  // The catalogue first, then anything selected that is no longer in it. Not
+  // filtered down to the selection: the whole point of keeping the control is
+  // that it still answers "what else could this session have had".
+  const shown = frozen
+    ? Array.from(new Set<T>([...items, ...selected.keys()]))
+    : items;
+  // Frozen and empty is an answer — "this session selected none" — not a
+  // catalogue to go and fill, so it never offers the draft row's install link.
+  if (shown.length === 0) {
+    return frozen ? (
+      <p className="px-2 py-1 text-sm text-faint">{i18n.t("common.none")}</p>
+    ) : (
+      empty
+    );
+  }
   return (
     <div className="space-y-0.5">
-      {items.map((name) => {
+      {shown.map((name) => {
         const checked = selected.has(name);
         return (
           <label
             key={name}
-            className="flex cursor-pointer items-center gap-2 px-2 py-1 text-sm hover:bg-raised"
+            className={cn(
+              "flex items-center gap-2 px-2 py-1 text-sm",
+              frozen ? "" : "cursor-pointer hover:bg-raised",
+            )}
           >
             <input
               type="checkbox"
               checked={checked}
+              disabled={frozen}
               onChange={() => onToggle(name, checked)}
             />
             <span className="min-w-0 flex-1 truncate font-mono">{name}</span>
@@ -163,6 +198,7 @@ function ToolGroup({
   expanded,
   onToggleExpanded,
   onSet,
+  frozen,
   children,
 }: {
   group: ToolGroupView;
@@ -173,17 +209,24 @@ function ToolGroup({
   expanded: boolean;
   onToggleExpanded: () => void;
   onSet: (names: string[], checked: boolean) => void;
+  frozen: boolean;
   children: ReactNode;
 }) {
   const chosen = names.filter((n) => selected.has(n)).length;
   const all = chosen === names.length;
   return (
     <div data-testid={`tool-group-${group.key}`} data-expanded={expanded}>
-      <div className="flex items-center gap-2 px-2 py-1 hover:bg-raised">
+      <div
+        className={cn(
+          "flex items-center gap-2 px-2 py-1",
+          frozen ? "" : "hover:bg-raised",
+        )}
+      >
         <input
           type="checkbox"
           className="shrink-0"
           checked={all}
+          disabled={frozen}
           // A group with some of its tools chosen is neither ticked nor empty,
           // and `indeterminate` is a DOM property with no HTML attribute — it
           // can only be set through the element.
@@ -280,6 +323,7 @@ function toolsPicker(
   catalog: ToolCatalog | undefined,
   failed: boolean,
   error: unknown,
+  mode: ConfigMode,
 ): PickerSpec {
   const groups = catalog?.groups ?? [];
   const every = allTools(catalog);
@@ -339,6 +383,7 @@ function toolsPicker(
           selected={selected}
           onSet={select}
           onDefault={() => draft.setTools(null)}
+          frozen={mode === "frozen"}
         />
       ),
   };
@@ -381,11 +426,13 @@ function ToolsBody({
   selected,
   onSet,
   onDefault,
+  frozen,
 }: {
   groups: ToolGroupView[];
   selected: Set<string>;
   onSet: (names: string[], checked: boolean) => void;
   onDefault: () => void;
+  frozen: boolean;
 }) {
   const [filter, setFilter] = useState<AccessFilter>("all");
   const shown = (g: ToolGroupView) =>
@@ -447,32 +494,38 @@ function ToolsBody({
             </button>
           ))}
         </span>
-        <span className="ml-auto flex gap-1">
-          <button
-            type="button"
-            className="rounded-[var(--radius-chip)] bg-raised px-1.5 py-0.5 text-[0.6875rem] text-dim hover:text-legend"
-            data-testid="tool-quick-default"
-            onClick={onDefault}
-          >
-            {i18n.t("common.default")}
-          </button>
-          <button
-            type="button"
-            className="rounded-[var(--radius-chip)] bg-raised px-1.5 py-0.5 text-[0.6875rem] text-dim hover:text-legend"
-            data-testid="tool-quick-all"
-            onClick={() => onSet(visibleNames, true)}
-          >
-            {i18n.t("tools.selectAll")}
-          </button>
-          <button
-            type="button"
-            className="rounded-[var(--radius-chip)] bg-raised px-1.5 py-0.5 text-[0.6875rem] text-dim hover:text-legend"
-            data-testid="tool-quick-none"
-            onClick={() => onSet(visibleNames, false)}
-          >
-            {i18n.t("tagFilter.clear")}
-          </button>
-        </span>
+        {/* Selection shortcuts, so they go when nothing can be selected. The
+            read/write control beside them stays: it changes what you are
+            looking at rather than what is chosen, which is exactly what
+            reading a frozen selection wants. */}
+        {!frozen && (
+          <span className="ml-auto flex gap-1">
+            <button
+              type="button"
+              className="rounded-[var(--radius-chip)] bg-raised px-1.5 py-0.5 text-[0.6875rem] text-dim hover:text-legend"
+              data-testid="tool-quick-default"
+              onClick={onDefault}
+            >
+              {i18n.t("common.default")}
+            </button>
+            <button
+              type="button"
+              className="rounded-[var(--radius-chip)] bg-raised px-1.5 py-0.5 text-[0.6875rem] text-dim hover:text-legend"
+              data-testid="tool-quick-all"
+              onClick={() => onSet(visibleNames, true)}
+            >
+              {i18n.t("tools.selectAll")}
+            </button>
+            <button
+              type="button"
+              className="rounded-[var(--radius-chip)] bg-raised px-1.5 py-0.5 text-[0.6875rem] text-dim hover:text-legend"
+              data-testid="tool-quick-none"
+              onClick={() => onSet(visibleNames, false)}
+            >
+              {i18n.t("tagFilter.clear")}
+            </button>
+          </span>
+        )}
       </div>
       {visibleGroups.map((group) => (
         <ToolGroup
@@ -483,13 +536,17 @@ function ToolsBody({
           expanded={expanded.has(group.key)}
           onToggleExpanded={() => toggle(group.key)}
           onSet={onSet}
+          frozen={frozen}
         >
           {shown(group).map((tool) => {
             const checked = selected.has(tool.name);
             return (
               <label
                 key={tool.name}
-                className="flex cursor-pointer items-center gap-2 py-1 pr-2 pl-8 text-sm hover:bg-raised"
+                className={cn(
+                  "flex items-center gap-2 py-1 pr-2 pl-8 text-sm",
+                  frozen ? "" : "cursor-pointer hover:bg-raised",
+                )}
                 data-testid="tool-option"
                 data-value={tool.name}
                 data-selected={checked}
@@ -497,6 +554,7 @@ function ToolsBody({
                 <input
                   type="checkbox"
                   checked={checked}
+                  disabled={frozen}
                   onChange={() => onSet([tool.name], !checked)}
                 />
                 <span className="min-w-0 flex-1">
@@ -518,10 +576,12 @@ function ToolsBody({
 }
 
 /** One selected server as a read-only line: `linear`, or `linear (2 tools)`. */
-function mcpReadout(sel: McpServerSelection): string {
-  return sel.tools
-    ? `${sel.name} (${i18n.t("mcpChannel.toolCount", { count: sel.tools.length })})`
-    : sel.name;
+/** One selected server, as a phrase: its name, and how many of its tools are
+ * in scope when it was narrowed to some of them. */
+function mcpReadout(name: string, tools: string[] | null): string {
+  return tools
+    ? `${name} (${i18n.t("mcpChannel.toolCount", { count: tools.length })})`
+    : name;
 }
 
 /** What one server's row reads as: `all`, `2/7`, or nothing when unselected. */
@@ -547,10 +607,12 @@ function McpBody({
   servers,
   selected,
   onSet,
+  frozen,
 }: {
   servers: McpServerView[];
   selected: Map<string, string[] | null>;
   onSet: (next: Map<string, string[] | null>) => void;
+  frozen: boolean;
 }) {
   // Open what the row cannot summarise: a narrowed server is the only case
   // where the answer is inside. Same rule as the Tools groups.
@@ -586,6 +648,7 @@ function McpBody({
             })
           }
           onSet={(tools) => set(server.name, tools)}
+          frozen={frozen}
         />
       ))}
     </div>
@@ -611,12 +674,14 @@ function McpServerRow({
   expanded,
   onToggleExpanded,
   onSet,
+  frozen,
 }: {
   server: McpServerView;
   chosen: string[] | null | undefined;
   expanded: boolean;
   onToggleExpanded: () => void;
   onSet: (tools: string[] | null | undefined) => void;
+  frozen: boolean;
 }) {
   const { data: detail, isPending, isError } = useMcpServer(server.name, expanded);
   const every = (detail?.tools ?? []).map((t) => t.name);
@@ -638,11 +703,17 @@ function McpServerRow({
 
   return (
     <div data-testid={`mcp-server-${server.name}`} data-expanded={expanded}>
-      <div className="flex items-center gap-2 px-2 py-1 hover:bg-raised">
+      <div
+        className={cn(
+          "flex items-center gap-2 px-2 py-1",
+          frozen ? "" : "hover:bg-raised",
+        )}
+      >
         <input
           type="checkbox"
           className="shrink-0"
           checked={chosen !== undefined}
+          disabled={frozen}
           // Narrowed is neither on nor off, and `indeterminate` is a DOM
           // property with no HTML attribute.
           ref={(el) => {
@@ -702,7 +773,10 @@ function McpServerRow({
             return (
               <label
                 key={tool.name}
-                className="flex cursor-pointer items-center gap-2 py-1 pr-2 pl-8 text-sm hover:bg-raised"
+                className={cn(
+                  "flex items-center gap-2 py-1 pr-2 pl-8 text-sm",
+                  frozen ? "" : "cursor-pointer hover:bg-raised",
+                )}
                 data-testid="mcp-tool-option"
                 data-value={tool.name}
                 data-selected={checked}
@@ -710,6 +784,7 @@ function McpServerRow({
                 <input
                   type="checkbox"
                   checked={checked}
+                  disabled={frozen}
                   onChange={() => toggleTool(tool.name, checked)}
                 />
                 <span className="min-w-0 flex-1">
@@ -731,6 +806,74 @@ function McpServerRow({
 }
 
 /**
+ * What a preset resolved to, for the frozen row's one Agent key.
+ *
+ * The collapse into a single key is what item 2 asks for — a session created
+ * by choosing a preset was configured by one decision — but a collapse that
+ * hid the settings would swap one wrong answer for another. So everything the
+ * exploded row used to show is here, under the name that was actually chosen.
+ *
+ * Read off the draft rather than the preset's current definition: a preset is
+ * flattened at creation, so an edit since then does not describe this session.
+ */
+function ResolvedPreset({ draft }: { draft: ConfigDraft }) {
+  const names = (s: Set<string>) =>
+    s.size === 0 ? i18n.t("common.none") : Array.from(s).join(", ");
+  const rows: { key: string; label: string; value: string }[] = [
+    { key: "model", label: i18n.t("channel.model"), value: draft.model },
+    { key: "skills", label: i18n.t("channel.skills"), value: names(draft.skills) },
+    {
+      key: "mcp",
+      label: i18n.t("channel.mcp"),
+      // Not just the server names: a session narrowed to two of a server's
+      // seven tools is running something different from one that took all
+      // seven, and the collapsed key is the only place that now shows.
+      value:
+        draft.mcp.size === 0
+          ? i18n.t("common.none")
+          : Array.from(draft.mcp)
+              .map(([name, tools]) => mcpReadout(name, tools))
+              .join(", "),
+    },
+    {
+      key: "memory",
+      label: i18n.t("channel.memory"),
+      value: names(draft.memorySpaces),
+    },
+    {
+      key: "tools",
+      label: i18n.t("channel.tools"),
+      value:
+        draft.tools === null
+          ? i18n.t("common.default")
+          : draft.tools.size === 0
+            ? i18n.t("common.none")
+            : i18n.t("channel.selectedCount", { count: draft.tools.size }),
+    },
+    {
+      key: "thinking",
+      label: i18n.t("channel.thinking"),
+      value: draft.thinkingEffort || i18n.t("common.default"),
+    },
+  ];
+  return (
+    <dl className="space-y-1 px-2 py-0.5" data-testid="resolved-preset">
+      {rows.map((r) => (
+        <div key={r.key} className="flex items-baseline gap-2">
+          <dt className="shrink-0 text-[0.6875rem] text-faint">{r.label}</dt>
+          <dd
+            className="min-w-0 flex-1 text-right font-mono text-[0.8125rem] break-words text-legend"
+            data-testid={`resolved-${r.key}`}
+          >
+            {r.value}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+/**
  * The one Environment picker, as its own hook.
  *
  * Standalone because four surfaces need it and only one of them — the session
@@ -738,7 +881,11 @@ function McpServerRow({
  * exactly this spec as a labelled field, which is what makes the two lists
  * identical rather than merely similar.
  */
-export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
+export function useEnvironmentPicker(
+  d: EnvironmentChannel,
+  mode: ConfigMode = "edit",
+): PickerSpec {
+  const frozen = mode === "frozen";
   // These specs read the catalogue through the global `t` rather than a
   // per-string hook, so nothing in them would re-render on a language change.
   // Subscribing once here moves every picker built below.
@@ -747,7 +894,23 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
     useSettings();
   const { data: repoList, isError: reposFailed, error: reposError } =
     useGithubRepos(d.provisions && d.githubConnected);
-  const activeVendors = settings?.vendors ?? [];
+  const listed = settings?.vendors ?? [];
+  // A frozen session's vendor may have disconnected since it started. It is
+  // still where the session runs, so it stays in the list rather than
+  // vanishing and leaving the key pointing at nothing.
+  const chosenVendor =
+    d.environment.kind === "runtime" ? d.environment.vendor : "";
+  const activeVendors =
+    frozen && chosenVendor && !listed.some((v) => v.name === chosenVendor)
+      ? [
+          ...listed,
+          {
+            name: chosenVendor,
+            isDefault: false,
+            capabilities: { supportsProvisioning: d.provisions },
+          },
+        ]
+      : listed;
   const chosen =
     d.environment.kind === "named"
       ? d.environment.name
@@ -795,13 +958,14 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
                 <button
                   key={e.name}
                   type="button"
-                  className={optionClass(selected)}
+                  className={optionClass(selected, frozen)}
                   data-popover-option
                   data-testid="environment-option"
                   data-value={e.name}
                   data-kind="named"
                   data-selected={selected}
                   aria-pressed={selected}
+                  disabled={frozen}
                   onClick={() => {
                     d.setEnvironment({ kind: "named", name: e.name });
                     close();
@@ -822,7 +986,7 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
         <p className="px-2 pt-0.5 text-[0.6875rem] tracking-wide text-faint uppercase">
           {i18n.t("environment.runtimes")}
         </p>
-        {settingsFailed ? (
+        {frozen && activeVendors.length === 0 ? null : settingsFailed ? (
           // Without the config read there is no roster to be empty: saying "no
           // runtime is connected" here would send someone to re-run `horsie
           // connect` for a runtime that is probably already there.
@@ -847,13 +1011,14 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
               <button
                 key={v.name}
                 type="button"
-                className={optionClass(selected)}
+                className={optionClass(selected, frozen)}
                 data-popover-option
                 data-testid="environment-option"
                 data-value={v.name}
                 data-kind="runtime"
                 data-selected={selected}
                 aria-pressed={selected}
+                disabled={frozen}
                 onClick={() =>
                   d.setEnvironment({
                     kind: "runtime",
@@ -912,13 +1077,20 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
             <p className="px-2 pb-0.5 text-[0.6875rem] tracking-wide text-faint uppercase">
               {i18n.t("environment.repos")}
             </p>
-            {!d.githubConnected ? (
+            {!frozen && !d.githubConnected ? (
               <EmptyLink to="/settings/integrations">
                 {i18n.t("environment.connectGithub")}
               </EmptyLink>
             ) : (
               checkList({
-                items: (repoList?.repos ?? []).map((r) => r.fullName),
+                frozen,
+                // Frozen, the catalogue is left out entirely: what a running
+                // session was checked out with is a fact about that session,
+                // and padding it with today's GitHub listing would invite the
+                // reading that any of them could still be added.
+                items: frozen
+                  ? []
+                  : (repoList?.repos ?? []).map((r) => r.fullName),
                 selected: repos,
                 onToggle: (name, checked) => {
                   const next = new Map(repos);
@@ -958,8 +1130,12 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
  * the model, so putting them side by side is the one ordering that reads as a
  * single decision rather than two unrelated switches.
  */
-export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
+export function useConfigPickers(
+  draft: ConfigDraft,
+  mode: ConfigMode = "edit",
+): PickerSpec[] {
   useTranslation();
+  const frozen = mode === "frozen";
   const { data: settings, isError: settingsFailed, error: settingsError } =
     useSettings();
   const { data: bundles, isError: bundlesFailed, error: bundlesError } =
@@ -972,10 +1148,20 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
   const env = hasEnvironment(draft) ? draft : undefined;
   // Called unconditionally with an inert channel when the draft has none: a
   // hook cannot be conditional, and an agent-preset form has no environment.
-  const environmentPicker = useEnvironmentPicker(env ?? INERT_ENVIRONMENT);
+  const environmentPicker = useEnvironmentPicker(env ?? INERT_ENVIRONMENT, mode);
 
   const models = settings?.models ?? [];
-  const enabledMcp = (mcpServers ?? []).filter((s) => s.enabled);
+  const listedMcp = (mcpServers ?? []).filter((s) => s.enabled);
+  // A frozen session keeps the servers it actually runs, whether or not they
+  // are still enabled — or still configured at all. Without this the row went
+  // quiet on exactly the session whose MCP selection you had come to check:
+  // the picker lists the live catalogue, and a selection is not in it.
+  const missingMcp = frozen
+    ? Array.from(draft.mcp.keys())
+        .filter((name) => !listedMcp.some((s) => s.name === name))
+        .map((name) => ({ name }) as McpServerView)
+    : [];
+  const enabledMcp = [...listedMcp, ...missingMcp];
 
   const pickers: PickerSpec[] = [];
 
@@ -983,8 +1169,16 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
   const running = hasWorkflow(draft) ? draft.workflow : "";
   const agentChannel = hasAgent(draft) ? draft : undefined;
   const selectedAgent = agentChannel?.agent ?? "";
-  if (hasWorkflow(draft) && !selectedAgent) {
+  // Choosing a workflow and choosing a preset are alternatives, so the draft
+  // row offers the key only while no preset is picked. Frozen they are not
+  // alternatives but two facts about one agent: a workflow step *is* a step of
+  // a run and *is* an instance of its own preset, and the row says both.
+  if (hasWorkflow(draft) && (frozen ? !!draft.workflow : !selectedAgent)) {
     const d = draft;
+    const names =
+      frozen && d.workflow && !d.workflows.includes(d.workflow)
+        ? [...d.workflows, d.workflow]
+        : d.workflows;
     pickers.push({
       key: "workflow",
       legend: i18n.t("channel.workflow"),
@@ -995,38 +1189,43 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
       testId: "config-workflow",
       body: (close) => (
         <>
-          <button
-            type="button"
-            className={optionClass(d.workflow === "")}
-            data-popover-option
-            data-testid="workflow-option"
-            data-value=""
-            data-selected={d.workflow === ""}
-            aria-pressed={d.workflow === ""}
-            onClick={() => {
-              d.setWorkflow("");
-              close();
-            }}
-          >
-            {i18n.t("common.none")}
-            <span className="ml-auto text-[0.6875rem] text-faint">
-              {i18n.t("workflowChannel.oneAgent")}
-            </span>
-            {d.workflow === "" && <SelectedMark />}
-          </button>
-          {d.workflows.length === 0 ? (
+          {/* "None" is an alternative to running a workflow, so it belongs to
+              choosing one. A run already chose. */}
+          {!frozen && (
+            <button
+              type="button"
+              className={optionClass(d.workflow === "")}
+              data-popover-option
+              data-testid="workflow-option"
+              data-value=""
+              data-selected={d.workflow === ""}
+              aria-pressed={d.workflow === ""}
+              onClick={() => {
+                d.setWorkflow("");
+                close();
+              }}
+            >
+              {i18n.t("common.none")}
+              <span className="ml-auto text-[0.6875rem] text-faint">
+                {i18n.t("workflowChannel.oneAgent")}
+              </span>
+              {d.workflow === "" && <SelectedMark />}
+            </button>
+          )}
+          {names.length === 0 ? (
             <EmptyLink to="/workflows">{i18n.t("workflowChannel.define")}</EmptyLink>
           ) : (
-            d.workflows.map((w) => (
+            names.map((w) => (
               <button
                 key={w}
                 type="button"
-                className={optionClass(d.workflow === w)}
+                className={optionClass(d.workflow === w, frozen)}
                 data-popover-option
                 data-testid="workflow-option"
                 data-value={w}
                 data-selected={d.workflow === w}
                 aria-pressed={d.workflow === w}
+                disabled={frozen}
                 onClick={() => {
                   d.setWorkflow(w);
                   close();
@@ -1048,72 +1247,122 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
 
   // A run's model, thinking effort, skills, MCP and memory come from each
   // step's own agent preset, and `WorkflowRunRequest` carries none of them —
-  // so while a workflow is selected these controls would configure nothing.
-  if (running) return pickers;
+  // so while a workflow is *being chosen* these controls would configure
+  // nothing. Once the run exists the reasoning inverts: the agent this row is
+  // reading is one step, and that step's resolved settings are precisely what
+  // someone opening it wants. Returning early here is what used to make a run
+  // report its start step's model as the whole session's.
+  if (running && !frozen) return pickers;
 
   // An agent preset supplies every agent channel itself. Keep it in the Model
   // menu as a mutually-exclusive alternative to configuring a model directly.
+  //
+  // The same collapse holds once the session exists, which is the whole point:
+  // a session created by choosing "reviewer" was configured by one decision,
+  // and redrawing it afterwards as six independent channels reports a
+  // configuration nobody performed. The preset is what was chosen, so the
+  // preset is what the row shows — with everything it resolved to inside it,
+  // so nothing is lost to the collapse.
   if (selectedAgent && agentChannel) {
+    // A preset can be deleted out from under a running session. Its settings
+    // were flattened at creation and still apply, so this is not an error —
+    // but a name that no longer resolves should say so rather than read like
+    // a link to somewhere.
+    const presetGone =
+      frozen && !agentChannel.agents.includes(selectedAgent);
     pickers.push({
       key: "model",
       legend: i18n.t("channel.model"),
       icon: <Cpu size={15} />,
-      label: selectedAgent,
+      label: presetGone
+        ? i18n.t("modelChannel.presetGone", { agent: selectedAgent })
+        : selectedAgent,
       marked: true,
       width: "w-72",
+      height: frozen ? "max-h-[32rem]" : undefined,
       testId: "config-model",
-      warn: settingsFailed,
-      body: (close) => (
-        <>
-          <p className="px-2 pt-0.5 text-[0.6875rem] tracking-wide text-faint uppercase">
-            {i18n.t("modelChannel.models")}
-          </p>
-          {models.map((m) => (
+      warn: settingsFailed || presetGone,
+      body: (close) =>
+        frozen ? (
+          <>
+            <p className="px-2 pt-0.5 text-[0.6875rem] tracking-wide text-faint uppercase">
+              {i18n.t("modelChannel.agents")}
+            </p>
             <button
-              key={m.alias}
               type="button"
-              className={optionClass(false)}
-              data-popover-option
-              data-testid="model-option"
-              data-value={m.alias}
-              data-selected={false}
-              aria-pressed={false}
-              onClick={() => {
-                draft.setModel(m.alias);
-                agentChannel.setAgent("");
-                close();
-              }}
-            >
-              <span className="min-w-0 flex-1">
-                <span className="block font-mono text-sm text-legend">{m.alias}</span>
-                <span className="block text-[0.6875rem] text-faint">{m.modelId}</span>
-              </span>
-            </button>
-          ))}
-          <p className="px-2 pt-1.5 text-[0.6875rem] tracking-wide text-faint uppercase">
-            {i18n.t("modelChannel.agents")}
-          </p>
-          {agentChannel.agents.map((agent) => (
-            <button
-              key={agent}
-              type="button"
-              className={optionClass(agent === selectedAgent)}
-              data-popover-option
+              className={optionClass(true, true)}
               data-testid="agent-option"
-              data-value={agent}
-              data-selected={agent === selectedAgent}
-              aria-pressed={agent === selectedAgent}
-              onClick={() => {
-                agentChannel.setAgent(agent);
-                close();
-              }}
+              data-value={selectedAgent}
+              data-selected
+              aria-pressed
+              disabled
             >
-              <span className="min-w-0 flex-1 font-mono text-sm text-legend">{agent}</span>
-              {agent === selectedAgent && <SelectedMark />}
+              <span className="min-w-0 flex-1 font-mono text-sm text-legend">
+                {selectedAgent}
+              </span>
+              <SelectedMark />
             </button>
-          ))}
-        </>
-      ),
+            {presetGone && (
+              <p className="px-2 py-1 text-sm leading-relaxed text-red-ink">
+                {i18n.t("modelChannel.presetGoneHint")}
+              </p>
+            )}
+            <p className="px-2 pt-1.5 text-[0.6875rem] tracking-wide text-faint uppercase">
+              {i18n.t("modelChannel.resolved")}
+            </p>
+            <ResolvedPreset draft={draft} />
+          </>
+        ) : (
+          <>
+            <p className="px-2 pt-0.5 text-[0.6875rem] tracking-wide text-faint uppercase">
+              {i18n.t("modelChannel.models")}
+            </p>
+            {models.map((m) => (
+              <button
+                key={m.alias}
+                type="button"
+                className={optionClass(false)}
+                data-popover-option
+                data-testid="model-option"
+                data-value={m.alias}
+                data-selected={false}
+                aria-pressed={false}
+                onClick={() => {
+                  draft.setModel(m.alias);
+                  agentChannel.setAgent("");
+                  close();
+                }}
+              >
+                <span className="min-w-0 flex-1">
+                  <span className="block font-mono text-sm text-legend">{m.alias}</span>
+                  <span className="block text-[0.6875rem] text-faint">{m.modelId}</span>
+                </span>
+              </button>
+            ))}
+            <p className="px-2 pt-1.5 text-[0.6875rem] tracking-wide text-faint uppercase">
+              {i18n.t("modelChannel.agents")}
+            </p>
+            {agentChannel.agents.map((agent) => (
+              <button
+                key={agent}
+                type="button"
+                className={optionClass(agent === selectedAgent)}
+                data-popover-option
+                data-testid="agent-option"
+                data-value={agent}
+                data-selected={agent === selectedAgent}
+                aria-pressed={agent === selectedAgent}
+                onClick={() => {
+                  agentChannel.setAgent(agent);
+                  close();
+                }}
+              >
+                <span className="min-w-0 flex-1 font-mono text-sm text-legend">{agent}</span>
+                {agent === selectedAgent && <SelectedMark />}
+              </button>
+            ))}
+          </>
+        ),
     });
     return pickers;
   }
@@ -1136,6 +1385,7 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
     testId: "config-skills",
     body: () =>
       checkList({
+        frozen,
         items: (bundles ?? []).map((b) => b.name),
         selected: draft.skills,
         onToggle: (name, checked) => {
@@ -1181,14 +1431,21 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
           className="mx-1 my-0.5"
         />
       ) : enabledMcp.length === 0 ? (
-        <EmptyLink to="/settings/integrations">
-          {i18n.t("channel.addMcp")}
-        </EmptyLink>
+        // Frozen and empty is an answer — this session selected none — not a
+        // catalogue to go and fill.
+        frozen ? (
+          <p className="px-2 py-1 text-sm text-faint">{i18n.t("common.none")}</p>
+        ) : (
+          <EmptyLink to="/settings/integrations">
+            {i18n.t("channel.addMcp")}
+          </EmptyLink>
+        )
       ) : (
         <McpBody
           servers={enabledMcp}
           selected={draft.mcp}
           onSet={draft.setMcp}
+          frozen={frozen}
         />
       ),
   });
@@ -1207,6 +1464,7 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
     testId: "config-memory",
     body: () =>
       checkList({
+        frozen,
         items: (memorySpaces ?? []).map((sp) => sp.name),
         selected: draft.memorySpaces,
         onToggle: (name, checked) => {
@@ -1232,17 +1490,29 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
 
   // Between the toolbox channels and the model: it is the widest of them, and
   // the one whose answer changes what the others are for.
-  pickers.push(toolsPicker(draft, toolCatalog, toolsFailed, toolsError));
+  pickers.push(toolsPicker(draft, toolCatalog, toolsFailed, toolsError, mode));
 
+  // A model alias can be renamed or deleted out from under a live session, and
+  // the next turn then fails `no provider registered for model '…'`. The row
+  // used to show the dead alias exactly as it shows a live one, so the only
+  // symptom was a turn that stopped working. It cannot be repaired here —
+  // there is no API to repoint an existing session — but it can at least stop
+  // being a surprise. Only once the settings have actually loaded: an unknown
+  // answer must not be reported as "missing".
+  const modelGone =
+    frozen && !!settings && !models.some((m) => m.alias === draft.model);
   pickers.push({
     key: "model",
     legend: i18n.t("channel.model"),
     icon: <Cpu size={15} />,
-    label: models.find((m) => m.alias === draft.model)?.alias ?? i18n.t("channel.select"),
+    label: modelGone
+      ? i18n.t("channel.modelMissing", { model: draft.model })
+      : (models.find((m) => m.alias === draft.model)?.alias ??
+        (frozen ? draft.model : i18n.t("channel.select"))),
     marked: !!draft.model,
     width: "w-72",
     testId: "config-model",
-    warn: settingsFailed,
+    warn: settingsFailed || modelGone,
     body: (close) =>
       settingsFailed ? (
         <ReadError
@@ -1251,11 +1521,20 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
           testId="model-read-error"
           className="mx-1 my-0.5"
         />
+      ) : modelGone ? (
+        <div className="space-y-1.5 px-1 py-0.5">
+          <p className="font-mono text-[0.8125rem] break-words text-legend">
+            {draft.model}
+          </p>
+          <p className="text-sm leading-relaxed text-red-ink">
+            {i18n.t("channel.modelGoneHint")}
+          </p>
+        </div>
       ) : models.length === 0 ? (
         <EmptyLink to="/settings/models">
           {i18n.t("channel.noModels")}
         </EmptyLink>
-      ) : agentChannel ? (
+      ) : agentChannel && !frozen ? (
         <>
           <p className="px-2 pt-0.5 text-[0.6875rem] tracking-wide text-faint uppercase">
             {i18n.t("modelChannel.models")}
@@ -1309,12 +1588,13 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
           <button
             key={m.alias}
             type="button"
-            className={optionClass(draft.model === m.alias)}
+            className={optionClass(draft.model === m.alias, frozen)}
             data-popover-option
             data-testid="model-option"
             data-value={m.alias}
             data-selected={draft.model === m.alias}
             aria-pressed={draft.model === m.alias}
+            disabled={frozen}
             onClick={() => {
               draft.setModel(m.alias);
               close();
@@ -1332,7 +1612,15 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
 
   // Only for models that offer a menu. The value is fixed for the session's
   // lifetime: changing effort mid-session invalidates the prompt cache.
-  if (draft.thinkingEfforts.length > 0) {
+  // A frozen session's effort may name a model whose card offers no menu — or
+  // whose card is no longer readable at all. The value is still what the
+  // session runs under, so it keeps its key; only a session that genuinely has
+  // no effort *and* no menu has nothing to say.
+  const efforts =
+    frozen && draft.thinkingEffort && !draft.thinkingEfforts.includes(draft.thinkingEffort)
+      ? [...draft.thinkingEfforts, draft.thinkingEffort]
+      : draft.thinkingEfforts;
+  if (efforts.length > 0) {
     pickers.push({
       key: "thinking",
       legend: i18n.t("channel.thinking"),
@@ -1344,13 +1632,17 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
       body: () => (
         <div className="space-y-0.5">
           <label
-            className={cn(optionClass(draft.thinkingEffort === ""), "cursor-pointer")}
+            className={cn(
+              optionClass(draft.thinkingEffort === "", frozen),
+              frozen ? "" : "cursor-pointer",
+            )}
             data-selected={draft.thinkingEffort === ""}
           >
             <input
               type="radio"
               name="thinking-effort"
               checked={draft.thinkingEffort === ""}
+              disabled={frozen}
               onChange={() => draft.setThinkingEffort("")}
             />
             <span className="min-w-0 flex-1 truncate">
@@ -1362,16 +1654,20 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
             </span>
             {draft.thinkingEffort === "" && <SelectedMark />}
           </label>
-          {draft.thinkingEfforts.map((e) => (
+          {efforts.map((e) => (
             <label
               key={e}
-              className={cn(optionClass(draft.thinkingEffort === e), "cursor-pointer")}
+              className={cn(
+                optionClass(draft.thinkingEffort === e, frozen),
+                frozen ? "" : "cursor-pointer",
+              )}
               data-selected={draft.thinkingEffort === e}
             >
               <input
                 type="radio"
                 name="thinking-effort"
                 checked={draft.thinkingEffort === e}
+                disabled={frozen}
                 onChange={() => draft.setThinkingEffort(e)}
               />
               <span className="min-w-0 flex-1 truncate font-mono">{e}</span>
@@ -1390,183 +1686,4 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
   // field on the wire for an API caller that means it; the UI just assumes it.
 
   return pickers;
-}
-
-/**
- * The same channels for a session that already exists.
- *
- * A created session's configuration is frozen, but it is still the thing you
- * check when something surprises you — so the row keeps its shape and its
- * position, and each key opens a readout instead of a picker. Nothing here is
- * editable; `marked` means "this session has one", not "you chose one".
- */
-export function useLockedChannels(
-  detail: SessionDetail,
-  agent: AgentDocument,
-): PickerSpec[] {
-  useTranslation();
-  const { data: settings } = useSettings();
-  // A model alias can be renamed or deleted out from under a live session, and
-  // the next turn then fails `no provider registered for model '…'`. The row
-  // used to show the dead alias exactly as it shows a live one, so the only
-  // symptom was a turn that stopped working. It cannot be repaired here —
-  // there is no API to repoint an existing session — but it can at least stop
-  // being a surprise.
-  const modelGone =
-    !!settings && !settings.models.some((m) => m.alias === agent.model);
-
-  const value = (items: string[]) =>
-    items.length ? items.join(", ") : i18n.t("common.none");
-
-  const readout = (items: string[]) => () => (
-    <div className="space-y-1.5 px-1 py-0.5">
-      {items.length === 0 ? (
-        <p className="text-sm text-faint">{i18n.t("common.none")}</p>
-      ) : (
-        <ul className="space-y-0.5">
-          {items.map((v) => (
-            <li key={v} className="font-mono text-[0.8125rem] break-words text-legend">
-              {v}
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-
-  // Only the channels this session actually has. The draft row hides the
-  // workspace channels on a vendor that cannot provision one, and `SessionDetail`
-  // does not carry that capability — but an empty list means the same thing
-  // here, and five keys that all read "None" is a row that says nothing.
-  const optional = (
-    key: string,
-    legend: string,
-    icon: ReactNode,
-    width: string,
-    items: string[],
-  ): PickerSpec[] =>
-    items.length === 0
-      ? []
-      : [
-          {
-            key,
-            legend,
-            icon,
-            label: value(items),
-            marked: true,
-            width,
-            testId: `config-${key}`,
-            body: readout(items),
-          },
-        ];
-
-  // One key, matching the draft row: the environment is where this session
-  // runs, and the vendor and repos are what it resolved to. A predefined one
-  // leads with its name, because that is what was chosen.
-  const environment: PickerSpec = {
-    key: "environment",
-    legend: i18n.t("channel.environment"),
-    icon: <Server size={15} />,
-    label: detail.environment ?? detail.vendor,
-    marked: true,
-    width: "w-80",
-    testId: "config-environment",
-    body: readout([
-      ...(detail.environment ? [detail.environment] : []),
-      detail.vendor,
-      ...detail.repos.map(basename),
-    ]),
-  };
-
-  // Model, MCP, memory and thinking read the *selected agent's* document:
-  // a workflow step's configuration is its own preset's, and the session
-  // document deliberately carries no session-wide model. Skills remain
-  // session-wide — the bundle union is provisioned for the whole run.
-  const channels: PickerSpec[] = [
-    environment,
-    ...optional(
-      "skills",
-      i18n.t("channel.skills"),
-      <Boxes size={15} />,
-      "w-80",
-      detail.plugins,
-    ),
-    ...optional(
-      "mcp",
-      i18n.t("channel.mcp"),
-      <Plug size={15} />,
-      "w-72",
-      // A narrowed server must not read like an unnarrowed one — that
-      // difference is the whole of what the selection does, and a bare name
-      // hides it.
-      agent.mcpServers.map(mcpReadout),
-    ),
-    ...optional(
-      "memory",
-      i18n.t("channel.memory"),
-      <Brain size={15} />,
-      "w-72",
-      agent.memorySpaces,
-    ),
-    // Unlike the others, absent is a real answer here rather than "nothing to
-    // show": a session on the default set has no list to read out, and saying
-    // so is what tells you the tools were *not* the reason a call was refused.
-    {
-      key: "tools",
-      legend: i18n.t("channel.tools"),
-      icon: <Wrench size={15} />,
-      label: agent.allowedTools
-        ? i18n.t("channel.selectedCount", { count: agent.allowedTools.length })
-        : i18n.t("common.default"),
-      marked: !!agent.allowedTools,
-      width: "w-80",
-      testId: "config-tools",
-      body: agent.allowedTools
-        ? readout(agent.allowedTools)
-        : () => (
-            <p className="px-1 py-0.5 text-sm text-faint">
-              {i18n.t("channel.defaultToolSet")}
-            </p>
-          ),
-    },
-    {
-      key: "model",
-      legend: i18n.t("channel.model"),
-      icon: <Cpu size={15} />,
-      label: modelGone
-        ? i18n.t("channel.modelMissing", { model: agent.model })
-        : agent.model,
-      marked: true,
-      warn: modelGone,
-      width: "w-72",
-      testId: "config-model",
-      body: modelGone
-        ? () => (
-            <div className="space-y-1.5 px-1 py-0.5">
-              <p className="font-mono text-[0.8125rem] break-words text-legend">
-                {agent.model}
-              </p>
-              <p className="text-sm leading-relaxed text-red-ink">
-                {i18n.t("channel.modelGoneHint")}
-              </p>
-            </div>
-          )
-        : readout([agent.model]),
-    },
-  ];
-
-  if (agent.thinkingEffort) {
-    channels.push({
-      key: "thinking",
-      legend: i18n.t("channel.thinking"),
-      icon: <Lightbulb size={15} />,
-      label: agent.thinkingEffort,
-      marked: true,
-      width: "w-52",
-      testId: "config-thinking",
-      body: readout([agent.thinkingEffort]),
-    });
-  }
-
-  return channels;
 }

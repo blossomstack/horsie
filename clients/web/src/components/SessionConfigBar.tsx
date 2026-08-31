@@ -1,7 +1,9 @@
 import type { ReactNode } from "react";
 import type { AgentDocument, SessionDetail } from "../api/types";
 import type { ConfigDraft } from "../hooks/useSessionDraft";
-import { useConfigPickers, useLockedChannels } from "./configPickers";
+import { useFrozenDraft } from "../hooks/useSessionDraft";
+import type { PickerSpec } from "./configPickers";
+import { useConfigPickers } from "./configPickers";
 import { PopoverMenu } from "./PopoverMenu";
 
 type Props =
@@ -40,15 +42,39 @@ function KeyRow({
  */
 export function SessionConfigBar(props: Props) {
   if (props.mode === "locked") {
-    return (
-      <KeyRow mode="locked">
-        <LockedControls detail={props.detail} agent={props.agent} />
-      </KeyRow>
-    );
+    return <LockedRow detail={props.detail} agent={props.agent} />;
   }
+  return <DraftRow draft={props.draft} />;
+}
+
+function DraftRow({ draft }: { draft: ConfigDraft }) {
+  const pickers = useConfigPickers(draft);
   return (
     <KeyRow mode="draft">
-      <DraftControls draft={props.draft} />
+      <KeyControls pickers={pickers} />
+    </KeyRow>
+  );
+}
+
+/**
+ * The same row for a session that already exists.
+ *
+ * One hook, one mode flag — not a second set of controls. The session's frozen
+ * values are dressed as a draft nothing can write to, so every key, its order,
+ * and the list inside it are literally the same code as the new-session row.
+ */
+function LockedRow({
+  detail,
+  agent,
+}: {
+  detail: SessionDetail;
+  agent: AgentDocument;
+}) {
+  const frozen = useFrozenDraft(detail, agent);
+  const pickers = useConfigPickers(frozen, "frozen");
+  return (
+    <KeyRow mode="locked">
+      <KeyControls pickers={pickers} />
     </KeyRow>
   );
 }
@@ -62,8 +88,7 @@ export function SessionConfigBar(props: Props) {
  * last and adjacent — effort is a property of the model, so they read as one
  * decision.
  */
-function DraftControls({ draft }: { draft: ConfigDraft }) {
-  const pickers = useConfigPickers(draft);
+function KeyControls({ pickers }: { pickers: PickerSpec[] }) {
   return (
     <>
       {pickers.map((p) => (
@@ -122,37 +147,5 @@ export function ConfigFields({ draft }: { draft: ConfigDraft }) {
         </div>
       ))}
     </div>
-  );
-}
-
-/** The frozen channels, as keys that open a readout instead of a picker. */
-function LockedControls({
-  detail,
-  agent,
-}: {
-  detail: SessionDetail;
-  agent: AgentDocument;
-}) {
-  const channels = useLockedChannels(detail, agent);
-  return (
-    <>
-      {channels.map((c) => (
-        <PopoverMenu
-          key={c.key}
-          className={c.key === "model" ? "ml-auto" : undefined}
-          variant="icon"
-          placement="up"
-          testId={c.testId}
-          legend={c.legend}
-          icon={c.icon}
-          label={c.label}
-          marked={c.marked}
-          warn={c.warn}
-          width={c.width}
-        >
-          {c.body}
-        </PopoverMenu>
-      ))}
-    </>
   );
 }

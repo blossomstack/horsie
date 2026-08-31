@@ -67,8 +67,15 @@ test("J2: a created session keeps the same row, now read-only", async ({
     /Tools — Default/,
   );
 
-  // Nothing here edits: the draft's option rows do not exist on a locked bar.
-  await expect(page.getByTestId("model-option")).toHaveCount(0);
+  // The same control, not a replacement for it: the model list is the draft
+  // row's own list, showing which one this session runs, with every option
+  // turned off. It used to be swapped for a comma-joined readout, which is how
+  // the two rows drifted into two different pictures of one fact.
+  const options = page.getByTestId("model-option");
+  await expect(options.first()).toBeVisible();
+  for (const option of await options.all()) {
+    await expect(option).toBeDisabled();
+  }
 });
 
 test("J3: every config menu opens inside the pane, not under the rail", async ({
