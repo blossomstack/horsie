@@ -797,24 +797,16 @@ const en = {
   },
 
   run: {
-    loading: "Loading run\u2026",
-    tokens: "{{value}} tokens",
     interrupt: "Interrupt",
     retry: "Retry",
-    retryStep: "Retry {{step}}",
     confirmRetry:
       "Retry {{step}}? It runs again against the workspace as the previous attempt left it.",
-    waitingOnQuestion: "<step>{{step}}</step> is waiting on a question.",
-    answerIt: "Answer it",
-    wasInterrupted:
-      "<step>{{step}}</step> was interrupted. Nothing runs until you retry it \u2014 the workspace is not rolled back, so it starts from whatever the last attempt left.",
     steps: "Steps",
-    stepsHint:
-      "Choose a step to see its attempts, or open one to read what it actually did.",
-    neverReached: "This run never reached it.",
-    attempt: "Attempt {{n}}",
     stepRunning: "A step is currently running.",
     retryHint: "Re-run this step. The workspace is not rolled back.",
+    /** The view switch's two disabled keys, on a run with no step open. */
+    noRunTranscript: "A run has no transcript of its own \u2014 open a step to read one",
+    runHint: "The graph is this run. Open a step to read what it did.",
   },
 
   skillsPage: {

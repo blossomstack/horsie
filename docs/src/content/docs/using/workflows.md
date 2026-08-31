@@ -120,9 +120,18 @@ Not reached: file
 Once it finishes the same command prints what the run produced — the last
 step's result, which is the run's.
 
-Opening a run in the browser shows its graph; clicking a step opens that step's
-own page, which is the session view scoped to one agent. To follow one from a
-terminal, take its agent id from `workflow status`:
+A run is a session, and its page is the session page: the same header, the same
+controls, the same three views, the same graph. It opens on the graph, where a
+run draws as its steps in the order they ran. The transcript and timeline keys
+are offered but switched off — a run has no transcript of its own, because it
+*is* its steps.
+
+Selecting a node opens the panel every agent gets: what it is, what it cost,
+what it produced, and the keys to open its transcript or run it again. That
+holds for the run itself, which is the leftmost node — its result reads there,
+in the same place a step's does. Opening a step goes to its own page: the
+ordinary session view scoped to one agent, where all three views work. To
+follow one from a terminal, take its agent id from `workflow status`:
 
 ```bash
 horsie session tail 3f1a2b4c-… --output ./run.jsonl --agent 8a91f0d2-…

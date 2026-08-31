@@ -778,23 +778,15 @@ const zhHans: typeof en = {
   },
 
   run: {
-    loading: "正在加载运行…",
-    tokens: "{{value}} 个 token",
-    interrupt: "中断",
-    retry: "重试",
-    retryStep: "重试 {{step}}",
+    interrupt: "\u4e2d\u65ad",
+    retry: "\u91cd\u8bd5",
     confirmRetry:
-      "重试 {{step}}？它会在上一次尝试留下的工作区状态上重新运行。",
-    waitingOnQuestion: "<step>{{step}}</step> 正在等待回答一个问题。",
-    answerIt: "去回答",
-    wasInterrupted:
-      "<step>{{step}}</step> 已被中断。在你重试之前不会有任何运行 —— 工作区不会回滚，因此它会从上一次尝试留下的状态继续。",
-    steps: "步骤",
-    stepsHint: "选择一个步骤查看它的尝试记录，或打开它阅读它实际做了什么。",
-    neverReached: "本次运行从未到达此步骤。",
-    attempt: "第 {{n}} 次尝试",
-    stepRunning: "当前有步骤正在运行。",
-    retryHint: "重新运行此步骤。工作区不会回滚。",
+      "\u91cd\u8bd5 {{step}}\uff1f\u5b83\u4f1a\u5728\u4e0a\u4e00\u6b21\u5c1d\u8bd5\u7559\u4e0b\u7684\u5de5\u4f5c\u533a\u72b6\u6001\u4e0a\u91cd\u65b0\u8fd0\u884c\u3002",
+    steps: "\u6b65\u9aa4",
+    stepRunning: "\u6709\u6b65\u9aa4\u6b63\u5728\u8fd0\u884c\u3002",
+    retryHint: "\u91cd\u65b0\u8fd0\u884c\u6b64\u6b65\u9aa4\u3002\u5de5\u4f5c\u533a\u4e0d\u4f1a\u56de\u6eda\u3002",
+    noRunTranscript: "\u8fd0\u884c\u672c\u8eab\u6ca1\u6709\u5bf9\u8bdd\u8bb0\u5f55 \u2014\u2014 \u6253\u5f00\u67d0\u4e2a\u6b65\u9aa4\u624d\u80fd\u9605\u8bfb",
+    runHint: "\u8fd9\u5f20\u56fe\u5c31\u662f\u672c\u6b21\u8fd0\u884c\u3002\u6253\u5f00\u4e00\u4e2a\u6b65\u9aa4\u67e5\u770b\u5b83\u505a\u4e86\u4ec0\u4e48\u3002",
   },
 
   skillsPage: {

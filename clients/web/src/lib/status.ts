@@ -174,6 +174,22 @@ export function progressionLabel(stage: string): string {
 const SETTLED = new Set(["ready", "runtime_ready"]);
 
 /** Whether a stage is worth a line on screen. */
+/**
+ * Whether nothing can change without someone asking for it.
+ *
+ * `Finished` and `Failed` are a run's two resting places; `Unrecoverable` is
+ * every session's. None of them is terminal — a retry moves all three — but
+ * none of them moves on its own, which is what every poll and every Interrupt
+ * control needs to know.
+ */
+export function settled(status: SessionStatusKind): boolean {
+  return (
+    status === SessionStatusKind.Finished ||
+    status === SessionStatusKind.Failed ||
+    status === SessionStatusKind.Unrecoverable
+  );
+}
+
 export function showsProgression(stage: string | undefined): boolean {
   return stage !== undefined && !SETTLED.has(stage);
 }

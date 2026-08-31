@@ -1,4 +1,4 @@
-import { MessageSquareText, Trash2 } from "lucide-react";
+import { MessageSquareText, RotateCcw, Trash2 } from "lucide-react";
 import type { AgentStats, SubAgentView, SubSessionView, UsageView } from "../api/types";
 import {
   kindLabel,
@@ -306,6 +306,8 @@ export function AgentInfoPanel({
   onOpenTranscript,
   onDelete,
   deleting,
+  onRetry,
+  retryBlocked,
 }: {
   agent: SelectedAgent;
   onClose: () => void;
@@ -315,6 +317,13 @@ export function AgentInfoPanel({
    * agent *is* the session, and a workflow step belongs to its run's log. */
   onDelete?: (agentId: string) => void;
   deleting?: boolean;
+  /** Re-run this agent. Only a workflow step has one — nothing else in a
+   * session can be run again, because nothing else was run *from* a
+   * definition that still says what to do. */
+  onRetry?: (agentId: string) => void;
+  /** Whether a retry would race something. Decided by the caller, which is
+   * the only place that can see both the run's status and this step's. */
+  retryBlocked?: boolean;
 }) {
   const stats = agent.stats;
   const { t } = useTranslation();
@@ -466,6 +475,18 @@ export function AgentInfoPanel({
           {/* A run's page is its graph; every other kind has a transcript. */}
           {agent.kind === "run" ? t("agentPanel.run") : t("agentPanel.transcript")}
         </button>
+        )}
+        {onRetry && (
+          <button
+            className="key key-flat !px-2 !py-1 text-xs"
+            onClick={() => onRetry(agent.id)}
+            disabled={retryBlocked}
+            title={retryBlocked ? t("run.stepRunning") : t("run.retryHint")}
+            data-testid="agent-panel-retry"
+          >
+            <RotateCcw size={13} aria-hidden />
+            {t("run.retry")}
+          </button>
         )}
         {onDelete && (
           <button

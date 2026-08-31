@@ -8,6 +8,7 @@ import { useEffect } from "react";
 import { api } from "../api/client";
 import { inboxKeys } from "./useInbox";
 import { deriveTitle } from "../lib/format";
+import { settled } from "../lib/status";
 import type {
   ArtifactRef,
   CreateSessionRequest,
@@ -30,11 +31,31 @@ export function useSessionList() {
   });
 }
 
+/**
+ * One session's document.
+ *
+ * Kept fresh by SSE-driven invalidation for an ordinary session — see
+ * `useSessionStream`. A workflow run has no stream to be driven by: the feed is
+ * scoped to `main`, and a run has no `main` agent, so nothing would ever
+ * invalidate this. `pollMs` is how a run's page keeps its roster and its status
+ * moving instead, with the same stop condition its graph poll uses: once the
+ * run settles, nothing changes without a retry, and a retry invalidates this
+ * query itself.
+ */
 export function useSession(id: string | undefined) {
   return useQuery({
     queryKey: id ? qk.session(id) : ["session", "none"],
     queryFn: () => api.sessions.get(id as string),
     enabled: !!id,
+    // A run polls itself while it is going. The global feed patches a
+    // session's *summary* in here — status, name, sub sessions — and a run's
+    // roster is none of those: `agents` is one entry per step execution, and
+    // it is what the graph draws. Stops the moment the run settles, because
+    // nothing moves after that without a retry, and a retry invalidates this.
+    refetchInterval: (query) => {
+      const s = query.state.data?.session;
+      return s?.workflow && !settled(s.status) ? 2_000 : false;
+    },
     select: (r: GetSessionResponse) => r.session,
   });
 }

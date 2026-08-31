@@ -774,22 +774,15 @@ const zhHant: typeof en = {
   },
 
   run: {
-    loading: "正在載入執行…",
-    tokens: "{{value}} 個 token",
-    interrupt: "中斷",
-    retry: "重試",
-    retryStep: "重試 {{step}}",
-    confirmRetry: "重試 {{step}}？它會在上一次嘗試留下的工作區狀態上重新執行。",
-    waitingOnQuestion: "<step>{{step}}</step> 正在等待回答一個問題。",
-    answerIt: "去回答",
-    wasInterrupted:
-      "<step>{{step}}</step> 已被中斷。在你重試之前不會有任何執行 —— 工作區不會回復，因此它會從上一次嘗試留下的狀態繼續。",
-    steps: "步驟",
-    stepsHint: "選擇一個步驟查看它的嘗試紀錄，或開啟它閱讀它實際做了什麼。",
-    neverReached: "本次執行從未到達此步驟。",
-    attempt: "第 {{n}} 次嘗試",
-    stepRunning: "目前有步驟正在執行。",
-    retryHint: "重新執行此步驟。工作區不會回復。",
+    interrupt: "\u4e2d\u65b7",
+    retry: "\u91cd\u8a66",
+    confirmRetry:
+      "\u91cd\u8a66 {{step}}\uff1f\u5b83\u6703\u5728\u4e0a\u4e00\u6b21\u5617\u8a66\u7559\u4e0b\u7684\u5de5\u4f5c\u5340\u72c0\u614b\u4e0a\u91cd\u65b0\u57f7\u884c\u3002",
+    steps: "\u6b65\u9a5f",
+    stepRunning: "\u6709\u6b65\u9a5f\u6b63\u5728\u57f7\u884c\u3002",
+    retryHint: "\u91cd\u65b0\u57f7\u884c\u6b64\u6b65\u9a5f\u3002\u5de5\u4f5c\u5340\u4e0d\u6703\u56de\u5fa9\u3002",
+    noRunTranscript: "\u57f7\u884c\u672c\u8eab\u6c92\u6709\u5c0d\u8a71\u7d00\u9304 \u2014\u2014 \u958b\u555f\u67d0\u500b\u6b65\u9a5f\u624d\u80fd\u95b1\u8b80",
+    runHint: "\u9019\u5f35\u5716\u5c31\u662f\u672c\u6b21\u57f7\u884c\u3002\u958b\u555f\u4e00\u500b\u6b65\u9a5f\u6aa2\u8996\u5b83\u505a\u4e86\u4ec0\u9ebc\u3002",
   },
 
   skillsPage: {
