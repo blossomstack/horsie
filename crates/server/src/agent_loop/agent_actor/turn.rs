@@ -1,14 +1,16 @@
-//! The turn component: a regular agent run, and nothing else.
+//! The turn component: what one provider call says, and what an ending means.
 //!
-//! A turn arrives as [`RunCommand::StartTurn`], told by the queue after it
-//! journaled the turn's input. This component asks the provision component for
-//! the turn's contexts, then loops: dispatch one provider call, read what came
-//! back — a message that ends the turn, or tool calls to route — and dispatch
-//! the next. Contexts arrive by command (`ContextReady`); every tool result
-//! arrives by command (`ToolReturned`); all of it is fenced by the turn's
-//! generation, so a cancelled turn's stragglers are dropped. Compactions and
-//! summaries are the queue's standalone work and never touch this file: a
-//! turn that follows one simply reads the compacted context.
+//! This file does not decide when a call happens —
+//! [`Components::advance`](super::boundary) does, and it calls
+//! [`Turn::run_step`]. What comes back is this component's: an assistant
+//! message to journal, tool calls to dispatch, or a turn that is over. Every
+//! report is fenced by the work generation, so a cancelled turn's stragglers
+//! are dropped.
+//!
+//! Between calls this component holds nothing the agent depends on. Whether
+//! the next call may run is read off the state — the calls it made and the
+//! results they have — so a crash mid-batch and a live batch look identical,
+//! and a compaction that lands between two calls is invisible here.
 //!
 //! The second half of this file is the conclusion: what an ending *means* —
 //! a park, an ask, a submitted result, a contradiction — decided here because
@@ -16,13 +18,12 @@
 
 use super::*;
 use crate::agent_loop::context::{AgentOutcome, AgentOutcomeSink, AskedQuestion};
-use crate::agent_loop::queued_turn;
 use crate::sessions::ask_tool::ASK_USER_TOOL;
 use crate::sessions::workflow::SUBMIT_RESULT_TOOL;
 use async_trait::async_trait;
 use horsie_actor::{ActorRef, CommandEffect, ReplyTo};
 use horsie_agentcore::{
-    AgentEvent, AgentInput, AgentLogBody, EventSink, EventSinkError, LlmError, Message, StepError,
+    AgentEvent, AgentLogBody, EventSink, EventSinkError, LlmError, Message, StepError,
     StepRequest, StoppedCall, ToolOutcome, Toolbox, Usage, extract_text, extract_tool_calls,
     tool_fingerprint,
 };
@@ -38,22 +39,18 @@ const MAX_ITERATIONS: u32 = 100;
 const STUCK_THRESHOLD: usize = 5;
 const NUDGE_THRESHOLD: usize = 3;
 
-/// The turn in flight, and what a crash may leave of it. All in-memory on
-/// purpose — a crash mid-turn is an interrupted turn, and recovery already
-/// treats it as one.
+/// One turn's bookkeeping, all in memory on purpose: a crash mid-turn is an
+/// interrupted turn, and recovery already treats it as one.
 #[derive(Default)]
 pub(super) struct Turn {
-    /// The turn in flight, if any.
+    /// The turn in flight, if any. Created lazily at the first call of a turn
+    /// and dropped when it concludes — the durable `turn_in_flight` is what
+    /// says a turn exists, and this is only what the turn has spent so far.
     flight: Option<TurnFlight>,
-    /// Callers waiting to hear that the in-flight turn has terminated (see
-    /// [`RunCommand::Cancel`]). Drained the moment a turn concludes.
-    pub(super) cancel_acks: Vec<ReplyTo<()>>,
 }
 
-/// Result of a turn, interpreted by [`super::conclude`].
+/// Result of a turn, interpreted by [`Turn::conclude`].
 pub struct RunReport {
-    /// Which turn this is the report of, against the generation fence.
-    pub(super) run_id: u64,
     pub(super) outcome: RunOutcome,
 }
 
@@ -61,35 +58,16 @@ pub struct RunReport {
 pub(super) enum RunOutcome {
     /// Agent ended its turn with plain text. Whether that is a park or a
     /// mistake is decided here, where what would wake the agent is known.
-    Completed {
-        text: String,
-    },
+    Completed { text: String },
     /// A tool ended the run. One call per stopper the model issued.
-    Stopped {
-        calls: Vec<StoppedCall>,
-    },
+    Stopped { calls: Vec<StoppedCall> },
     Cancelled,
-    Failed {
-        error: String,
-        recoverable: bool,
-    },
-    /// The failure was already delivered to the parent; only the turn needs
-    /// clearing.
-    AlreadyReported,
-}
-
-/// A dispatched remote call the turn is still waiting on.
-struct PendingCall {
-    id: String,
-    name: String,
-    input: Value,
+    Failed { error: String, recoverable: bool },
 }
 
 /// One turn's in-flight bookkeeping — what the old background loop held in
 /// locals.
 pub(super) struct TurnFlight {
-    pub(super) id: u64,
-    pub(super) cancel: CancellationToken,
     tool_choice: horsie_agentcore::ToolChoice,
     /// Completed provider calls this turn.
     iteration: u32,
@@ -100,8 +78,18 @@ pub(super) struct TurnFlight {
     usage: Usage,
     /// The last call's prompt size alone — what is loaded in context now.
     context_tokens: u32,
-    pending_calls: Vec<PendingCall>,
+    /// Calls that ended the run, collected as their batch settles.
     stopped: Vec<StoppedCall>,
+    /// The names and inputs of the calls dispatched for the current message,
+    /// so a stopper can be reported with what it asked for.
+    dispatched: Vec<PendingCall>,
+}
+
+/// A dispatched call, kept only until it answers.
+struct PendingCall {
+    id: String,
+    name: String,
+    input: Value,
 }
 
 /// Forwards streamed text chunks to the mailbox, tagged with the turn so a
@@ -110,7 +98,7 @@ pub(super) struct TurnFlight {
 /// the stream.
 struct DeltaSink {
     actor: ActorRef<AgentCommand>,
-    turn: u64,
+    work: u64,
 }
 
 #[async_trait]
@@ -120,7 +108,7 @@ impl EventSink for DeltaSink {
             let _ = self
                 .actor
                 .tell(AgentCommand::Run(RunCommand::StreamDelta {
-                    turn: self.turn,
+                    work: self.work,
                     text: chunk.text.clone(),
                 }))
                 .await;
@@ -149,22 +137,13 @@ fn bank_usage(total: &mut Usage, spent: &Usage) {
 }
 
 impl Turn {
-    /// Begin a turn: record the flight and ask the provision component for
-    /// this turn's contexts.
+    /// The turn's bookkeeping, started if this is its first call.
     ///
-    /// Nothing here journals — the turn's input was journaled by whoever told
-    /// `StartTurn`, and the first call dispatches only after `ContextReady`
-    /// reports back, so it reads a state those events are already folded into.
-    pub(super) async fn start(&mut self, cx: &mut Cx<'_>) {
-        cx.scratch.turn_live = true;
-        let cancel = CancellationToken::new();
-        let id = cx.scratch.next_work_id;
-        cx.scratch.next_work_id += 1;
-        cx.scratch.live_turn = Some(id);
-        cx.scratch.turn_cancel = Some(cancel.clone());
-        self.flight = Some(TurnFlight {
-            id,
-            cancel,
+    /// Lazily, because the durable state is what says a turn is owed a call:
+    /// a turn that began in a process that has since died is still owed one,
+    /// and the new incarnation starts counting from zero.
+    fn flight(&mut self, cx: &mut Cx<'_>) -> &mut TurnFlight {
+        self.flight.get_or_insert_with(|| TurnFlight {
             tool_choice: cx
                 .scratch
                 .pending_tool_choice
@@ -175,31 +154,33 @@ impl Turn {
             fingerprints: VecDeque::new(),
             usage: Usage::without_cache(0, 0),
             context_tokens: cx.state.context_tokens,
-            pending_calls: Vec::new(),
             stopped: Vec::new(),
-        });
-        cx.tell(AgentCommand::Provision(ProvisionCommand::Provide {
-            work: id,
-            then: Box::new(AgentCommand::Run(RunCommand::ContextReady { turn: id })),
-            or: Box::new(AgentCommand::Run(RunCommand::ContextFailed { turn: id })),
-        }))
-        .await;
+            dispatched: Vec::new(),
+        })
     }
 
-    /// The turn is over, however it ended: clear the flight and lower the
-    /// queue's gate. Called by conclude at every ending.
-    pub(super) fn clear_flight(&mut self, cx: &mut Cx<'_>) {
-        self.flight = None;
-        cx.scratch.turn_live = false;
-        cx.scratch.live_turn = None;
-        cx.scratch.turn_cancel = None;
-        // `turn_ctx` deliberately survives: the queue's compaction-due check
-        // reads the last published budget before the next work provisions.
-    }
-
-    /// The turn in flight's id, for conclude's superseded-report guard.
-    pub(super) fn flight_id(&self) -> Option<u64> {
-        self.flight.as_ref().map(|f| f.id)
+    /// Make this turn's next provider call — or fail the turn when its
+    /// iteration budget is spent.
+    ///
+    /// Called by the boundary, which has already established that the agent
+    /// owes a call, that nothing else is running, and that the contexts are
+    /// fresh. Everything it reads about the conversation it reads from state.
+    pub(super) async fn run_step(&mut self, cx: &mut Cx<'_>) -> CommandEffect<AgentDomainEvent> {
+        let max_iterations = cx.params.max_iterations.unwrap_or(MAX_ITERATIONS);
+        if self.flight(cx).iteration >= max_iterations {
+            let state = cx.state.clone();
+            return self
+                .fail_turn(
+                    Vec::new(),
+                    &state,
+                    format!("max iterations exceeded (max={max_iterations})"),
+                    false,
+                    cx,
+                )
+                .await;
+        }
+        self.spawn_call(cx.state, cx, None);
+        CommandEffect::none()
     }
 
     /// The message a cancelled run was part-way through writing, if it had
@@ -211,11 +192,6 @@ impl Turn {
     pub(super) fn aborted_message(cx: &Cx<'_>) -> Option<Message> {
         let text = cx.scratch.deltas.concat();
         (!text.trim().is_empty()).then(|| Message::assistant_text(new_message_id(), text, now_ms()))
-    }
-
-    /// The turn in flight, if `turn` still names it — the generation fence.
-    fn fenced(&mut self, turn: u64) -> Option<&mut TurnFlight> {
-        self.flight.as_mut().filter(|f| f.id == turn)
     }
 
     /// Merge `events` with whatever concluding the turn adds, in one effect.
@@ -245,20 +221,11 @@ impl Turn {
         recoverable: bool,
         cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
-        let Some(flight) = &self.flight else {
-            return CommandEffect::persist(events);
-        };
-        let run_id = flight.id;
-        events.push(AgentDomainEvent::RunAborted {
-            usage: flight.usage.clone(),
-            context_tokens: flight.context_tokens,
-            at_ms: now_ms(),
-        });
+        events.push(self.run_aborted());
         let folded = Components::apply_all(state, &events);
         self.finish(
             events,
             RunReport {
-                run_id,
                 outcome: RunOutcome::Failed { error, recoverable },
             },
             &folded,
@@ -267,40 +234,46 @@ impl Turn {
         .await
     }
 
-    /// Dispatch the turn's next provider call — or fail the turn when its
-    /// iteration budget is spent.
-    async fn dispatch_model_step(
-        &mut self,
-        events: Vec<AgentDomainEvent>,
-        folded: &AgentState,
-        cx: &mut Cx<'_>,
-        delay: Option<Duration>,
-    ) -> CommandEffect<AgentDomainEvent> {
-        let Some(flight) = &self.flight else {
-            return CommandEffect::persist(events);
-        };
-        let max_iterations = cx.params.max_iterations.unwrap_or(MAX_ITERATIONS);
-        if flight.iteration >= max_iterations {
-            return self
-                .fail_turn(
-                    events,
-                    folded,
-                    format!("max iterations exceeded (max={max_iterations})"),
-                    false,
-                    cx,
-                )
-                .await;
-        }
-        self.spawn_llm(folded, cx, delay);
-        CommandEffect::persist(events)
+    /// What the turn has spent, and where it left the context.
+    ///
+    /// The one pair of numbers only this component holds, which is why every
+    /// ending journals one of the two events below: an ending that journals
+    /// neither would lose the turn's cost and leave the agent reading
+    /// `turn_in_flight` for ever.
+    fn spent(&self) -> (Usage, u32, u32) {
+        self.flight.as_ref().map_or_else(
+            || (Usage::without_cache(0, 0), 0, 0),
+            |f| (f.usage.clone(), f.context_tokens, f.iteration),
+        )
     }
 
-    /// Spawn one provider call over the folded state's prompt.
-    fn spawn_llm(&self, folded: &AgentState, cx: &Cx<'_>, delay: Option<Duration>) {
-        let Some(flight) = &self.flight else { return };
-        let Some(tctx) = cx.scratch.turn_ctx.clone() else {
+    /// The turn ended as it should have.
+    fn run_complete(&self) -> AgentDomainEvent {
+        let (usage, context_tokens, iterations) = self.spent();
+        AgentDomainEvent::RunComplete {
+            usage,
+            iterations,
+            context_tokens,
+            at_ms: now_ms(),
+        }
+    }
+
+    /// The turn ended without finishing — a failure, or a cancel.
+    fn run_aborted(&self) -> AgentDomainEvent {
+        let (usage, context_tokens, _) = self.spent();
+        AgentDomainEvent::RunAborted {
+            usage,
+            context_tokens,
+            at_ms: now_ms(),
+        }
+    }
+
+    /// Spawn one provider call over the state's prompt.
+    fn spawn_call(&mut self, folded: &AgentState, cx: &mut Cx<'_>, delay: Option<Duration>) {
+        let Some(tctx) = cx.scratch.ctx.clone() else {
             return;
         };
+        let tool_choice = self.flight(cx).tool_choice.clone();
         // The wire-shape guard: every `tool_use` must have a `tool_result`.
         // Repairs are journaled at the moments a call becomes unanswerable, so
         // this should find nothing; it stays as the last line of defence.
@@ -310,13 +283,12 @@ impl Turn {
             conversation_id: tctx.conversation_id.clone(),
             system_prompt: tctx.system_prompt.clone(),
             specs: tctx.specs.clone(),
-            tool_choice: flight.tool_choice.clone(),
+            tool_choice,
             max_tokens: None,
             thinking_effort: tctx.thinking_effort,
             artifact_source: cx.runtime.artifacts.clone(),
         };
-        let turn = flight.id;
-        let cancel = flight.cancel.clone();
+        let (work, cancel) = cx.scratch.begin(WorkKind::Step);
         let self_ref = cx.actor.self_ref();
         tokio::spawn(async move {
             if let Some(delay) = delay {
@@ -328,30 +300,20 @@ impl Turn {
             }
             let sink = DeltaSink {
                 actor: self_ref.clone(),
-                turn,
+                work,
             };
             let cmd = match horsie_agentcore::run_step(&req, &history, &sink, &cancel).await {
-                Ok(response) => RunCommand::LlmResponded {
-                    turn,
+                Ok(response) => RunCommand::StepDone {
+                    work,
                     response: Box::new(response),
                 },
-                // The Cancel handler already concluded the turn; reporting
-                // would be answered by the fence anyway.
+                // The cancel already concluded the turn; reporting would be
+                // answered by the fence anyway.
                 Err(StepError::Cancelled) => return,
-                Err(StepError::Provider(error)) => RunCommand::LlmFailed { turn, error },
+                Err(StepError::Provider(error)) => RunCommand::StepFailed { work, error },
             };
             let _ = self_ref.tell(AgentCommand::Run(cmd)).await;
         });
-    }
-
-    /// The provision component published this turn's contexts: dispatch the
-    /// first provider call. A turn is only ever a regular agent run —
-    /// summaries and compactions are the queue's standalone work, invisible
-    /// here; a boundary landed before this turn simply *is* the context the
-    /// first call reads.
-    async fn handle_context_ready(&mut self, cx: &mut Cx<'_>) -> CommandEffect<AgentDomainEvent> {
-        let state = cx.state.clone();
-        self.dispatch_model_step(Vec::new(), &state, cx, None).await
     }
 
     /// One provider call answered: journal it, then read what it asks for.
@@ -360,9 +322,7 @@ impl Turn {
         response: horsie_agentcore::StepResponse,
         cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
-        let Some(flight) = self.flight.as_mut() else {
-            return CommandEffect::none();
-        };
+        let flight = self.flight(cx);
         flight.iteration += 1;
         flight.attempt = 0;
         // Banked the moment the call answers, before anything downstream can
@@ -393,19 +353,12 @@ impl Turn {
         }
 
         if tool_calls.is_empty() {
-            events.push(AgentDomainEvent::RunComplete {
-                usage: flight.usage.clone(),
-                iterations: flight.iteration,
-                context_tokens: flight.context_tokens,
-                at_ms: now_ms(),
-            });
-            let run_id = flight.id;
+            events.push(self.run_complete());
             let folded = Components::apply_all(cx.state, &events);
             return self
                 .finish(
                     events,
                     RunReport {
-                        run_id,
                         outcome: RunOutcome::Completed {
                             text: extract_text(&response.message.parts),
                         },
@@ -419,6 +372,7 @@ impl Turn {
         // Stuck and nudge detection over the same fingerprints the old loop
         // kept.
         let fingerprint = tool_fingerprint(&tool_calls);
+        let flight = self.flight(cx);
         flight.fingerprints.push_back(fingerprint.clone());
         if flight.fingerprints.len() > STUCK_THRESHOLD {
             flight.fingerprints.pop_front();
@@ -442,7 +396,8 @@ impl Turn {
         if window >= NUDGE_THRESHOLD && all_same {
             // Answer every call with a nudge instead of executing it, and let
             // the model try again. Journaled — the fold is the only source of
-            // history — where the old loop kept them in run-task locals.
+            // history — where the old loop kept them in run-task locals. The
+            // calls are answered, so the next advance makes the next call.
             for (tool_call_id, _, _) in &tool_calls {
                 let message = Message::tool_result(
                     tool_call_id.clone(),
@@ -453,35 +408,35 @@ impl Turn {
                 );
                 events.push(AgentDomainEvent::InputMessage { message });
             }
-            let folded = Components::apply_all(cx.state, &events);
-            return self.dispatch_model_step(events, &folded, cx, None).await;
+            return CommandEffect::persist(events);
         }
 
         // Route the batch. A component-claimed tool becomes a command to its
         // component; everything else goes to the toolbox on a spawned task.
-        // Both answer on the same channel — `ToolReturned` — so the batch
-        // bookkeeping cannot tell them apart.
-        let Some(tctx) = cx.scratch.turn_ctx.clone() else {
+        // Both answer the same way — by journaling the result — so nothing
+        // here can tell them apart afterwards.
+        let Some(tctx) = cx.scratch.ctx.clone() else {
             return CommandEffect::persist(events);
         };
         let inline_names = tctx.inline_names.clone();
-        let turn = flight.id;
-        let cancel = flight.cancel.clone();
+        let work = cx.scratch.work;
+        let cancel = cx.scratch.cancel.clone();
         let self_ref = cx.actor.self_ref();
+        let mut dispatched = Vec::new();
         for (id, name, input) in tool_calls {
-            let call = PendingCall {
+            dispatched.push(PendingCall {
                 id: id.clone(),
                 name: name.clone(),
                 input: input.clone(),
-            };
+            });
             // Claimed AND permitted: a filtered-out component tool still goes
             // to the toolbox, whose filter answers "not permitted".
             let routed = match inline_names.contains(&name) {
                 true => component::route_tool_call(ComponentToolCall {
-                    turn,
-                    tool_call_id: id,
-                    name,
-                    input,
+                    work,
+                    tool_call_id: id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
                 }),
                 false => None,
             };
@@ -489,16 +444,16 @@ impl Turn {
                 Some(cmd) => cx.tell(cmd).await,
                 None => spawn_tool_call(
                     &tctx.toolbox,
-                    call.name.clone(),
-                    call.input.clone(),
-                    call.id.clone(),
-                    turn,
+                    name,
+                    input,
+                    id,
+                    work,
                     cancel.clone(),
                     self_ref.clone(),
                 ),
             }
-            flight.pending_calls.push(call);
         }
+        self.flight(cx).dispatched = dispatched;
         CommandEffect::persist(events)
     }
 
@@ -508,24 +463,25 @@ impl Turn {
         error: LlmError,
         cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
-        let Some(flight) = self.flight.as_mut() else {
-            return CommandEffect::none();
-        };
-        // Retrying re-issues *one request* over the same folded history —
-        // nothing was journaled by the failed attempt, so the old "did the
-        // attempt write anything durable" check holds by construction.
-        if error.is_transient() && flight.attempt < cx.params.max_retries {
+        // Retrying re-issues *one request* over the same history — nothing was
+        // journaled by the failed attempt, so the old "did the attempt write
+        // anything durable" check holds by construction.
+        let max_retries = cx.params.max_retries;
+        let flight = self.flight(cx);
+        if error.is_transient() && flight.attempt < max_retries {
             flight.attempt += 1;
+            let attempt = flight.attempt;
             let delay = error
                 .retry_after()
-                .unwrap_or_else(|| Duration::from_millis(50u64 * (1u64 << flight.attempt.min(6))));
+                .unwrap_or_else(|| Duration::from_millis(50u64 * (1u64 << attempt.min(6))));
             tracing::warn!(
                 error = %error,
-                attempt = flight.attempt,
+                attempt,
                 delay_ms = delay.as_millis(),
                 "transient provider error; retrying the call"
             );
-            self.spawn_llm(cx.state, cx, Some(delay));
+            let state = cx.state.clone();
+            self.spawn_call(&state, cx, Some(delay));
             return CommandEffect::none();
         }
         let state = cx.state.clone();
@@ -543,26 +499,31 @@ impl Turn {
     }
 
     /// One dispatched tool call answered.
+    ///
+    /// Journaling the result is the whole of it: the log is where an
+    /// unanswered call is visible, so closing one there is what lets the
+    /// boundary make the next call. The one thing that cannot be journaled is
+    /// a *stopper* — a call that ends the run has no result by design — so
+    /// those are collected here and read when the batch settles.
     async fn handle_tool_returned(
         &mut self,
-        turn: u64,
         tool_call_id: String,
         outcome: ToolReturn,
         cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
-        let Some(flight) = self.fenced(turn) else {
-            tracing::warn!(turn, tool_call_id, "dropping a superseded tool result");
-            return CommandEffect::none();
+        let flight = self.flight(cx);
+        let position = flight.dispatched.iter().position(|c| c.id == tool_call_id);
+        let call = match position {
+            Some(position) => flight.dispatched.remove(position),
+            // A call this incarnation never dispatched — a repair the fold
+            // already answered, or a component's call answered by its own
+            // journal. Either way the log is the record, not this list.
+            None => PendingCall {
+                id: tool_call_id,
+                name: String::new(),
+                input: Value::Null,
+            },
         };
-        let Some(position) = flight
-            .pending_calls
-            .iter()
-            .position(|c| c.id == tool_call_id)
-        else {
-            tracing::warn!(tool_call_id, "a tool result answered no pending call");
-            return CommandEffect::none();
-        };
-        let call = flight.pending_calls.remove(position);
         let mut events = Vec::new();
         match outcome {
             ToolReturn::Result {
@@ -585,20 +546,38 @@ impl Turn {
             }),
         }
         let folded = Components::apply_all(cx.state, &events);
-        if !flight.pending_calls.is_empty() {
+        if !folded.open_tool_calls().is_empty() {
             return CommandEffect::persist(events);
         }
-        // The batch settled.
-        let stopped = std::mem::take(&mut flight.stopped);
-        let run_id = flight.id;
+        // The batch settled. A batch of ordinary results ends here — the
+        // boundary makes the next call — and only a stopper ends the turn.
+        let stopped = std::mem::take(&mut self.flight(cx).stopped);
         if stopped.is_empty() {
-            return self.dispatch_model_step(events, &folded, cx, None).await;
+            return CommandEffect::persist(events);
         }
+        events.push(self.run_complete());
+        let folded = Components::apply_all(cx.state, &events);
         self.finish(
             events,
             RunReport {
-                run_id,
                 outcome: RunOutcome::Stopped { calls: stopped },
+            },
+            &folded,
+            cx,
+        )
+        .await
+    }
+
+    /// The turn was cancelled: bank what it spent, repair what it left
+    /// dangling, and report it. Called by the boundary, which has already
+    /// stopped everything that was running.
+    pub(super) async fn cancelled(&mut self, cx: &mut Cx<'_>) -> CommandEffect<AgentDomainEvent> {
+        let events = vec![self.run_aborted()];
+        let folded = Components::apply_all(cx.state, &events);
+        self.finish(
+            events,
+            RunReport {
+                outcome: RunOutcome::Cancelled,
             },
             &folded,
             cx,
@@ -611,123 +590,49 @@ impl Turn {
 impl Component for Turn {
     type Command = RunCommand;
 
+    /// Every arm is a report from this component's own spawned work, fenced by
+    /// the generation it was issued under. Nothing here starts anything.
     async fn handle(
         &mut self,
         cmd: RunCommand,
         cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
         match cmd {
-            RunCommand::StartTurn => {
-                // The queue gates on `turn_live`, so a second start reaching
-                // here is a bug — refuse it rather than orphan the first
-                // turn's cancel token.
-                if self.flight.is_some() {
-                    tracing::warn!("refusing to start a turn while one is in flight");
-                    return CommandEffect::none();
-                }
-                self.start(cx).await;
-                CommandEffect::none()
-            }
-            RunCommand::ContextReady { turn } => {
-                if self.fenced(turn).is_none() {
-                    return CommandEffect::none();
-                }
-                self.handle_context_ready(cx).await
-            }
-            RunCommand::ContextFailed { turn } => {
-                if self.fenced(turn).is_none() {
-                    return CommandEffect::none();
-                }
-                let state = cx.state.clone();
-                self.conclude(
-                    RunReport {
-                        run_id: turn,
-                        outcome: RunOutcome::AlreadyReported,
-                    },
-                    &state,
-                    cx,
-                )
-                .await
-            }
-            RunCommand::LlmResponded { turn, response } => {
-                if self.fenced(turn).is_none() {
-                    tracing::warn!(turn, "dropping a superseded provider response");
+            RunCommand::StepDone { work, response } => {
+                if !cx.scratch.finished(work) {
+                    tracing::warn!(work, "dropping a superseded provider response");
                     return CommandEffect::none();
                 }
                 self.handle_responded(*response, cx).await
             }
-            RunCommand::LlmFailed { turn, error } => {
-                if self.fenced(turn).is_none() {
+            RunCommand::StepFailed { work, error } => {
+                if !cx.scratch.finished(work) {
                     return CommandEffect::none();
                 }
                 self.handle_llm_failed(error, cx).await
             }
-            RunCommand::Cancel { ack } => {
-                match (&self.flight, ack) {
-                    (Some(flight), ack) => {
-                        flight.cancel.cancel();
-                        // Answered by the conclusion below: the fence
-                        // guarantees the dying tasks can write nothing more,
-                        // so "the run is over" is true the moment it lands.
-                        self.cancel_acks.extend(ack);
-                        let run_id = flight.id;
-                        // Bank what the turn spent before concluding — the
-                        // conclusion reads usage off the folded state.
-                        let events = vec![AgentDomainEvent::RunAborted {
-                            usage: flight.usage.clone(),
-                            context_tokens: flight.context_tokens,
-                            at_ms: now_ms(),
-                        }];
-                        let folded = Components::apply_all(cx.state, &events);
-                        self.finish(
-                            events,
-                            RunReport {
-                                run_id,
-                                outcome: RunOutcome::Cancelled,
-                            },
-                            &folded,
-                            cx,
-                        )
-                        .await
-                    }
-                    // No turn in flight — but the queue may be holding a
-                    // standalone work slot (a `/compact`, a seed summary):
-                    // cancel its token and release, so the ack's promise —
-                    // nothing more will run — holds for that work too.
-                    (None, ack) => {
-                        if let (Some(work), Some(token)) =
-                            (cx.scratch.live_turn, cx.scratch.turn_cancel.clone())
-                        {
-                            token.cancel();
-                            cx.tell(AgentCommand::Queue(QueueCommand::WorkDone { work }))
-                                .await;
-                        }
-                        if let Some(ack) = ack {
-                            let _ = ack.send(());
-                        }
-                        CommandEffect::none()
-                    }
-                }
-            }
-            RunCommand::PersistProgress { events, ack } => {
-                CommandEffect::persist(events).and_ack(ack)
-            }
             RunCommand::ToolReturned {
-                turn,
+                work,
                 tool_call_id,
                 outcome,
             } => {
-                self.handle_tool_returned(turn, tool_call_id, outcome, cx)
-                    .await
+                if !cx.scratch.live(work) {
+                    tracing::warn!(work, tool_call_id, "dropping a superseded tool result");
+                    return CommandEffect::none();
+                }
+                self.handle_tool_returned(tool_call_id, outcome, cx).await
             }
-            RunCommand::StreamDelta { turn, text } => {
+            RunCommand::StreamDelta { work, text } => {
                 // The fence again: a dead turn's chunks must not pollute the
                 // next turn's delta buffer.
-                if self.flight.as_ref().map(|f| f.id) == Some(turn) {
+                if cx.scratch.live(work) {
                     cx.scratch.deltas.push(text);
                     cx.publish_revision();
                 }
                 CommandEffect::none()
+            }
+            RunCommand::PersistProgress { events, ack } => {
+                CommandEffect::persist(events).and_ack(ack)
             }
         }
     }
@@ -787,25 +692,22 @@ impl Component for Turn {
         }
     }
 
-    /// Repair the tool call the dead process was running, report the turn it
-    /// died inside, and — for an agent nobody will message — re-drive it.
+    /// Repair what a dead process left half-done: the calls it was running,
+    /// and the turn it died inside.
+    ///
+    /// Everything is journaled as an ordinary write. Whether anything then
+    /// *runs* is not decided here — the actor advances once recovery is over,
+    /// and reads the repaired state like any other.
     async fn on_load(&mut self, cx: &mut Cx<'_>) {
+        let mut events: Vec<AgentDomainEvent> = Vec::new();
         // A tool call the dead process was running has no result and never
         // will. Record the repair once, here, where it still belongs at the
         // end of the transcript.
-        let repairs = missing_tool_results(&cx.state.prompt_messages(), &parked_call_ids(cx.state));
-        if !repairs.is_empty() {
-            let (ack, _) = tokio::sync::oneshot::channel();
-            let ack = ReplyTo::from_sender(ack);
-            cx.tell(AgentCommand::Run(RunCommand::PersistProgress {
-                events: repairs
-                    .into_iter()
-                    .map(|message| AgentDomainEvent::InputMessage { message })
-                    .collect(),
-                ack,
-            }))
-            .await;
-        }
+        events.extend(
+            missing_tool_results(&cx.state.prompt_messages(), &parked_call_ids(cx.state))
+                .into_iter()
+                .map(|message| AgentDomainEvent::InputMessage { message }),
+        );
         // A turn still open in the fold is one no process is running any more.
         // Tell the owner, from here rather than from a command: this hook runs
         // before the first live command, so the report is ordered ahead of
@@ -817,25 +719,36 @@ impl Component for Turn {
                     agent: cx.runtime.journal_id,
                 })
                 .await;
+            // And it is over: an incarnation that cannot finish a turn must not
+            // leave the agent owing a provider call, or the first advance would
+            // silently resume a turn nobody asked it to.
+            events.push(AgentDomainEvent::RunCancelled { at_ms: now_ms() });
+            // Interactive sessions never self-continue: the user's next message
+            // is the continuation. An empty history means nothing ran yet, and
+            // a parked agent is waiting for a timer — neither is an interrupted
+            // turn.
+            if !cx.params.interactive && !cx.state.parked && !cx.state.log.is_empty() {
+                // Queued rather than journaled as input directly: it is
+                // something addressed to this agent, and it becomes a turn the
+                // same way everything else addressed to it does.
+                events.push(AgentDomainEvent::Received {
+                    item: crate::agent_loop::Incoming::Continue {
+                        id: format!("interrupted:{}", cx.state.next_seq),
+                        reason: "continue the interrupted task".to_string(),
+                    },
+                    at_ms: now_ms(),
+                });
+            }
         }
-        // Interactive sessions never self-continue: the user's next message is
-        // the continuation. An empty history means nothing ran yet, and a
-        // parked agent is waiting for a timer — neither is an interrupted
-        // turn.
-        if cx.params.interactive || cx.state.parked || cx.state.log.is_empty() {
+        if events.is_empty() {
             return;
         }
-        // The continuation is journaled — the fold is the only source of
-        // history, so an input the model must see has to be in it.
-        let message = AgentInput::user_message(new_message_id(), "continue the interrupted task")
-            .to_message(now_ms());
         let (ack, _) = tokio::sync::oneshot::channel();
         cx.tell(AgentCommand::Run(RunCommand::PersistProgress {
-            events: vec![AgentDomainEvent::InputMessage { message }],
+            events,
             ack: ReplyTo::from_sender(ack),
         }))
         .await;
-        self.start(cx).await;
     }
 }
 
@@ -847,7 +760,7 @@ fn spawn_tool_call(
     name: String,
     input: Value,
     tool_call_id: String,
-    turn: u64,
+    work: u64,
     cancel: CancellationToken,
     self_ref: ActorRef<AgentCommand>,
 ) {
@@ -880,7 +793,7 @@ fn spawn_tool_call(
         };
         let _ = self_ref
             .tell(AgentCommand::Run(RunCommand::ToolReturned {
-                turn,
+                work,
                 tool_call_id,
                 outcome,
             }))
@@ -914,28 +827,11 @@ impl Turn {
         state: &AgentState,
         cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
-        // A report from a turn that has already been superseded says nothing
-        // about the one in flight now.
-        if self.flight_id() != Some(report.run_id) {
-            tracing::warn!(
-                run_id = report.run_id,
-                current = ?self.flight_id(),
-                "dropping the report of a superseded run"
-            );
-            return CommandEffect::none();
-        }
-        // The turn is over before anything below is decided: clear the flight
-        // and lower the queue's gate, so the drains told below can start the
-        // next one.
-        self.clear_flight(cx);
-        // Answered before any parent delivery below: a canceller is likely
-        // blocking its own mailbox waiting on this, and those deliveries
-        // `tell` into that same mailbox — replying first keeps the two from
-        // deadlocking. The fence guarantees a cancelled turn's tasks can make
-        // nothing more durable, so "it will write nothing more" is true now.
-        for ack in self.cancel_acks.drain(..) {
-            let _ = ack.send(());
-        }
+        // The turn is over before anything below is decided: drop its
+        // bookkeeping and let the contexts go stale, so the next turn builds
+        // its own.
+        self.flight = None;
+        cx.scratch.ctx_stale = true;
         let agent = cx.runtime.journal_id;
         let parent = cx.runtime.parent.clone();
 
@@ -960,8 +856,7 @@ impl Turn {
                 // finishing is what wakes it, and its next conclusion is the
                 // report.
                 if cx.params.park_on_outstanding_work {
-                    if queued_turn(&state.inbox, &state.asks).is_some() {
-                        cx.drain().await;
+                    if crate::agent_loop::queued_offer(&state.inbox, &state.asks).is_some() {
                         return CommandEffect::none();
                     }
                     if !state.timers.is_empty()
@@ -978,10 +873,7 @@ impl Turn {
                         output: Value::String(text),
                     })
                     .await;
-                // Resident: the agent goes idle, it does not die. A turn
-                // ending is a boundary, so whatever queued while it ran
-                // starts the next one.
-                cx.drain().await;
+                // Resident: the agent goes idle, it does not die.
                 CommandEffect::none()
             }
             RunOutcome::Stopped { calls } => {
@@ -1011,7 +903,6 @@ impl Turn {
                                 at_ms: now_ms(),
                             });
                         }
-                        cx.drain().await;
                         CommandEffect::persist(events)
                     }
                     Conclusion::Ask(asks) => {
@@ -1036,7 +927,6 @@ impl Turn {
                             asks,
                             at_ms: now_ms(),
                         };
-                        cx.drain().await;
                         // Snapshot to compact the incrementally-persisted log:
                         // history and streams read state, so it is invisible.
                         CommandEffect::persist(vec![recorded]).and_snapshot()
@@ -1049,7 +939,7 @@ impl Turn {
                                 context_tokens: state.context_tokens,
                             })
                             .await;
-                        self.correct_contradiction(calls, state, cx).await
+                        self.correct_contradiction(calls, state)
                     }
                 }
             }
@@ -1085,9 +975,6 @@ impl Turn {
                     events.push(AgentDomainEvent::MessageAborted { message: salvaged });
                 }
                 events.push(AgentDomainEvent::RunCancelled { at_ms: now_ms() });
-                // A stop cancels the turn, not the promise: anything queued
-                // while the cancelled turn ran starts the next one.
-                cx.drain().await;
                 CommandEffect::persist(events).and_snapshot()
             }
             RunOutcome::Failed { error, recoverable } => {
@@ -1112,11 +999,6 @@ impl Turn {
                 // failed run stays inspectable. The agent stays alive: a
                 // failed turn is not a dead agent, and the next message
                 // reuses it.
-                CommandEffect::none()
-            }
-            RunOutcome::AlreadyReported => {
-                // The failure was already delivered to the parent. Stay alive
-                // so the next message can retry against the same transcript.
                 CommandEffect::none()
             }
         }
@@ -1201,8 +1083,7 @@ impl Turn {
     ) -> CommandEffect<AgentDomainEvent> {
         // The queue first: a subagent report that landed while the turn was
         // ending starts the next turn, and nothing needs classifying at all.
-        if queued_turn(&state.inbox, &state.asks).is_some() {
-            cx.drain().await;
+        if crate::agent_loop::queued_offer(&state.inbox, &state.asks).is_some() {
             return CommandEffect::none();
         }
         if !state.timers.is_empty()
@@ -1251,9 +1132,8 @@ impl Turn {
             at_ms: now_ms(),
         };
         let nudged = AgentDomainEvent::Nudged { at_ms: now_ms() };
-        // The drain told here finds the nudge folded into the queue and starts
-        // the turn that answers it.
-        cx.drain().await;
+        // Queued, not run: the nudge is something addressed to this agent, and
+        // the advance that follows this write takes it like anything else.
         CommandEffect::persist(vec![nudge, nudged])
     }
 
@@ -1264,11 +1144,10 @@ impl Turn {
     /// `tool_result` for the session to stay valid, and a call left
     /// dangling is indistinguishable later from a question still waiting on the
     /// user.
-    pub(super) async fn correct_contradiction(
+    pub(super) fn correct_contradiction(
         &mut self,
         calls: Vec<StoppedCall>,
         state: &AgentState,
-        cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
         let named = calls
             .iter()
@@ -1304,9 +1183,6 @@ impl Turn {
             at_ms,
         };
         events.push(resume);
-        // The continuation is in the queue once these persist; the drain
-        // starts the turn that acts on it.
-        cx.drain().await;
         CommandEffect::persist(events)
     }
 }

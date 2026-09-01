@@ -54,7 +54,6 @@ use crate::agent_loop::{
 };
 use crate::agent_loop::{
     CoreCommand as AgentCoreCommand, QueueCommand as AgentQueueCommand,
-    RunCommand as AgentRunCommand,
 };
 use crate::projects::{ProjectRegistry, ProjectServices, resolve};
 use crate::sessions::{
@@ -1182,7 +1181,7 @@ impl SessionActor {
         let (tx, rx) = oneshot::channel();
         let _ = agent
             .actor
-            .tell(AgentCommand::Run(AgentRunCommand::Cancel {
+            .tell(AgentCommand::Core(AgentCoreCommand::Cancel {
                 ack: Some(ReplyTo::from_sender(tx)),
             }))
             .await;
@@ -1609,7 +1608,7 @@ impl SessionActor {
             // fail, but an in-flight tool call would run to completion first.
             let _ = agent
                 .actor
-                .tell(AgentCommand::Run(AgentRunCommand::Cancel { ack: None }))
+                .tell(AgentCommand::Core(AgentCoreCommand::Cancel { ack: None }))
                 .await;
             let _ = agent
                 .actor

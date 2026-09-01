@@ -116,24 +116,33 @@ impl Incoming {
     }
 }
 
-/// A summary a turn was asked for, and what becomes of it.
+/// The next thing the queue is offering, and what taking it consumes.
 ///
-/// One type rather than two turn fields because the two are mutually exclusive
-/// by nature: both spend a provider call reading the same history, and running
-/// both in one turn would summarise a summary.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Summarise {
-    /// `/compact`: fold the summary back into this agent's own history behind a
-    /// boundary. The `Option` is the focus instructions — `None` is a bare
-    /// `/compact`.
-    Compact(Option<String>),
-    /// `/summary-n-fork`: the summary is not this session's to keep. It
-    /// seeds these sub sessions, and this history is left exactly as it was.
+/// One offer at a time, in a fixed order of precedence, because each is a
+/// different kind of work: taking it is a decision the caller makes, and what
+/// it *does* with it is none of this module's business. Whoever takes an offer
+/// journals the ids in `consumed`, which is what removes them from the queue.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Offer {
+    /// `/summary-n-fork`: the summary is not this session's to keep. It seeds
+    /// these sub sessions, and this history is left exactly as it was.
     ///
-    /// A list, not one id, because sub sessions queued into the same turn
-    /// share a branch point — nothing can append between them — so they are
-    /// entitled to the same summary rather than to a provider call each.
-    SubSession(Vec<uuid::Uuid>),
+    /// A list, not one id, because sub sessions queued together share a branch
+    /// point — nothing can append between them — so they are entitled to the
+    /// same summary rather than to a provider call each.
+    Summary {
+        consumed: Vec<String>,
+        sub_sessions: Vec<uuid::Uuid>,
+    },
+    /// `/compact`: fold the summary back into this agent's own history behind
+    /// a boundary. `instructions` is the focus the user typed, if any.
+    Compact {
+        consumed: Vec<String>,
+        instructions: Option<String>,
+    },
+    /// Everything queued that is *addressed to the model*, merged into one
+    /// input.
+    Input(Box<Turn>),
 }
 
 /// Everything an agent is about to be resumed with, and what that consumes.
@@ -144,12 +153,6 @@ pub enum Summarise {
 pub struct Turn {
     /// Ids of the queue items this turn carries.
     pub consumed: Vec<String>,
-    /// A summarisation this turn carries, and what becomes of the summary.
-    ///
-    /// It rides on the turn rather than being acted on at enqueue so it
-    /// happens in order — a turn in flight finishes first, and the summary
-    /// describes the history a reader sees it taken from.
-    pub summarise: Option<Summarise>,
     /// Tool-call ids of the questions this turn *answered*. Empty when the turn
     /// abandoned them instead — the two are deliberately not the same thing.
     pub answered: Vec<String>,
@@ -199,22 +202,75 @@ impl std::fmt::Display for AnswerError {
     }
 }
 
-/// Whether the queue may start a turn now, and what that turn carries.
+/// What the queue is offering now, if anything.
 ///
-/// `None` means "not yet", and there are exactly two reasons for it: nothing
-/// is queued, or the agent is parked on questions and nothing queued is
-/// entitled to abandon them. Being *busy* is not one of them — that is the
-/// actor's own business, checked before this is ever asked, because a run in
+/// `None` means "nothing to take", and there are exactly two reasons for it:
+/// nothing is queued, or the agent is parked on questions and nothing queued
+/// is entitled to abandon them. Being *busy* is not one of them — that is the
+/// caller's own business, checked before this is ever asked, because work in
 /// flight is not a fact about the queue.
+///
+/// The precedence is about what a loss costs. A sub session waiting on a
+/// summary is stuck for ever if its summary is skipped, so it goes first. A
+/// `/compact` goes before the message that arrived with it because the point
+/// of typing it is to shrink the context the *next* turn reads. Everything
+/// else is one merged input.
 #[must_use]
-pub fn queued_turn(inbox: &[Incoming], asks: &[crate::agent_loop::AskedQuestion]) -> Option<Turn> {
+pub fn queued_offer(
+    inbox: &[Incoming],
+    asks: &[crate::agent_loop::AskedQuestion],
+) -> Option<Offer> {
     if inbox.is_empty() {
         return None;
     }
+    // Parked, and nothing queued is a person changing their mind: hold
+    // everything, including a `/compact`, until the questions are answered.
     if !asks.is_empty() && !inbox.iter().any(Incoming::is_user) {
         return None;
     }
+    let sub_sessions: Vec<(String, uuid::Uuid)> = inbox
+        .iter()
+        .filter_map(|i| match i {
+            Incoming::SubSession { id, sub_session } => Some((id.clone(), *sub_session)),
+            Incoming::User { .. }
+            | Incoming::SubAgent { .. }
+            | Incoming::Timer { .. }
+            | Incoming::Continue { .. }
+            | Incoming::Compact { .. } => None,
+        })
+        .collect();
+    if !sub_sessions.is_empty() {
+        return Some(Offer::Summary {
+            consumed: sub_sessions.iter().map(|(id, _)| id.clone()).collect(),
+            sub_sessions: sub_sessions.into_iter().map(|(_, s)| s).collect(),
+        });
+    }
+    let compactions: Vec<(String, Option<String>)> = inbox
+        .iter()
+        .filter_map(|i| match i {
+            Incoming::Compact { id, instructions } => Some((id.clone(), instructions.clone())),
+            Incoming::User { .. }
+            | Incoming::SubAgent { .. }
+            | Incoming::Timer { .. }
+            | Incoming::Continue { .. }
+            | Incoming::SubSession { .. } => None,
+        })
+        .collect();
+    if !compactions.is_empty() {
+        return Some(Offer::Compact {
+            consumed: compactions.iter().map(|(id, _)| id.clone()).collect(),
+            // The newest wins: they ask for the same thing, and the last
+            // instructions typed are the ones the user is thinking of.
+            instructions: compactions
+                .into_iter()
+                .next_back()
+                .and_then(|(_, instructions)| instructions),
+        });
+    }
     let mut turn = drain(inbox);
+    if turn.consumed.is_empty() {
+        return None;
+    }
     // Abandoned, not answered: every parked call still gets a result, so
     // nothing dangles on the wire, but the result says the question went
     // unanswered. Answering for real goes through `answered_turn`, which
@@ -229,7 +285,7 @@ pub fn queued_turn(inbox: &[Incoming], asks: &[crate::agent_loop::AskedQuestion]
             artifacts: Vec::new(),
         })
         .collect();
-    Some(turn)
+    Some(Offer::Input(Box::new(turn)))
 }
 
 /// The turn an answered park starts: the answers, plus whatever queued behind
@@ -283,45 +339,20 @@ pub fn answered_turn(
 
 /// Fold the whole queue into one turn's input. Never partial: an agent that is
 /// starting a turn at all is starting it on everything it has been told.
-/// The one summary this turn takes, out of everything that asked for one.
-///
-/// A turn takes at most one: they all read the same history for the same
-/// provider call, and running two back to back would summarise a summary.
-///
-/// Sub sessions win over a queued `/compact`, and every sub session in the
-/// drain shares the result. The asymmetry is deliberate and about what a loss
-/// costs — a dropped compaction is an optimisation that did not happen, and
-/// the automatic check runs again on the very next iteration, while a dropped
-/// sub session leaves a session stuck in `Provisioning` with nobody left to
-/// finish it.
-fn summarise(inbox: &[Incoming]) -> Option<Summarise> {
-    let sub_sessions: Vec<uuid::Uuid> = inbox
+fn drain(inbox: &[Incoming]) -> Turn {
+    // A `/compact` and a `/summary-n-fork` are instructions to the server, not
+    // input, and they are taken as their own offers. Left in the queue here,
+    // they would be crossed off by a turn that did nothing about them.
+    let inbox: Vec<&Incoming> = inbox
         .iter()
-        .filter_map(|i| match i {
-            Incoming::SubSession { sub_session, .. } => Some(*sub_session),
-            Incoming::User { .. }
-            | Incoming::SubAgent { .. }
-            | Incoming::Timer { .. }
-            | Incoming::Continue { .. }
-            | Incoming::Compact { .. } => None,
+        .filter(|i| {
+            !matches!(
+                i,
+                Incoming::Compact { .. } | Incoming::SubSession { .. }
+            )
         })
         .collect();
-    if !sub_sessions.is_empty() {
-        return Some(Summarise::SubSession(sub_sessions));
-    }
-    // The newest `/compact` wins: they ask for the same thing.
-    inbox.iter().rev().find_map(|i| match i {
-        Incoming::Compact { instructions, .. } => Some(Summarise::Compact(instructions.clone())),
-        Incoming::User { .. }
-        | Incoming::SubAgent { .. }
-        | Incoming::Timer { .. }
-        | Incoming::Continue { .. }
-        | Incoming::SubSession { .. } => None,
-    })
-}
-
-fn drain(inbox: &[Incoming]) -> Turn {
-    let texts: Vec<&str> = inbox.iter().filter_map(Incoming::text).collect();
+    let texts: Vec<&str> = inbox.iter().copied().filter_map(Incoming::text).collect();
     Turn {
         consumed: inbox.iter().map(|i| i.id().to_string()).collect(),
         answered: Vec::new(),
@@ -331,6 +362,7 @@ fn drain(inbox: &[Incoming]) -> Turn {
         message: (!texts.is_empty()).then(|| texts.join(MERGE_SEPARATOR)),
         artifacts: inbox
             .iter()
+            .copied()
             .filter_map(|i| match i {
                 Incoming::User { artifacts, .. } => Some(artifacts.clone()),
                 // Nothing else can carry one: a timer and a `Stop` hook are
@@ -345,6 +377,7 @@ fn drain(inbox: &[Incoming]) -> Turn {
             .collect(),
         subagent_results: inbox
             .iter()
+            .copied()
             .filter_map(|i| match i {
                 Incoming::SubAgent { part, .. } => Some((**part).clone()),
                 Incoming::User { .. }
@@ -355,7 +388,6 @@ fn drain(inbox: &[Incoming]) -> Turn {
             })
             .collect(),
         results: Vec::new(),
-        summarise: summarise(inbox),
     }
 }
 

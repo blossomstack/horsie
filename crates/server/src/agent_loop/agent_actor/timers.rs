@@ -5,10 +5,9 @@
 //! the inline tool executor the turn routes to, the fold, the re-arm recovery
 //! owes, and the one command a sleep elapsing sends.
 //!
-//! A timer firing does not run anything. It queues a wake and tells `Drain`,
-//! so it waits in the same place everything else addressed to this agent
-//! waits — a timer firing mid-run is harmless, and no flag has to remember
-//! anything.
+//! A timer firing does not run anything. It queues a wake, which waits in the
+//! same place everything else addressed to this agent waits — a timer firing
+//! mid-run is harmless, and no flag has to remember anything.
 
 use super::*;
 use async_trait::async_trait;
@@ -170,7 +169,6 @@ impl Component for Timers {
             next_fire_at_unix_ms,
             at_ms: now,
         };
-        cx.drain().await;
         CommandEffect::persist(vec![fired, received])
     }
 

@@ -19,7 +19,8 @@ use super::{
 use crate::agent_loop::AgentCommand;
 use crate::agent_loop::{AgentOutcome, AgentOutcomeSink, Incoming};
 use crate::agent_loop::{
-    LogCommand as AgentLogCommand, QueueCommand as AgentQueueCommand, RunCommand as AgentRunCommand,
+    CoreCommand as AgentCoreCommand, LogCommand as AgentLogCommand,
+    QueueCommand as AgentQueueCommand,
 };
 use crate::sessions::addressing::{SessionInbox, SessionRef};
 use crate::sessions::run_forest::{SubAgentStatus, TurnPhase};
@@ -487,7 +488,7 @@ impl HookRouting {
                 let (tx, rx) = oneshot::channel();
                 let _ = agent
                     .actor
-                    .tell(AgentCommand::Run(AgentRunCommand::Cancel {
+                    .tell(AgentCommand::Core(AgentCoreCommand::Cancel {
                         ack: Some(ReplyTo::from_sender(tx)),
                     }))
                     .await;

@@ -100,7 +100,6 @@ impl Component for Seeding {
                 // person's message would not even log a `MessageQueued`.
                 if !state.log.is_empty() || !state.inbox.is_empty() {
                     let _ = reply.send(Ok(()));
-                    cx.drain().await;
                     return CommandEffect::none();
                 }
                 let (tx, rx) = tokio::sync::oneshot::channel();
@@ -112,9 +111,6 @@ impl Component for Seeding {
                     };
                     let _ = reply.send(answer);
                 });
-                // Decided after the write, exactly as `Enqueue` does: the queue
-                // a turn drains has to be the durable one.
-                cx.drain().await;
                 CommandEffect::persist(vec![
                     AgentDomainEvent::Seeded {
                         state: seeded,
@@ -131,63 +127,17 @@ impl Component for Seeding {
                 // replays it.
                 .and_snapshot()
             }
-            SeedCommand::TakeSummary { work, sub_sessions } => {
-                let (Some(tctx), Some(cancel)) =
-                    (cx.scratch.turn_ctx.clone(), cx.scratch.turn_cancel.clone())
-                else {
-                    tracing::warn!(work, "a summary was asked for with no contexts");
-                    cx.tell(AgentCommand::Seed(SeedCommand::SummaryTaken {
-                        work,
-                        sub_sessions,
-                        result: Err("no contexts to summarise with".to_string()),
-                        usage: None,
-                    }))
-                    .await;
-                    return CommandEffect::none();
-                };
-                // The summary must describe the history at the branch point,
-                // read before anything can append behind it.
-                let history = repair_unanswered_tool_calls(state.prompt_messages());
-                let self_ref = cx.actor.self_ref();
-                tokio::spawn(async move {
-                    // The compaction component's summarise machinery, shared:
-                    // the same bare `run_step`, over the whole history.
-                    let result = tokio::select! {
-                        biased;
-                        () = cancel.cancelled() => return,
-                        result = compaction::summarise_step(
-                            &tctx,
-                            &history,
-                            history.len(),
-                            None,
-                            &cancel,
-                        ) => result,
-                    };
-                    let (result, usage) = match result {
-                        Ok((text, usage)) => (Ok(text), Some(usage)),
-                        Err(e) => {
-                            tracing::warn!(error = %e, "summarising a session for a sub session failed");
-                            (Err(e.to_string()), None)
-                        }
-                    };
-                    let _ = self_ref
-                        .tell(AgentCommand::Seed(SeedCommand::SummaryTaken {
-                            work,
-                            sub_sessions,
-                            result,
-                            usage,
-                        }))
-                        .await;
-                });
-                CommandEffect::none()
-            }
             SeedCommand::SummaryTaken {
                 work,
+                consumed,
                 sub_sessions,
                 result,
                 usage,
             } => {
-                // Delivered whatever became of the work since: the sub
+                if !cx.scratch.finished(work) {
+                    return CommandEffect::none();
+                }
+                // Delivered whatever became of this agent since: the sub
                 // sessions waiting are a different session's business, and the
                 // summary was taken at the branch point they are entitled to.
                 cx.runtime
@@ -198,20 +148,68 @@ impl Component for Seeding {
                         result,
                     })
                     .await;
-                // Release the queue's slot; the summarising call's cost is
-                // journaled here, by its owner, and aggregated by the fold.
-                cx.tell(AgentCommand::Queue(QueueCommand::WorkDone { work }))
-                    .await;
-                CommandEffect::persist(vec![AgentDomainEvent::SeedSummaryTaken {
-                    usage,
-                    at_ms: now_ms(),
-                }])
+                // The summarising call's cost is journaled here, by its owner,
+                // and aggregated by the fold. The items it answers are crossed
+                // off in the same write.
+                CommandEffect::persist(vec![
+                    AgentDomainEvent::SeedSummaryTaken {
+                        usage,
+                        at_ms: now_ms(),
+                    },
+                    AgentDomainEvent::Consumed {
+                        ids: consumed,
+                        at_ms: now_ms(),
+                    },
+                ])
             }
         }
     }
 }
 
 impl Seeding {
+    /// Take the summary the queued sub sessions are waiting on: a bare
+    /// summarise run over the whole history at the branch point, sharing the
+    /// compaction component's machinery.
+    pub(super) fn take_summary(
+        &mut self,
+        consumed: Vec<String>,
+        sub_sessions: Vec<uuid::Uuid>,
+        cx: &mut Cx<'_>,
+    ) {
+        let Some(tctx) = cx.scratch.ctx.clone() else {
+            return;
+        };
+        let (work, cancel) = cx.scratch.begin(WorkKind::Summary);
+        // The summary must describe the history at the branch point, read
+        // before anything can append behind it.
+        let history = repair_unanswered_tool_calls(cx.state.prompt_messages());
+        let self_ref = cx.actor.self_ref();
+        tokio::spawn(async move {
+            let result = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return,
+                result = compaction::summarise_step(&tctx, &history, history.len(), None, &cancel)
+                    => result,
+            };
+            let (result, usage) = match result {
+                Ok((text, usage)) => (Ok(text), Some(usage)),
+                Err(e) => {
+                    tracing::warn!(error = %e, "summarising a session for a sub session failed");
+                    (Err(e.to_string()), None)
+                }
+            };
+            let _ = self_ref
+                .tell(AgentCommand::Seed(SeedCommand::SummaryTaken {
+                    work,
+                    consumed,
+                    sub_sessions,
+                    result,
+                    usage,
+                }))
+                .await;
+        });
+    }
+
     /// The history this agent adopted, and the seed appended after it.
     // `if let` rather than a `match`, because this module owns exactly one
     // variant. Which one is decided in `component::fold`, so an event added

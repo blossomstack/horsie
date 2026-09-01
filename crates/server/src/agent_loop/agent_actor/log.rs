@@ -75,11 +75,9 @@ impl Component for LogWrites {
                 if let Some(next) = moved {
                     cx.scratch.ready = next;
                 }
-                if moved == Some(true) {
-                    // The runtime arriving is what lets a waiting queue start
-                    // a turn; the drain finds this record already folded.
-                    cx.drain().await;
-                }
+                // The runtime arriving is what lets a waiting agent start
+                // work. Nothing is told: the advance that follows this write
+                // finds the record folded and the gate open.
                 CommandEffect::persist(vec![AgentDomainEvent::LifecycleRecorded { event, at_ms }])
             }
             LogCommand::HooksRan { records } => {

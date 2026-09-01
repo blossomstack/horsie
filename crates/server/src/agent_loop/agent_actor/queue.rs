@@ -1,16 +1,16 @@
-//! The queue component: what this agent has accepted, and the decision to
-//! answer it.
+//! The queue component: what this agent has accepted, and how it becomes the
+//! next input.
 //!
 //! An accepted message is a promise: it is journaled *before* anything is done
 //! with it, so a crash cannot forget it and the ack a caller waits on reports
-//! the durable write rather than a mailbox. Whether it becomes a turn is a
-//! separate decision — `Drain` — taken against the state the write left
-//! behind.
+//! the durable write rather than a mailbox. Whether it is taken, and when, is
+//! [`Components::advance`](super::boundary)'s decision — this component only
+//! offers ([`crate::agent_loop::queued_offer`]) and takes.
 //!
-//! Committing to a turn raises the shared `turn_live` gate and tells
-//! [`RunCommand::StartTurn`]; the turn component picks it up after the turn's
-//! input events are durable and folded. The queue never calls the turn — the
-//! mailbox is the only channel between them.
+//! Taking a turn's input is a *write*: the items it consumes are crossed off
+//! and the input message is journaled here rather than by whatever runs next,
+//! so a provider retry can never double-persist it. Nothing is started from
+//! this file.
 
 use super::*;
 use crate::agent_loop::context::AgentOutcome;
@@ -21,57 +21,32 @@ use horsie_agentcore::{
 };
 use horsie_models::now_ms;
 
-/// The queue, and the decision to drain it.
+/// What this agent has accepted, and how it becomes the next input.
 #[derive(Default)]
 pub(super) struct Queue {
-    /// A prepare step is in flight. Gates a drain exactly as `turn_live` does:
-    /// between the drain decision and `StartPrepared` no turn exists yet, so
-    /// the gate alone would let two turns through.
-    preparing: bool,
     /// Whether this agent load has fired its start hook. Deliberately **not**
     /// journaled — a rehydrated agent fires again, which is precisely what
     /// `source: "resume"` means.
     start_hook_fired: bool,
-    /// A drained turn is waiting behind standalone work — a `/compact` or a
-    /// seed summary taken first, or an auto-compaction due before the turn
-    /// begins. Its input events are already journaled; `WorkDone` starts it.
-    pending_after_work: bool,
 }
 
 impl Queue {
-    /// Whether a turn may not start now: one is committed or in flight, or a
-    /// prepare step is.
-    fn busy(&self, cx: &Cx<'_>) -> bool {
-        cx.scratch.turn_live || self.preparing
-    }
-
-    /// Reconsider whether the queue may start a turn, and start it if so.
-    ///
-    /// Deliberately silent when it decides against — finding a turn already in
-    /// flight is the normal case, not a fault, and the queue simply waits for
-    /// the boundary's own `Drain`.
-    ///
-    /// `state` must be the state as the caller's own events leave it, not the
-    /// pre-command snapshot: an agent that has just journaled `AskRecorded` is
-    /// parked as far as this decision is concerned.
-    async fn try_drain(&mut self, state: &AgentState, cx: &mut Cx<'_>) -> Vec<AgentDomainEvent> {
-        if self.busy(cx) || !cx.scratch.ready {
-            return Vec::new();
-        }
-        match crate::agent_loop::queued_turn(&state.inbox, &state.asks) {
-            Some(turn) => self.begin_turn(turn, state, cx).await,
-            None => Vec::new(),
-        }
-    }
-
-    /// Perform one turn decision: record what it consumes and answers, tell
-    /// the owner the turn began, then run its pre-start hooks before the turn
-    /// itself.
+    /// Take this input: cross off what it consumes, journal what the model
+    /// will read, and run the turn's pre-start hooks if any are owed.
     ///
     /// `TurnBegan` is journaled here, at the decision, rather than after the
     /// hooks: a crash in the hook window replays with the queue still owed,
     /// which redelivers the message — the same at-least-once the session's
     /// tell-then-persist has always had, and the direction to err in.
+    pub(super) async fn take(
+        &mut self,
+        turn: crate::agent_loop::Turn,
+        cx: &mut Cx<'_>,
+    ) -> CommandEffect<AgentDomainEvent> {
+        let state = cx.state.clone();
+        CommandEffect::persist(self.begin_turn(turn, &state, cx).await)
+    }
+
     async fn begin_turn(
         &mut self,
         turn: crate::agent_loop::Turn,
@@ -85,13 +60,16 @@ impl Queue {
         }];
         // The owner no longer learns a turn began by being the thing that began
         // it, so it is told. Before the work, not after: this is what moves a
-        // session to `Running`.
-        cx.runtime
-            .parent
-            .deliver(AgentOutcome::Started {
-                agent: cx.runtime.journal_id,
-            })
-            .await;
+        // session to `Running`. A message joining a turn already in flight is
+        // not a new turn and says nothing new.
+        if !state.turn_in_flight {
+            cx.runtime
+                .parent
+                .deliver(AgentOutcome::Started {
+                    agent: cx.runtime.journal_id,
+                })
+                .await;
+        }
 
         let start = crate::agent_loop::StartTurn {
             // An agent that has never spoken to a provider is starting up;
@@ -109,6 +87,7 @@ impl Queue {
             events.extend(
                 self.start_prepared(
                     PreparedStart {
+                        work: cx.scratch.work,
                         turn,
                         records: Vec::new(),
                         abandon: None,
@@ -120,7 +99,7 @@ impl Queue {
             );
             return events;
         }
-        self.preparing = true;
+        let (work, _) = cx.scratch.begin(WorkKind::Hooks);
         // Set when the prepare task is *spawned*, not when it returns: a
         // failed prepare must not re-fire the start hook on the next turn,
         // which would inject its context a second time.
@@ -130,6 +109,7 @@ impl Queue {
         tokio::spawn(async move {
             let prepared = match provider.start_hooks(start).await {
                 Ok(prep) => PreparedStart {
+                    work,
                     abandon: crate::agent_loop::start_blocked(&prep.records)
                         .map(AbandonedStart::Blocked),
                     records: prep.records,
@@ -141,6 +121,7 @@ impl Queue {
                     },
                 },
                 Err(error) => PreparedStart {
+                    work,
                     turn,
                     records: Vec::new(),
                     abandon: Some(AbandonedStart::Failed(error)),
@@ -171,30 +152,20 @@ impl Queue {
             turn,
             records,
             abandon,
+            ..
         } = prepared;
         let crate::agent_loop::Turn {
             message,
             artifacts,
             subagent_results,
             results,
-            summarise,
             ..
         } = turn;
-        // A turn that carries only a summarisation has nothing to say to the
-        // model. Running it would spend a provider call answering a message
-        // nobody sent, so the summary *is* the turn.
-        let summarise_only = summarise.is_some()
-            && message.is_none()
-            && subagent_results.is_empty()
-            && results.is_empty();
 
         let at_ms = now_ms();
         let mut events = Vec::new();
-        let mut folded = state.clone();
         for (seq, record) in (state.hook_entry_count()..).zip(records) {
-            let event = AgentDomainEvent::HookRan { record, seq, at_ms };
-            folded = Components::apply(folded, event.clone());
-            events.push(event);
+            events.push(AgentDomainEvent::HookRan { record, seq, at_ms });
         }
 
         if let Some(abandon) = abandon {
@@ -217,7 +188,11 @@ impl Queue {
                 })
                 .await;
             // The records are still journaled: a user whose prompt was refused
-            // must be able to see which plugin refused it and why.
+            // must be able to see which plugin refused it and why. The turn
+            // this was preparing is abandoned with them — `TurnBegan` already
+            // took its input, and the agent is left owing a call it will make
+            // with whatever the next message brings.
+            events.push(AgentDomainEvent::RunCancelled { at_ms });
             return events;
         }
 
@@ -238,112 +213,11 @@ impl Queue {
         } else {
             AgentInput::tool_results(results)
         };
-        // The input is journaled here rather than by the turn, so a provider
-        // retry can never double-persist it into two consecutive user
-        // messages.
-        //
-        // A summarise-only turn is the one case with no input at all: nothing
-        // was typed and nothing is owed, so this would journal the empty `Tool`
-        // message `AgentInput::tool_results(vec![])` builds — which the turn
-        // never reads, but which every *later* turn would then carry in its
-        // prompt.
-        if !summarise_only {
-            events.push(AgentDomainEvent::InputMessage {
-                message: agent_input.to_message(now_ms()),
-            });
-        }
-        // Commit: raise the gate before telling, so nothing drains a second
-        // turn into the gap. A summarisation is *standalone work*, not a turn
-        // — the turn component never hears of it. A message drained alongside
-        // (or behind an auto-compaction that is due) waits for `WorkDone`;
-        // its input events are already journaled, so starting it later needs
-        // nothing but the signal.
-        cx.scratch.turn_live = true;
-        match summarise {
-            Some(summarise) => {
-                self.pending_after_work = !summarise_only;
-                let work = match summarise {
-                    crate::agent_loop::Summarise::Compact(instructions) => Work::Compact {
-                        manual: true,
-                        instructions,
-                        tokens_before: folded.context_tokens,
-                    },
-                    crate::agent_loop::Summarise::SubSession(sub_sessions) => {
-                        Work::Summary { sub_sessions }
-                    }
-                };
-                self.commission(work, cx).await;
-            }
-            None if compaction_due(cx) => {
-                self.pending_after_work = true;
-                self.commission(
-                    Work::Compact {
-                        manual: false,
-                        instructions: None,
-                        tokens_before: folded.context_tokens,
-                    },
-                    cx,
-                )
-                .await;
-            }
-            None => cx.tell(AgentCommand::Run(RunCommand::StartTurn)).await,
-        }
+        events.push(AgentDomainEvent::InputMessage {
+            message: agent_input.to_message(now_ms()),
+        });
         events
     }
-
-    /// Commission standalone work: allocate its slot, arm its cancel token,
-    /// and ask provisioning to run it once the contexts are published — or
-    /// release the slot if they never come.
-    async fn commission(&mut self, work_kind: Work, cx: &mut Cx<'_>) {
-        let work = cx.scratch.next_work_id;
-        cx.scratch.next_work_id += 1;
-        cx.scratch.live_turn = Some(work);
-        cx.scratch.turn_cancel = Some(tokio_util::sync::CancellationToken::new());
-        let then = match work_kind {
-            Work::Compact {
-                manual,
-                instructions,
-                tokens_before,
-            } => AgentCommand::Compaction(CompactionCommand::Compact(Box::new(CompactJob {
-                work,
-                manual,
-                instructions,
-                tokens_before,
-            }))),
-            Work::Summary { sub_sessions } => {
-                AgentCommand::Seed(SeedCommand::TakeSummary { work, sub_sessions })
-            }
-        };
-        cx.tell(AgentCommand::Provision(ProvisionCommand::Provide {
-            work,
-            then: Box::new(then),
-            or: Box::new(AgentCommand::Queue(QueueCommand::WorkDone { work })),
-        }))
-        .await;
-    }
-}
-
-/// The standalone work the queue can commission.
-enum Work {
-    Compact {
-        manual: bool,
-        instructions: Option<String>,
-        tokens_before: u32,
-    },
-    Summary {
-        sub_sessions: Vec<uuid::Uuid>,
-    },
-}
-
-/// Whether the context has grown past the compaction trigger — read off the
-/// last published budget, so the check costs nothing before provisioning. A
-/// fresh agent has no published budget yet and never compacts before its
-/// first turn, which is right: there is nothing to fold.
-fn compaction_due(cx: &Cx<'_>) -> bool {
-    cx.scratch.turn_ctx.as_ref().is_some_and(|c| {
-        c.budget
-            .is_some_and(|b| cx.state.context_tokens >= b.trigger_tokens())
-    })
 }
 
 #[async_trait]
@@ -357,10 +231,9 @@ impl Component for Queue {
     ) -> CommandEffect<AgentDomainEvent> {
         match cmd {
             QueueCommand::Enqueue { item, ack } => {
-                // Decided after the write, never before it: the queue a turn
-                // drains has to be the durable one, so the drain arrives as its
-                // own command and finds this event already folded in.
-                cx.drain().await;
+                // Nothing is decided here. The write is the whole job, and the
+                // advance the actor makes once it is durable is what looks at
+                // a queue that now holds this item.
                 let effect = CommandEffect::persist(vec![AgentDomainEvent::Received {
                     item,
                     at_ms: now_ms(),
@@ -370,15 +243,11 @@ impl Component for Queue {
                     None => effect,
                 }
             }
-            QueueCommand::Drain => {
-                let state = cx.state.clone();
-                CommandEffect::persist(self.try_drain(&state, cx).await)
-            }
             QueueCommand::Answer { answers, reply } => {
-                // A turn in flight means the questions are already gone — a
-                // turn beginning is what clears them — so there is nothing to
+                // Work in flight means the questions are already gone — a turn
+                // beginning is what clears them — so there is nothing to
                 // answer.
-                if self.busy(cx) {
+                if cx.scratch.running.is_some() || cx.state.asks.is_empty() {
                     let _ = reply.send(Err(crate::agent_loop::AnswerError::NothingPending));
                     return CommandEffect::none();
                 }
@@ -395,44 +264,11 @@ impl Component for Queue {
                 }
             }
             QueueCommand::StartPrepared(prepared) => {
-                self.preparing = false;
+                if !cx.scratch.finished(prepared.work) {
+                    return CommandEffect::none();
+                }
                 let state = cx.state.clone();
                 CommandEffect::persist(self.start_prepared(*prepared, &state, cx).await)
-            }
-            QueueCommand::WorkDone { work } => {
-                if cx.scratch.live_turn != Some(work) {
-                    return CommandEffect::none();
-                }
-                cx.scratch.live_turn = None;
-                cx.scratch.turn_cancel = None;
-                if std::mem::take(&mut self.pending_after_work) {
-                    // The gate stays up: the message drained with this work
-                    // starts its turn now, on a state the work's events are
-                    // already folded into — which is how a compaction is
-                    // transparent to the turn that follows it.
-                    cx.tell(AgentCommand::Run(RunCommand::StartTurn)).await;
-                    return CommandEffect::none();
-                }
-                cx.scratch.turn_live = false;
-                // The work consumed queue items and was this promise's whole
-                // answer; the owner hears the same pair a turn's ending sends.
-                cx.runtime
-                    .parent
-                    .deliver(AgentOutcome::UsageRecorded {
-                        agent: cx.runtime.journal_id,
-                        usage_total: cx.state.usage_total,
-                        context_tokens: cx.state.context_tokens,
-                    })
-                    .await;
-                cx.runtime
-                    .parent
-                    .deliver(AgentOutcome::Concluded {
-                        agent: cx.runtime.journal_id,
-                        output: serde_json::Value::String(String::new()),
-                    })
-                    .await;
-                cx.drain().await;
-                CommandEffect::none()
             }
         }
     }
@@ -493,6 +329,9 @@ impl Component for Queue {
                 state.asks.clear();
                 state.turn_in_flight = true;
             }
+            AgentDomainEvent::Consumed { ids, .. } => {
+                state.inbox.retain(|i| !ids.iter().any(|id| id == i.id()));
+            }
             AgentDomainEvent::AskRecorded { asks, at_ms } => {
                 for ask in &asks {
                     state.push(
@@ -525,10 +364,4 @@ impl Component for Queue {
         }
     }
 
-    /// Re-ask the drain question. Covers the crash window between a boundary's
-    /// persist and its `Drain` being handled: without this, a queued message
-    /// could sit until the next enqueue happened to arrive.
-    async fn on_load(&mut self, cx: &mut Cx<'_>) {
-        cx.drain().await;
-    }
 }

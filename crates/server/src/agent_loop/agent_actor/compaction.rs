@@ -179,12 +179,55 @@ impl AgentState {
 /// Folding old history behind a summary boundary.
 ///
 /// The summarising call is a *special* run on purpose: no tools, no system
-/// prompt, one request, text only — see
-/// [`horsie_agentcore::summarise_span`]. This component owns the whole flow:
-/// the request arrives as a job from the turn (which holds the per-turn
-/// contexts), the run happens on a spawned task, and the landing journals the
-/// boundary — or the skip notice — before telling the turn to resume.
+/// prompt, one request, text only — see [`summarise_step`]. Started by the
+/// boundary, at a moment where every tool call is answered so nothing can be
+/// cut across, and invisible to everything else: the next provider call simply
+/// reads a shorter history.
 pub(super) struct Compaction;
+
+impl Compaction {
+    /// Whether the context has grown past the trigger — read off the budget
+    /// the contexts publish. A fresh agent has no budget yet and never
+    /// compacts before its first call, which is right: there is nothing to
+    /// fold.
+    pub(super) fn due(&self, cx: &Cx<'_>) -> bool {
+        cx.scratch.ctx.as_ref().is_some_and(|c| {
+            c.budget
+                .is_some_and(|b| cx.state.context_tokens >= b.trigger_tokens())
+        })
+    }
+
+    /// Take the summary on a spawned task.
+    pub(super) fn start(&mut self, job: CompactJob, cx: &mut Cx<'_>) {
+        let Some(tctx) = cx.scratch.ctx.clone() else {
+            return;
+        };
+        let (work, cancel) = cx.scratch.begin(WorkKind::Compaction);
+        // The history and the carried state are read here, at handling time: a
+        // task-list change earlier in the same turn is already folded, so a
+        // compaction between two calls carries it verbatim.
+        let history = repair_unanswered_tool_calls(cx.state.prompt_messages());
+        let carried_state = crate::agent_loop::carried_state::render_carried_state(cx.state);
+        let self_ref = cx.actor.self_ref();
+        tokio::spawn(async move {
+            let (outcome, usage) = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return,
+                outcome = run_compaction(&job, &tctx, history, carried_state, &cancel) => outcome,
+            };
+            let _ = self_ref
+                .tell(AgentCommand::Compaction(CompactionCommand::Landed(
+                    Box::new(CompactLanding {
+                        work,
+                        consumed: job.consumed,
+                        usage,
+                        outcome,
+                    }),
+                )))
+                .await;
+        });
+    }
+}
 
 #[async_trait::async_trait]
 impl Component for Compaction {
@@ -195,96 +238,62 @@ impl Component for Compaction {
         cmd: CompactionCommand,
         cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
-        match cmd {
-            CompactionCommand::Compact(job) => {
-                let job = *job;
-                let (Some(tctx), Some(cancel)) =
-                    (cx.scratch.turn_ctx.clone(), cx.scratch.turn_cancel.clone())
-                else {
-                    tracing::warn!(
-                        work = job.work,
-                        "a compaction was asked for with no contexts"
-                    );
-                    cx.tell(AgentCommand::Queue(QueueCommand::WorkDone {
-                        work: job.work,
-                    }))
-                    .await;
-                    return CommandEffect::none();
-                };
-                // The history and the carried state are read here, at handling
-                // time: a task-list change earlier in the same turn is already
-                // folded, so a mid-turn compaction carries it verbatim.
-                let history = repair_unanswered_tool_calls(cx.state.prompt_messages());
-                let carried_state =
-                    crate::agent_loop::carried_state::render_carried_state(cx.state);
-                let self_ref = cx.actor.self_ref();
-                tokio::spawn(async move {
-                    let (outcome, usage) = tokio::select! {
-                        biased;
-                        () = cancel.cancelled() => return,
-                        outcome = run_compaction(&job, &tctx, history, carried_state, &cancel) => outcome,
-                    };
-                    let _ = self_ref
-                        .tell(AgentCommand::Compaction(CompactionCommand::Landed(
-                            Box::new(CompactLanding {
-                                work: job.work,
-                                usage,
-                                outcome,
-                            }),
-                        )))
-                        .await;
-                });
-                CommandEffect::none()
-            }
-            CompactionCommand::Landed(landing) => {
-                let CompactLanding {
-                    work,
-                    usage,
-                    outcome,
-                } = *landing;
-                // A cancelled or superseded work's compaction must not land: a
-                // boundary is a rewrite of what the model is shown, and nobody
-                // is showing it anything any more.
-                if cx.scratch.live_turn != Some(work) {
-                    tracing::warn!(work, "dropping a compaction landing from dead work");
-                    return CommandEffect::none();
-                }
-                let events = match outcome {
-                    CompactOutcome::Compacted(data) => vec![AgentDomainEvent::Compacted {
-                        summary: data.summary,
-                        carried_state: data.carried_state,
-                        retained_from_message_id: data.retained_from_message_id,
-                        trigger: data.trigger,
-                        instructions: data.instructions,
-                        tokens_before: data.tokens_before,
-                        tokens_after: data.tokens_after,
-                        usage,
-                        at_ms: now_ms(),
-                    }],
-                    CompactOutcome::Skipped {
-                        notice: true,
+        let CompactionCommand::Landed(landing) = cmd;
+        let CompactLanding {
+            work,
+            consumed,
+            usage,
+            outcome,
+        } = *landing;
+        // A cancelled compaction must not land: a boundary is a rewrite of
+        // what the model is shown, and nobody is showing it anything any more.
+        if !cx.scratch.finished(work) {
+            tracing::warn!(work, "dropping a compaction landing from a cancelled work");
+            return CommandEffect::none();
+        }
+        let mut events = match outcome {
+            CompactOutcome::Compacted(data) => vec![AgentDomainEvent::Compacted {
+                summary: data.summary,
+                carried_state: data.carried_state,
+                retained_from_message_id: data.retained_from_message_id,
+                trigger: data.trigger,
+                instructions: data.instructions,
+                tokens_before: data.tokens_before,
+                tokens_after: data.tokens_after,
+                usage,
+                at_ms: now_ms(),
+            }],
+            CompactOutcome::Skipped {
+                notice: true,
+                context_tokens,
+                retain_tokens,
+            } => vec![AgentDomainEvent::LifecycleRecorded {
+                event: horsie_agentcore::LifecycleEvent::CompactionSkipped(
+                    horsie_models::agent::CompactionSkippedLifecycle {
                         context_tokens,
                         retain_tokens,
-                    } => vec![AgentDomainEvent::LifecycleRecorded {
-                        event: horsie_agentcore::LifecycleEvent::CompactionSkipped(
-                            horsie_models::agent::CompactionSkippedLifecycle {
-                                context_tokens,
-                                retain_tokens,
-                            },
-                        ),
-                        at_ms: now_ms(),
-                    }],
-                    CompactOutcome::Skipped { notice: false, .. } => Vec::new(),
-                };
-                // Told before the persist returns; handled after it — the
-                // queue releases the slot on a state the boundary is already
-                // folded into, so whatever runs next reads the compacted
-                // context. Compaction is invisible to the turn by design.
-                cx.tell(AgentCommand::Queue(QueueCommand::WorkDone { work }))
-                    .await;
-                CommandEffect::persist(events)
-            }
+                    },
+                ),
+                at_ms: now_ms(),
+            }],
+            CompactOutcome::Skipped { notice: false, .. } => Vec::new(),
+        };
+        // The `/compact` that asked for this is crossed off now rather than
+        // when it was taken: a crash in between replays it, and compacting
+        // twice is cheaper than silently not compacting at all.
+        if !consumed.is_empty() {
+            events.push(AgentDomainEvent::Consumed {
+                ids: consumed,
+                at_ms: now_ms(),
+            });
         }
+        // Nothing is told that this happened. If a turn was owed a call, the
+        // advance that follows this write makes it — over the compacted
+        // history, which is the whole point.
+        if events.is_empty() {
+            cx.advance().await;
+        }
+        CommandEffect::persist(events)
     }
 }
 

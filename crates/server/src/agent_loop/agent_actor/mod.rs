@@ -15,9 +15,13 @@
 //! the command/event vocabulary, and the transient scratch — see
 //! [`component`] for the contract.
 //!
-//! One component, one file: [`provision`] the per-turn runtime and context
-//! setup, [`queue`] the promises this agent has accepted and the decision to
-//! answer them, [`turn`] the regular agent run and what its endings mean,
+//! What happens next is decided in exactly one place — [`boundary`] — which
+//! is the only code that knows what components exist. Components report about
+//! themselves and never about each other.
+//!
+//! One component, one file: [`provision`] the runtime and context setup every
+//! kind of work shares, [`queue`] the promises this agent has accepted and how
+//! they become input, [`turn`] one provider call and what an ending means,
 //! [`compaction`] folding old history behind a summary boundary, [`timers`]
 //! and [`task_list`] the tools whose state is the agent's own, [`seed`]
 //! branching and the sub-session summary, [`reads`] the questions that wake
@@ -28,6 +32,7 @@
 //! connect cannot block a cancel. And no decision about whether this agent
 //! exists: residency belongs to whoever spawned it.
 
+mod boundary;
 mod compaction;
 mod component;
 mod log;
@@ -50,7 +55,8 @@ pub use types::*;
 
 use compaction::{COMPACT_AT_PERCENT, COMPACT_RETAIN_PERCENT, Compaction};
 use component::{
-    Component, Components, Cx, Scratch, answer_tool_call, component_tool_specs, is_component_tool,
+    Component, Components, Cx, Scratch, WorkKind, answer_tool_call, component_tool_specs,
+    is_component_tool,
 };
 use log::LogWrites;
 use provision::Provision;
@@ -127,6 +133,10 @@ pub struct AgentActor {
     /// waits another interval, which is the right instinct for an
     /// optimization: retrying hard against a failing journal helps nobody.
     events_since_snapshot: u64,
+    /// This actor's own address, captured the first time it handles anything.
+    /// The persist hook has no context of its own, and it is what tells the
+    /// agent to reconsider once a write lands.
+    self_ref: Option<horsie_actor::ActorRef<AgentCommand>>,
     /// A counter, bumped whenever this agent moves, for readers to wait on.
     /// Held behind an `Arc` because the *owner* is whoever outlives this actor
     /// — for a session agent that is the supervisor, so an idle offload does
@@ -144,6 +154,7 @@ impl AgentActor {
             scratch,
             components: Components::new(),
             observer: None,
+            self_ref: None,
             events_since_snapshot: 0,
             revision,
         }
@@ -220,6 +231,7 @@ impl EventSourcedActor for AgentActor {
         cmd: AgentCommand,
         ctx: &mut ActorContext<AgentCommand>,
     ) -> CommandEffect<AgentDomainEvent> {
+        self.self_ref.get_or_insert_with(|| ctx.self_ref());
         let mut cx = Cx {
             state,
             scratch: &mut self.scratch,
@@ -249,6 +261,12 @@ impl EventSourcedActor for AgentActor {
             self.scratch.deltas.clear();
         }
         self.revision.send_modify(|r| *r += 1);
+        // Whatever just became durable may have changed what this agent should
+        // be doing — a queue item, a tool result, a boundary. Asking is cheap
+        // and idempotent; the alternative is every writer remembering to.
+        if let Some(self_ref) = &self.self_ref {
+            let _ = self_ref.tell(AgentCommand::Core(CoreCommand::Advance)).await;
+        }
         let Some(observer) = &self.observer else {
             return;
         };
@@ -264,6 +282,7 @@ impl EventSourcedActor for AgentActor {
         state: &AgentState,
         ctx: &mut ActorContext<AgentCommand>,
     ) {
+        self.self_ref.get_or_insert_with(|| ctx.self_ref());
         // Announce where this incarnation starts. The channel outlives the
         // actor, so after an idle offload it still holds the position from
         // before — republishing costs nothing.
@@ -276,5 +295,8 @@ impl EventSourcedActor for AgentActor {
             actor: ctx,
         };
         self.components.on_load(&mut cx).await;
+        // Recovery is over and the repairs are queued behind this: the advance
+        // lands after them and reads the state they leave.
+        cx.advance().await;
     }
 }

@@ -240,6 +240,60 @@ impl AgentState {
             .any(|e| matches!(e.body, AgentLogBody::Llm(_)))
     }
 
+    /// Tool calls the model has made that have no result yet, and that this
+    /// agent is not parked on.
+    ///
+    /// Derived, never stored: the log already holds both halves of every call,
+    /// so a second index could only ever disagree with it. Empty means the
+    /// agent owes the provider nothing but its next call — which is exactly
+    /// the condition [`Components::advance`](super::component::Components::advance)
+    /// waits for before running one.
+    ///
+    /// A parked call is exempt. The agent is *waiting* on that one, on purpose,
+    /// and the answer arrives later as an ordinary result; treating it as
+    /// outstanding would freeze a parked agent for ever.
+    ///
+    /// The scan starts at the newest assistant message, not at the beginning:
+    /// a new assistant message only ever lands once the previous one's calls
+    /// are all answered, so nothing before it can still be open. That bounds
+    /// this to the current step rather than the transcript.
+    #[must_use]
+    pub fn open_tool_calls(&self) -> Vec<String> {
+        let from = self
+            .log
+            .iter()
+            .rposition(|e| match &e.body {
+                AgentLogBody::Llm(m) => m
+                    .parts
+                    .iter()
+                    .any(|p| matches!(p, horsie_agentcore::ContentPart::ToolCall(_))),
+                AgentLogBody::Hook(_)
+                | AgentLogBody::Lifecycle(_)
+                | AgentLogBody::Compaction(_) => false,
+            })
+            .unwrap_or(self.log.len());
+        let mut open: Vec<String> = Vec::new();
+        for entry in self.log.iter().skip(from) {
+            let AgentLogBody::Llm(message) = &entry.body else {
+                continue;
+            };
+            for part in &message.parts {
+                match part {
+                    horsie_agentcore::ContentPart::ToolCall(c) => open.push(c.id.clone()),
+                    horsie_agentcore::ContentPart::ToolResult(r) => {
+                        open.retain(|id| *id != r.tool_call_id);
+                    }
+                    horsie_agentcore::ContentPart::Text(_)
+                    | horsie_agentcore::ContentPart::Thinking(_)
+                    | horsie_agentcore::ContentPart::SubAgentResult(_)
+                    | horsie_agentcore::ContentPart::Artifact(_) => {}
+                }
+            }
+        }
+        open.retain(|id| !self.asks.iter().any(|a| a.tool_call_id.as_deref() == Some(id)));
+        open
+    }
+
     /// The seq of the newest entry, or `None` for an empty log. The tail a
     /// cursor is compared against.
     #[must_use]

@@ -120,66 +120,44 @@ pub enum QueueCommand {
         answers: Vec<crate::agent_loop::AskAnswer>,
         reply: ReplyTo<Result<(), crate::agent_loop::AnswerError>>,
     },
-    /// Internal: reconsider whether the queue may start a turn now. Sent after
-    /// anything that could have changed the answer.
-    Drain,
     /// Internal: a turn's pre-start hooks finished. Journal their records, then
-    /// start the turn — or abandon it. Boxed to keep the command enum small.
+    /// commit the turn — or abandon it. Boxed to keep the command enum small.
     StartPrepared(Box<PreparedStart>),
-    /// Internal: standalone work the queue commissioned — a `/compact`, a seed
-    /// summary — released its slot. If a message was drained alongside, its
-    /// turn starts now; otherwise the promise is answered and the queue
-    /// re-drains.
-    WorkDone { work: u64 },
 }
 
-/// The turn in flight: starting and stopping it, and what its spawned steps
-/// report back.
+/// What the turn's own spawned work reports back: one provider call, one
+/// tool result, one streamed chunk. Nothing here starts anything — when a
+/// step runs is [`Components::advance`](super::component::Components::advance)'s
+/// decision, and what it says is this component's.
 pub enum RunCommand {
-    /// Internal: the queue committed a turn. Told *after* the turn's input
-    /// events are persisted, so the turn component reads them folded — the
-    /// consumed items, answers and input are all in state, which is why this
-    /// carries nothing.
-    StartTurn,
-    /// Cancel an in-flight run. `ack`, if given, fires once the turn is over —
-    /// immediately when none is in flight. The actor answers it in the handler
-    /// itself: the generation fence guarantees a cancelled turn's straggler
-    /// reports change nothing, so there is no unwind to wait for.
-    Cancel { ack: Option<ReplyTo<()>> },
-    /// Internal: events to journal outside a step's own handler — recovery
-    /// repairs, and tests. `ack` reports the durable write.
-    PersistProgress {
-        events: Vec<AgentDomainEvent>,
-        ack: ReplyTo<Result<(), horsie_actor::JournalError>>,
-    },
-    /// Internal: the provision component produced this turn's contexts —
-    /// published to the shared scratch, not carried here.
-    ContextReady { turn: u64 },
-    /// Internal: the provision component could not, and has already told the
-    /// parent why; the turn only needs clearing.
-    ContextFailed { turn: u64 },
     /// Internal: one provider call finished — the assembled assistant message.
-    LlmResponded {
-        turn: u64,
+    StepDone {
+        work: u64,
         response: Box<horsie_agentcore::StepResponse>,
     },
     /// Internal: one provider call failed.
-    LlmFailed {
-        turn: u64,
+    StepFailed {
+        work: u64,
         error: horsie_agentcore::LlmError,
     },
     /// Internal: one dispatched tool call answered (or timed out inside its
     /// own toolbox). Carried per call rather than per batch so a fast tool's
     /// result is durable while a slow one still runs.
     ToolReturned {
-        turn: u64,
+        work: u64,
         tool_call_id: String,
         outcome: ToolReturn,
     },
     /// Internal: one chunk of the message a step is streaming. Unjournaled;
-    /// carries the turn generation so a cancelled turn's stragglers are
-    /// dropped instead of polluting the next turn's delta buffer.
-    StreamDelta { turn: u64, text: String },
+    /// carries the work generation so a cancelled step's stragglers are
+    /// dropped instead of polluting the next message's delta buffer.
+    StreamDelta { work: u64, text: String },
+    /// Internal: events to journal outside a step's own handler — recovery
+    /// repairs, and tests. `ack` reports the durable write.
+    PersistProgress {
+        events: Vec<AgentDomainEvent>,
+        ack: ReplyTo<Result<(), horsie_actor::JournalError>>,
+    },
 }
 
 /// What a dispatched tool call came back with.
@@ -198,8 +176,8 @@ pub enum ToolReturn {
 /// Timers this agent has armed against itself.
 pub enum TimerCommand {
     /// Internal: the turn routed one of the timer tools here. The component
-    /// executes it, journals its own events, and answers the turn with
-    /// [`RunCommand::ToolReturned`].
+    /// executes it and journals both its own events and the call's result,
+    /// which is all "answering" a tool call is — nothing is told to the turn.
     ToolCall(ComponentToolCall),
     /// Internal: a timer's sleep elapsed.
     TimerFired {
@@ -209,24 +187,16 @@ pub enum TimerCommand {
 
 /// The agent's own task list.
 pub enum TaskListCommand {
-    /// Internal: the turn routed the `task_list` tool here; answered with
-    /// [`RunCommand::ToolReturned`] exactly like a timer tool.
+    /// Internal: the turn routed the `task_list` tool here; answered by
+    /// journaling its result exactly like a timer tool.
     ToolCall(ComponentToolCall),
 }
 
 /// The per-work runtime and context setup.
 pub enum ProvisionCommand {
-    /// Someone asked for contexts: rehydrate the runtime, reconnect MCP, scan
-    /// the workspace, compose and filter the toolbox. The cancel token is
-    /// read from the shared scratch; `then` is told once the contexts are
-    /// published, `or` on failure — so provisioning serves a turn and a
-    /// standalone work identically, without knowing which asked.
-    Provide {
-        work: u64,
-        then: Box<AgentCommand>,
-        or: Box<AgentCommand>,
-    },
-    /// Internal: the spawned setup finished.
+    /// Internal: the spawned setup finished. Asked for by the boundary, never
+    /// by a component: provisioning serves a turn, a compaction and a summary
+    /// identically, and none of them knows it happened.
     Provided(Box<ProvidedOutcome>),
 }
 
@@ -234,15 +204,10 @@ pub enum ProvisionCommand {
 pub struct ProvidedOutcome {
     pub work: u64,
     pub outcome: Result<Box<TurnCtx>, crate::agent_loop::ContextError>,
-    pub then: Box<AgentCommand>,
-    pub or: Box<AgentCommand>,
 }
 
 /// Folding old history behind a summary boundary.
 pub enum CompactionCommand {
-    /// A compaction was asked for — by the turn's budget check (`manual:
-    /// false`) or by a queued `/compact` (`manual: true`).
-    Compact(Box<CompactJob>),
     /// Internal: the spawned compaction run finished.
     Landed(Box<CompactLanding>),
 }
@@ -252,7 +217,9 @@ pub enum CompactionCommand {
 /// from the scratch's [`TurnCtx`], so nobody carries another component's
 /// context.
 pub struct CompactJob {
-    pub work: u64,
+    /// Queue items this compaction answers — a typed `/compact`. Empty when
+    /// the boundary started it on its own.
+    pub consumed: Vec<String>,
     pub manual: bool,
     pub instructions: Option<String>,
     /// The last provider call's prompt size — what the boundary records as
@@ -263,6 +230,8 @@ pub struct CompactJob {
 /// What the spawned compaction run produced.
 pub struct CompactLanding {
     pub work: u64,
+    /// The queue items to cross off, journaled with the result.
+    pub consumed: Vec<String>,
     /// What the summarising call spent, when one was made — journaled on the
     /// boundary event, never routed through anyone.
     pub usage: Option<Usage>,
@@ -316,11 +285,11 @@ pub struct TurnCtx {
 
 /// One tool call the turn routed to a component instead of the toolbox.
 ///
-/// Carries the turn generation so a component never acts for a turn that has
+/// Carries the work generation so a component never acts for a turn that has
 /// since been cancelled or superseded — the stale call is dropped, and the
 /// cancel already repaired its dangling `tool_use`.
 pub struct ComponentToolCall {
-    pub turn: u64,
+    pub work: u64,
     pub tool_call_id: String,
     pub name: String,
     pub input: serde_json::Value,
@@ -428,19 +397,10 @@ pub enum SeedCommand {
         message: crate::agent_loop::Incoming,
         reply: ReplyTo<Result<(), String>>,
     },
-    /// Take the summary queued sub sessions are waiting on — standalone work
-    /// commissioned by the queue: a bare summarise run over the branch
-    /// point's history, sharing the compaction component's machinery. The
-    /// provider and cancel token are read from the shared scratch.
-    TakeSummary {
-        work: u64,
-        /// Every sub session seeded from this one summary. They share a
-        /// branch point, so they are entitled to share the provider call.
-        sub_sessions: Vec<uuid::Uuid>,
-    },
     /// Internal: the spawned summary run finished.
     SummaryTaken {
         work: u64,
+        consumed: Vec<String>,
         sub_sessions: Vec<uuid::Uuid>,
         result: Result<String, String>,
         /// What the summarising call spent — journaled by this component,
@@ -451,6 +411,19 @@ pub enum SeedCommand {
 
 /// The actor's own lifetime.
 pub enum CoreCommand {
+    /// Internal: reconsider what this agent should be doing. The one thing
+    /// any component may say, and it names nobody — see
+    /// [`Components::advance`](super::component::Components::advance). Told by
+    /// the actor after every durable write, and by hand where something
+    /// changed without one.
+    Advance,
+    /// Stop whatever is in flight — a step, a compaction, a summary, or the
+    /// setup before one. `ack`, if given, fires once nothing of this agent's
+    /// is running any more; immediately when nothing was.
+    ///
+    /// The actor's own, not the turn's: a cancel means "stop", whatever the
+    /// agent happens to be doing.
+    Cancel { ack: Option<ReplyTo<()>> },
     /// Stop this actor. Sent when the session it belongs to unloads: the agent
     /// is resident for the session's *loaded* lifetime, not forever, and going
     /// cold must not leave a task behind holding a whole transcript in memory.
@@ -463,6 +436,9 @@ pub enum CoreCommand {
 /// prepare step decides nothing about what the turn consumes, it only learns
 /// what the hooks said.
 pub struct PreparedStart {
+    /// The generation the hooks ran under, so a cancel between the spawn and
+    /// this landing drops it.
+    pub work: u64,
     pub turn: crate::agent_loop::Turn,
     /// Records to journal before the turn snapshots its history — which is the
     /// whole reason this round-trip exists. Empty when no hook fired.
@@ -506,6 +482,15 @@ pub enum AgentDomainEvent {
     },
     InputMessage {
         message: Message,
+    },
+    /// Queue items taken by work that is not a turn — a `/compact`, a summary
+    /// for branching sub sessions. Journaled when the work *lands*, not when
+    /// it starts: a crash in between replays the item, and doing it twice is
+    /// cheaper than a sub session waiting for ever on a summary nobody will
+    /// take again.
+    Consumed {
+        ids: Vec<String>,
+        at_ms: u64,
     },
     MessageComplete {
         message: Message,

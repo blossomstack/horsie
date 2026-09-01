@@ -2,19 +2,22 @@
 //! allowed to share.
 //!
 //! A component is an instantiated struct the actor holds. It owns its own
-//! in-memory bookkeeping (the turn in flight, a prepare step's flag) and the
-//! commands routed to it; the actor is a router and keeps no domain logic.
-//! Three things are shared, and nothing else:
+//! in-memory bookkeeping and the commands routed to it; the actor is a router
+//! and keeps no domain logic. Three things are shared, and nothing else:
 //!
 //! - **[`AgentState`]** — the durable state, moved only by the fold.
 //! - **The command/event vocabulary** — a component acts by returning events
-//!   in a [`CommandEffect`] and by telling *commands* to the shared mailbox.
-//!   Components never call each other: a queue that decides a turn may start
-//!   tells `StartTurn`; a turn that reaches a boundary tells `Drain`. The
-//!   mailbox orders those against the persists that precede them, which is
-//!   what makes the hand-offs crash-safe without any direct coupling.
+//!   in a [`CommandEffect`], and reports its own progress by telling *its own*
+//!   commands to the shared mailbox.
 //! - **[`Scratch`]** — the transient half of the state: the few in-memory
 //!   facts more than one component genuinely reads, deliberately unjournaled.
+//!
+//! **A component never names another component.** It cannot ask one for
+//! anything and cannot tell one anything; the one thing it may say to the
+//! world outside itself is [`Cx::advance`] — *something changed, reconsider* —
+//! which names nobody. Deciding what happens next is
+//! [`Components::advance`]'s job, in [`super::boundary`], and it is the only
+//! code that knows what components exist.
 //!
 //! `apply` folds one component's events into state and must be pure — no I/O,
 //! no clock, no scratch. `on_load` repairs what a dead process left behind.
@@ -22,43 +25,56 @@
 use super::*;
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, CommandEffect};
+use tokio_util::sync::CancellationToken;
+
+/// What an agent can be doing off its own mailbox — one thing at a time.
+///
+/// The mailbox is never blocked, so anything that waits on the outside world
+/// runs on a spawned task and reports back. This names which task that is;
+/// `None` means the agent is between jobs, which is the only moment
+/// [`Components::advance`] may start a new one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WorkKind {
+    /// Rehydrating the runtime, reconnecting MCP, composing the toolbox.
+    Provisioning,
+    /// A turn's pre-start hooks.
+    Hooks,
+    /// One provider call for the turn.
+    Step,
+    /// A summarising call, folded back into this agent's own history.
+    Compaction,
+    /// A summarising call taken for sub sessions branching from this one.
+    Summary,
+}
 
 /// The transient half of an agent's state: in-memory facts more than one
 /// component reads. Everything here is rebuilt or re-decided on recovery,
 /// which is exactly why none of it is journaled.
 pub(super) struct Scratch {
-    /// A turn is committed or in flight. Raised by the queue the moment it
-    /// commits a drained turn — before the turn component has even seen it —
-    /// and lowered by the turn at every boundary. This is the busy gate: the
-    /// queue must not drain a second turn into the gap between the commit and
-    /// the `StartTurn` command being handled.
-    pub turn_live: bool,
     /// Whether this agent's session has a runtime to run on. Seeded at spawn
     /// and moved by the `Runtime` lifecycle records the owner already sends.
     pub ready: bool,
-    /// The id of the turn in flight, written by the turn component. What a
-    /// component acting for a turn checks before acting: work for a cancelled
-    /// or superseded turn is dropped, because the cancel already repaired
-    /// whatever dangled.
-    pub live_turn: Option<u64>,
-    /// The live turn's cancel token, written by the turn component so every
-    /// component's spawned run dies with the turn it serves.
-    pub turn_cancel: Option<tokio_util::sync::CancellationToken>,
-    /// The live work's contexts, published by the provision component once
-    /// the setup lands: the provider, the composed toolbox, the budget, the
-    /// hooks. Read by the turn for its calls, by compaction and seeding for
-    /// their runs — which is why it is scratch and not any component's field.
-    ///
-    /// Deliberately *not* cleared when work ends: the last published budget
-    /// is what lets the queue ask "is a compaction due?" before the next turn
-    /// without provisioning first. Every new work republishes it fresh.
-    pub turn_ctx: Option<std::sync::Arc<TurnCtx>>,
-    /// The next work id — one allocator for turns and standalone work alike,
-    /// so a stale report can never collide with a live one.
-    pub next_work_id: u64,
-    /// What the next turn should tell the provider about tool use. Taken when
-    /// a turn starts, so it applies to exactly one turn. Set only when
-    /// re-running a turn that ended without the result it owed.
+    /// The generation every off-mailbox report is fenced against. Bumped by a
+    /// cancel, so a dying task's report names a generation that no longer
+    /// exists and is dropped — which is what makes "nothing more will happen"
+    /// true the moment a cancel is handled.
+    pub work: u64,
+    /// The job running off the mailbox, if any. This is the busy gate.
+    pub running: Option<WorkKind>,
+    /// Cancels everything running for the current generation.
+    pub cancel: CancellationToken,
+    /// The contexts every kind of work runs against — the provider, the
+    /// composed toolbox, the budget, the hooks — published by the provision
+    /// component. Shared rather than owned by anyone because a turn, a
+    /// compaction and a summary all read the same one.
+    pub ctx: Option<std::sync::Arc<TurnCtx>>,
+    /// Whether they must be rebuilt before the next work runs. Contexts are
+    /// per turn: a rehydrated runtime, a reconnected MCP server or a changed
+    /// prompt all arrive this way.
+    pub ctx_stale: bool,
+    /// What the next provider call should say about tool use. Taken when a
+    /// turn starts, so it applies to exactly one turn. Set only when re-running
+    /// a turn that ended without the result it owed.
     pub pending_tool_choice: Option<horsie_agentcore::ToolChoice>,
     /// Chunks of the message currently being written, since the newest log
     /// entry. Cleared whenever an entry lands, because the entry supersedes
@@ -69,15 +85,50 @@ pub(super) struct Scratch {
 impl Scratch {
     pub fn new(ready: bool) -> Self {
         Self {
-            turn_live: false,
             ready,
-            live_turn: None,
-            turn_cancel: None,
-            turn_ctx: None,
-            next_work_id: 0,
+            work: 0,
+            running: None,
+            cancel: CancellationToken::new(),
+            ctx: None,
+            ctx_stale: true,
             pending_tool_choice: None,
             deltas: Vec::new(),
         }
+    }
+
+    /// Claim the off-mailbox slot for `kind`. Answers the generation the
+    /// report must carry and the token the task must die on.
+    pub fn begin(&mut self, kind: WorkKind) -> (u64, CancellationToken) {
+        self.running = Some(kind);
+        (self.work, self.cancel.clone())
+    }
+
+    /// Whether `work` still names the live generation — the fence every
+    /// off-mailbox report passes through.
+    pub fn live(&self, work: u64) -> bool {
+        self.work == work
+    }
+
+    /// Release the slot a live report belongs to. `false` for a report from a
+    /// cancelled generation, which changes nothing.
+    pub fn finished(&mut self, work: u64) -> bool {
+        if !self.live(work) {
+            return false;
+        }
+        self.running = None;
+        true
+    }
+
+    /// Stop everything: kill what is running, and move the generation past
+    /// anything it might still say.
+    pub fn stop(&mut self) {
+        self.cancel.cancel();
+        self.cancel = CancellationToken::new();
+        self.work = self.work.wrapping_add(1);
+        self.running = None;
+        // Whatever the cancel interrupted may have been holding a runtime that
+        // is going away; the next work builds its own.
+        self.ctx_stale = true;
     }
 }
 
@@ -100,18 +151,20 @@ impl Cx<'_> {
         self.runtime.revision.send_modify(|r| *r += 1);
     }
 
-    /// Put a command on this agent's own mailbox. It is handled after
-    /// whatever the current handler persists is durable and folded — the
-    /// ordering every cross-component hand-off relies on.
+    /// Put one of *this component's own* commands on the mailbox. It is
+    /// handled after whatever the current handler persists is durable and
+    /// folded.
     pub async fn tell(&self, cmd: AgentCommand) {
         let _ = self.actor.self_ref().tell(cmd).await;
     }
 
-    /// Ask the queue to reconsider whether a turn may start. The universal
-    /// "something changed" signal: a boundary reached, a message accepted, a
-    /// timer fired, the runtime arriving.
-    pub async fn drain(&self) {
-        self.tell(AgentCommand::Queue(QueueCommand::Drain)).await;
+    /// Reconsider what this agent should be doing — the one thing a component
+    /// may say to anything other than itself, and it names nobody.
+    ///
+    /// Rarely needed: the actor advances itself after every durable write, so
+    /// this is for the changes that journal nothing at all.
+    pub async fn advance(&self) {
+        self.tell(AgentCommand::Core(CoreCommand::Advance)).await;
     }
 }
 
@@ -128,15 +181,15 @@ impl Cx<'_> {
 /// later: construction is centralized in [`Components::new`], so a spec-driven
 /// variant changes this file and nothing above it.
 pub(super) struct Components {
-    provision: Provision,
-    timers: Timers,
-    turn: Turn,
-    queue: Queue,
-    reads: Reads,
-    log: LogWrites,
-    seed: Seeding,
-    task_lists: TaskLists,
-    compaction: Compaction,
+    pub(super) provision: Provision,
+    pub(super) timers: Timers,
+    pub(super) turn: Turn,
+    pub(super) queue: Queue,
+    pub(super) reads: Reads,
+    pub(super) log: LogWrites,
+    pub(super) seed: Seeding,
+    pub(super) task_lists: TaskLists,
+    pub(super) compaction: Compaction,
 }
 
 impl Components {
@@ -157,8 +210,9 @@ impl Components {
     /// Route one command to the component that owns its group. Exhaustive:
     /// a command group added later fails to compile here.
     ///
-    /// `Core` is deliberately absent — the actor's own lifetime is the one
-    /// thing that is nobody's component.
+    /// `Core` is deliberately absent — the agent's own decisions are the
+    /// registry's, not any component's: see [`Components::advance`] and
+    /// [`Components::cancel`] in [`super::boundary`].
     pub async fn handle(
         &mut self,
         cmd: AgentCommand,
@@ -174,17 +228,18 @@ impl Components {
             AgentCommand::TaskList(c) => self.task_lists.handle(c, cx).await,
             AgentCommand::Provision(c) => self.provision.handle(c, cx).await,
             AgentCommand::Compaction(c) => self.compaction.handle(c, cx).await,
-            AgentCommand::Core(_) => return None,
+            AgentCommand::Core(CoreCommand::Advance) => self.advance(cx).await,
+            AgentCommand::Core(CoreCommand::Cancel { ack }) => self.cancel(ack, cx).await,
+            AgentCommand::Core(CoreCommand::Shutdown) => return None,
         })
     }
 
     /// Ask each component, in registration order, to repair what a dead
-    /// process left it holding. The queue drains last, so it sees whatever
-    /// gate the turn's own repair raised.
+    /// process left it holding. Nothing here decides what happens next: the
+    /// actor advances once, afterwards, over the repaired state.
     pub async fn on_load(&mut self, cx: &mut Cx<'_>) {
         self.timers.on_load(cx).await;
         self.turn.on_load(cx).await;
-        self.queue.on_load(cx).await;
     }
 }
 
@@ -233,55 +288,49 @@ pub(super) type ToolExecutor =
         horsie_actor::ActorRef<AgentCommand>,
     ) -> Result<(serde_json::Value, Vec<AgentDomainEvent>), horsie_agentcore::ToolCallError>;
 
-/// Execute a routed tool call and answer the turn — the shared shape of every
+/// Execute a routed tool call and answer it — the shared shape of every
 /// component-claimed tool.
 ///
-/// Checks the call is from the live turn (a cancelled turn's call is dropped:
-/// the cancel already repaired its dangling `tool_use`, and acting now would
-/// leak a side effect), runs the executor over current state, journals the
-/// component's own events, and tells the turn the result on the same channel
-/// a remote tool answers on.
+/// "Answering" is journaling the result, exactly as a remote tool call is
+/// answered: the log is where an unanswered call is visible, so closing one
+/// there closes it for everybody. Nothing is told to the turn, and the turn
+/// cannot tell the two kinds of call apart.
+///
+/// A call from a cancelled generation is dropped: the cancel already repaired
+/// its dangling `tool_use`, and acting now would leak a side effect.
 pub(super) async fn answer_tool_call(
     call: ComponentToolCall,
     cx: &mut Cx<'_>,
     execute: ToolExecutor,
 ) -> CommandEffect<AgentDomainEvent> {
-    if cx.scratch.live_turn != Some(call.turn) {
+    if !cx.scratch.live(call.work) {
         tracing::warn!(
             tool = call.name,
-            "dropping a routed tool call from a dead turn"
+            "dropping a routed tool call from a cancelled turn"
         );
         return CommandEffect::none();
     }
-    let (outcome, events) = match execute(cx.state, &call.name, &call.input, cx.actor.self_ref()) {
-        Ok((value, events)) => (
-            ToolReturn::Result {
-                // A string result is forwarded verbatim; re-encoding it as
-                // JSON would wrap it in quotes and escape every newline.
-                output: value
+    let (output, is_error, mut events) =
+        match execute(cx.state, &call.name, &call.input, cx.actor.self_ref()) {
+            // A string result is forwarded verbatim; re-encoding it as JSON
+            // would wrap it in quotes and escape every newline.
+            Ok((value, events)) => (
+                value
                     .as_str()
                     .map(str::to_string)
                     .unwrap_or_else(|| value.to_string()),
-                is_error: false,
-                artifacts: Vec::new(),
-            },
-            events,
-        ),
-        Err(e) => (
-            ToolReturn::Result {
-                output: e.to_string(),
-                is_error: true,
-                artifacts: Vec::new(),
-            },
-            Vec::new(),
-        ),
-    };
-    cx.tell(AgentCommand::Run(RunCommand::ToolReturned {
-        turn: call.turn,
+                false,
+                events,
+            ),
+            Err(e) => (e.to_string(), true, Vec::new()),
+        };
+    events.push(AgentDomainEvent::ToolComplete {
         tool_call_id: call.tool_call_id,
-        outcome,
-    }))
-    .await;
+        output,
+        is_error,
+        artifacts: Vec::new(),
+        at_ms: horsie_models::now_ms(),
+    });
     CommandEffect::persist(events)
 }
 
@@ -303,6 +352,7 @@ impl Components {
             }
             e @ (AgentDomainEvent::InputMessage { .. }
             | AgentDomainEvent::Received { .. }
+            | AgentDomainEvent::Consumed { .. }
             | AgentDomainEvent::TurnBegan { .. }
             | AgentDomainEvent::AskRecorded { .. }
             | AgentDomainEvent::Parked { .. }) => Queue::apply(&mut state, e),
