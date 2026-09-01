@@ -101,6 +101,11 @@ pub(super) struct TurnFlight {
     iteration: u32,
     /// Consecutive failed attempts at the *current* call.
     attempt: u32,
+    /// A compaction has been requested and no provider call has answered
+    /// since. What keeps the budget check from asking again before the next
+    /// response refreshes `context_tokens` — the in-memory figure goes stale
+    /// the moment a boundary lands.
+    compact_requested: bool,
     fingerprints: VecDeque<String>,
     /// Banked the moment each call answers, so no later failure loses it.
     usage: Usage,
@@ -186,6 +191,7 @@ impl Turn {
             summarise_only,
             iteration: 0,
             attempt: 0,
+            compact_requested: false,
             fingerprints: VecDeque::new(),
             usage: Usage::without_cache(0, 0),
             context_tokens: cx.state.context_tokens,
@@ -325,13 +331,17 @@ impl Turn {
                 )
                 .await;
         }
-        let due = cx.scratch.turn_ctx.as_ref().is_some_and(|c| {
-            c.budget
-                .is_some_and(|b| flight.context_tokens >= b.trigger_tokens())
-        });
+        let due = !flight.compact_requested
+            && cx.scratch.turn_ctx.as_ref().is_some_and(|c| {
+                c.budget
+                    .is_some_and(|b| flight.context_tokens >= b.trigger_tokens())
+            });
         match due {
             true => {
                 if let Some(job) = self.compact_job(None) {
+                    if let Some(flight) = self.flight.as_mut() {
+                        flight.compact_requested = true;
+                    }
                     cx.tell(AgentCommand::Compaction(CompactionCommand::Compact(
                         Box::new(job),
                     )))
@@ -422,6 +432,9 @@ impl Turn {
             }
             Some(Summarise::Compact(instructions)) => {
                 if let Some(job) = self.compact_job(Some(instructions)) {
+                    if let Some(flight) = self.flight.as_mut() {
+                        flight.compact_requested = true;
+                    }
                     cx.tell(AgentCommand::Compaction(CompactionCommand::Compact(
                         Box::new(job),
                     )))
@@ -447,6 +460,7 @@ impl Turn {
         };
         flight.iteration += 1;
         flight.attempt = 0;
+        flight.compact_requested = false;
         // Banked the moment the call answers, before anything downstream can
         // fail: every later exit reports this call's cost.
         bank_usage(&mut flight.usage, &response.usage);
@@ -747,38 +761,18 @@ impl Component for Turn {
                 }
                 self.handle_llm_failed(error, cx).await
             }
-            RunCommand::CompactFinished { turn, usage } => {
+            RunCommand::Resume { turn, usage } => {
                 let Some(flight) = self.fenced(turn) else {
                     return CommandEffect::none();
                 };
-                // The summarising call was made on this turn's behalf; its
-                // cost is the turn's cost.
-                if let Some(usage) = &usage {
-                    bank_usage(&mut flight.usage, usage);
-                }
-                // Whatever the compaction did is folded by now — a landed
-                // boundary already moved the durable `context_tokens`, and the
-                // next provider response refreshes the in-memory figure.
-                // Straight to the call, not back through the budget check: a
-                // compaction that left the prompt over the trigger must not
-                // loop.
-                let (run_id, summarise_only) = (flight.id, flight.summarise_only);
-                if summarise_only {
-                    let state = cx.state.clone();
-                    return self.finish_empty(run_id, &state, cx).await;
-                }
-                let state = cx.state.clone();
-                self.spawn_llm(&state, cx, None);
-                CommandEffect::none()
-            }
-            RunCommand::SummaryDone { turn, usage } => {
-                let Some(flight) = self.fenced(turn) else {
-                    return CommandEffect::none();
-                };
+                // Whoever paused this turn spent on its behalf; the cost is
+                // the turn's cost.
                 if let Some(usage) = &usage {
                     bank_usage(&mut flight.usage, usage);
                 }
                 let (run_id, summarise_only) = (flight.id, flight.summarise_only);
+                // A turn that was only ever its summarisation is over; any
+                // other turn takes its next step against the folded state.
                 if summarise_only {
                     let state = cx.state.clone();
                     return self.finish_empty(run_id, &state, cx).await;

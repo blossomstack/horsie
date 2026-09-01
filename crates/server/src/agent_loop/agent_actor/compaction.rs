@@ -205,7 +205,7 @@ impl Component for Compaction {
                         turn = job.turn,
                         "a compaction was asked for with no turn contexts"
                     );
-                    cx.tell(AgentCommand::Run(RunCommand::CompactFinished {
+                    cx.tell(AgentCommand::Run(RunCommand::Resume {
                         turn: job.turn,
                         usage: None,
                     }))
@@ -278,11 +278,8 @@ impl Component for Compaction {
                 };
                 // Told before the persist returns; handled after it — the turn
                 // resumes on a state the boundary is already folded into.
-                cx.tell(AgentCommand::Run(RunCommand::CompactFinished {
-                    turn,
-                    usage,
-                }))
-                .await;
+                cx.tell(AgentCommand::Run(RunCommand::Resume { turn, usage }))
+                    .await;
                 CommandEffect::persist(events)
             }
         }

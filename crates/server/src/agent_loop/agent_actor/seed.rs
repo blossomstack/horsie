@@ -198,7 +198,7 @@ impl Component for Seeding {
                         result,
                     })
                     .await;
-                cx.tell(AgentCommand::Run(RunCommand::SummaryDone { turn, usage }))
+                cx.tell(AgentCommand::Run(RunCommand::Resume { turn, usage }))
                     .await;
                 CommandEffect::none()
             }

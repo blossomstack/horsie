@@ -166,14 +166,12 @@ pub enum RunCommand {
         turn: u64,
         error: horsie_agentcore::LlmError,
     },
-    /// Internal: the compaction this turn asked for is over — landed or
-    /// skipped, the turn resumes either way and reads the folded state.
-    /// `usage` is what the summarising call spent, banked into the turn's
-    /// total like any other call's.
-    CompactFinished { turn: u64, usage: Option<Usage> },
-    /// Internal: the summary sub sessions were waiting on has been taken and
-    /// delivered; the turn resumes, banking what the call spent.
-    SummaryDone { turn: u64, usage: Option<Usage> },
+    /// Internal: work the turn was paused on — a compaction, a seed summary,
+    /// anything a component does on a turn's behalf — is over. The turn banks
+    /// what it spent, reads the folded state, and takes its next step. One
+    /// signal for every such pause: the turn asks by name, but never needs to
+    /// know who answered.
+    Resume { turn: u64, usage: Option<Usage> },
     /// Internal: one dispatched tool call answered (or timed out inside its
     /// own toolbox). Carried per call rather than per batch so a fast tool's
     /// result is durable while a slow one still runs.
