@@ -1202,7 +1202,6 @@ const zhHant: typeof en = {
     modeSystem: "跟隨系統",
     textSizeTitle: "文字大小",
     textSizeGroup: "文字大小",
-    transcriptTitle: "對話紀錄",
     languageTitle: "語言",
     languageGroup: "語言",
     languageSystem: "跟隨系統",
