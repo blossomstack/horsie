@@ -150,8 +150,9 @@ pub enum RunCommand {
         events: Vec<AgentDomainEvent>,
         ack: ReplyTo<Result<(), horsie_actor::JournalError>>,
     },
-    /// Internal: the provision component produced this turn's contexts.
-    ContextReady { turn: u64, ctx: Box<TurnCtx> },
+    /// Internal: the provision component produced this turn's contexts —
+    /// published to the shared scratch, not carried here.
+    ContextReady { turn: u64 },
     /// Internal: the provision component could not, and has already told the
     /// parent why; the turn only needs clearing.
     ContextFailed { turn: u64 },
@@ -167,10 +168,12 @@ pub enum RunCommand {
     },
     /// Internal: the compaction this turn asked for is over — landed or
     /// skipped, the turn resumes either way and reads the folded state.
-    CompactFinished { turn: u64 },
+    /// `usage` is what the summarising call spent, banked into the turn's
+    /// total like any other call's.
+    CompactFinished { turn: u64, usage: Option<Usage> },
     /// Internal: the summary sub sessions were waiting on has been taken and
-    /// delivered; the turn resumes.
-    SummaryDone { turn: u64 },
+    /// delivered; the turn resumes, banking what the call spent.
+    SummaryDone { turn: u64, usage: Option<Usage> },
     /// Internal: one dispatched tool call answered (or timed out inside its
     /// own toolbox). Carried per call rather than per batch so a fast tool's
     /// result is durable while a slow one still runs.
@@ -220,17 +223,12 @@ pub enum TaskListCommand {
 /// The per-turn runtime and context setup.
 pub enum ProvisionCommand {
     /// The turn asked for its contexts: rehydrate the runtime, reconnect MCP,
-    /// scan the workspace, compose and filter the toolbox.
-    Provide(Box<ProvideJob>),
+    /// scan the workspace, compose and filter the toolbox. Everything else
+    /// the setup needs — the cancel token above all — is read from the shared
+    /// scratch.
+    Provide { turn: u64 },
     /// Internal: the spawned setup finished.
     Provided(Box<ProvidedOutcome>),
-}
-
-/// What a provision run needs beyond the shared context.
-pub struct ProvideJob {
-    pub turn: u64,
-    /// The turn's cancel token, so a stop reaches the most hang-prone work.
-    pub cancel: tokio_util::sync::CancellationToken,
 }
 
 /// What the spawned setup produced.
@@ -248,8 +246,9 @@ pub enum CompactionCommand {
     Landed(Box<CompactLanding>),
 }
 
-/// Everything a compaction run needs beyond the shared state — handed over by
-/// the turn, which holds the per-turn contexts.
+/// What a compaction run needs and only the turn knows. Everything shared —
+/// the provider, the budget, the hooks, the cancel token — is read from the
+/// scratch's [`TurnCtx`], so nobody carries another component's context.
 pub struct CompactJob {
     pub turn: u64,
     pub manual: bool,
@@ -258,17 +257,13 @@ pub struct CompactJob {
     /// `tokens_before`. The turn's in-memory figure, which state does not
     /// carry mid-turn.
     pub tokens_before: u32,
-    pub budget: Option<horsie_agentcore::CompactionBudget>,
-    pub provider: std::sync::Arc<dyn horsie_agentcore::LlmProvider>,
-    pub conversation_id: String,
-    /// For the Pre/PostCompact hooks the run fires.
-    pub context_provider: std::sync::Arc<dyn crate::agent_loop::ContextProvider>,
-    pub cancel: tokio_util::sync::CancellationToken,
 }
 
 /// What the spawned compaction run produced.
 pub struct CompactLanding {
     pub turn: u64,
+    /// What the summarising call spent, when one was made.
+    pub usage: Option<Usage>,
     pub outcome: CompactOutcome,
 }
 
@@ -297,18 +292,8 @@ pub struct CompactedData {
     pub tokens_after: u32,
 }
 
-/// Everything a sub-session summary run needs beyond the shared state.
-pub struct SummaryJob {
-    pub turn: u64,
-    /// Every sub session seeded from this one summary. They share a branch
-    /// point, so they are entitled to share the provider call.
-    pub sub_sessions: Vec<uuid::Uuid>,
-    pub provider: std::sync::Arc<dyn horsie_agentcore::LlmProvider>,
-    pub conversation_id: String,
-    pub cancel: tokio_util::sync::CancellationToken,
-}
-
-/// Everything one turn's steps share, built once by the provision component.
+/// Everything one turn's steps share, built once by the provision component
+/// and published to the shared scratch for whoever needs it.
 pub struct TurnCtx {
     pub provider: std::sync::Arc<dyn horsie_agentcore::LlmProvider>,
     /// The fully-composed, selection-filtered toolbox remote calls dispatch
@@ -443,13 +428,21 @@ pub enum SeedCommand {
     },
     /// Take the summary the sub sessions queued into this turn are waiting
     /// on — a bare summarise run over the branch point's history, sharing the
-    /// compaction component's summarise machinery.
-    TakeSummary(Box<SummaryJob>),
+    /// compaction component's summarise machinery. The provider and cancel
+    /// token are read from the shared scratch.
+    TakeSummary {
+        turn: u64,
+        /// Every sub session seeded from this one summary. They share a
+        /// branch point, so they are entitled to share the provider call.
+        sub_sessions: Vec<uuid::Uuid>,
+    },
     /// Internal: the spawned summary run finished.
     SummaryTaken {
         turn: u64,
         sub_sessions: Vec<uuid::Uuid>,
         result: Result<String, String>,
+        /// What the summarising call spent, when one was made.
+        usage: Option<Usage>,
     },
 }
 

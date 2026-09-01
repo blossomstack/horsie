@@ -59,8 +59,10 @@ impl Component for Provision {
         cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
         match cmd {
-            ProvisionCommand::Provide(job) => {
-                let ProvideJob { turn, cancel } = *job;
+            ProvisionCommand::Provide { turn } => {
+                let Some(cancel) = cx.scratch.turn_cancel.clone() else {
+                    return CommandEffect::none();
+                };
                 let self_ref = cx.actor.self_ref();
                 let context_provider = cx.runtime.context_provider.clone();
                 let configured_prompt = cx.params.system_prompt.clone();
@@ -137,7 +139,10 @@ impl Component for Provision {
                 }
                 match outcome {
                     Ok(ctx) => {
-                        cx.tell(AgentCommand::Run(RunCommand::ContextReady { turn, ctx }))
+                        // Published where every component that acts for this
+                        // turn reads it; the turn only hears "ready".
+                        cx.scratch.turn_ctx = Some(std::sync::Arc::new(*ctx));
+                        cx.tell(AgentCommand::Run(RunCommand::ContextReady { turn }))
                             .await;
                     }
                     Err(error) => {

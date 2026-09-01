@@ -15,12 +15,13 @@
 //! the command/event vocabulary, and the transient scratch — see
 //! [`component`] for the contract.
 //!
-//! The components: [`queue`] the promises this agent has accepted and the
-//! decision to answer them, [`run`] the turn in flight (with [`conclude`] as
-//! its other half: what an ending means), [`timers`] the wake-ups it armed,
-//! [`reads`] the questions that wake nothing, [`log`] what others write into
-//! its transcript, and [`seed`] branching. [`compaction`] and [`task_list`]
-//! are apply-only modules: they own events and folds but no commands.
+//! One component, one file: [`provision`] the per-turn runtime and context
+//! setup, [`queue`] the promises this agent has accepted and the decision to
+//! answer them, [`turn`] the regular agent run and what its endings mean,
+//! [`compaction`] folding old history behind a summary boundary, [`timers`]
+//! and [`task_list`] the tools whose state is the agent's own, [`seed`]
+//! branching and the sub-session summary, [`reads`] the questions that wake
+//! nothing, and [`log`] what others write into its transcript.
 //!
 //! Two things deliberately do not happen on this mailbox. No provider call and
 //! no toolbox build: those run on a spawned task, so a thirty-second MCP
@@ -29,19 +30,18 @@
 
 mod compaction;
 mod component;
-mod conclude;
 mod log;
 mod provision;
 mod queue;
 mod reads;
 mod repair;
-mod run;
 mod seed;
 mod state;
 mod task_list;
 #[cfg(test)]
 pub(super) mod testing;
 mod timers;
+mod turn;
 mod types;
 
 pub use reads::{ReadOutcome, ReplayWindow};
@@ -57,11 +57,11 @@ use provision::Provision;
 use queue::Queue;
 use reads::Reads;
 use repair::{missing_tool_results, parked_call_ids, repair_unanswered_tool_calls};
-use run::{RunOutcome, RunReport, Turn};
 use seed::Seeding;
 use state::new_message_id;
 use task_list::TaskLists;
 use timers::Timers;
+use turn::Turn;
 
 use crate::agent_loop::context::AgentRuntimeContext;
 use async_trait::async_trait;

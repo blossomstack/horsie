@@ -37,10 +37,18 @@ pub(super) struct Scratch {
     /// and moved by the `Runtime` lifecycle records the owner already sends.
     pub ready: bool,
     /// The id of the turn in flight, written by the turn component. What a
-    /// component executing a routed tool call checks before acting: a call
-    /// from a cancelled or superseded turn is dropped, because the cancel
-    /// already repaired its dangling `tool_use`.
+    /// component acting for a turn checks before acting: work for a cancelled
+    /// or superseded turn is dropped, because the cancel already repaired
+    /// whatever dangled.
     pub live_turn: Option<u64>,
+    /// The live turn's cancel token, written by the turn component so every
+    /// component's spawned run dies with the turn it serves.
+    pub turn_cancel: Option<tokio_util::sync::CancellationToken>,
+    /// The live turn's contexts, published by the provision component once
+    /// the setup lands: the provider, the composed toolbox, the budget, the
+    /// hooks. Read by the turn for its calls, by compaction and seeding for
+    /// their runs — which is why it is scratch and not any component's field.
+    pub turn_ctx: Option<std::sync::Arc<TurnCtx>>,
     /// What the next turn should tell the provider about tool use. Taken when
     /// a turn starts, so it applies to exactly one turn. Set only when
     /// re-running a turn that ended without the result it owed.
@@ -57,6 +65,8 @@ impl Scratch {
             turn_live: false,
             ready,
             live_turn: None,
+            turn_cancel: None,
+            turn_ctx: None,
             pending_tool_choice: None,
             deltas: Vec::new(),
         }

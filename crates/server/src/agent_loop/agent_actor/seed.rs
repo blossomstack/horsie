@@ -131,14 +131,20 @@ impl Component for Seeding {
                 // replays it.
                 .and_snapshot()
             }
-            SeedCommand::TakeSummary(job) => {
-                let SummaryJob {
-                    turn,
-                    sub_sessions,
-                    provider,
-                    conversation_id,
-                    cancel,
-                } = *job;
+            SeedCommand::TakeSummary { turn, sub_sessions } => {
+                let (Some(tctx), Some(cancel)) =
+                    (cx.scratch.turn_ctx.clone(), cx.scratch.turn_cancel.clone())
+                else {
+                    tracing::warn!(turn, "a summary was asked for with no turn contexts");
+                    cx.tell(AgentCommand::Seed(SeedCommand::SummaryTaken {
+                        turn,
+                        sub_sessions,
+                        result: Err("no turn contexts to summarise with".to_string()),
+                        usage: None,
+                    }))
+                    .await;
+                    return CommandEffect::none();
+                };
                 // The summary must describe the history at the branch point,
                 // read here before the turn can say anything to the model.
                 let history = repair_unanswered_tool_calls(state.prompt_messages());
@@ -148,22 +154,27 @@ impl Component for Seeding {
                         biased;
                         () = cancel.cancelled() => return,
                         result = horsie_agentcore::summarise_span(
-                            &provider,
-                            &conversation_id,
+                            &tctx.provider,
+                            &tctx.conversation_id,
                             &history,
                             history.len(),
                             None,
                             None,
-                        ) => result.map_err(|e| e.to_string()),
+                        ) => result,
                     };
-                    if let Err(e) = &result {
-                        tracing::warn!(error = %e, "summarising a session for a sub session failed");
-                    }
+                    let (result, usage) = match result {
+                        Ok((text, usage)) => (Ok(text), Some(usage)),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "summarising a session for a sub session failed");
+                            (Err(e.to_string()), None)
+                        }
+                    };
                     let _ = self_ref
                         .tell(AgentCommand::Seed(SeedCommand::SummaryTaken {
                             turn,
                             sub_sessions,
                             result,
+                            usage,
                         }))
                         .await;
                 });
@@ -173,6 +184,7 @@ impl Component for Seeding {
                 turn,
                 sub_sessions,
                 result,
+                usage,
             } => {
                 // Delivered whatever became of the turn since: the sub
                 // sessions waiting are a different session's business, and the
@@ -185,7 +197,7 @@ impl Component for Seeding {
                         result,
                     })
                     .await;
-                cx.tell(AgentCommand::Run(RunCommand::SummaryDone { turn }))
+                cx.tell(AgentCommand::Run(RunCommand::SummaryDone { turn, usage }))
                     .await;
                 CommandEffect::none()
             }

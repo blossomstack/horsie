@@ -206,7 +206,9 @@ impl EventSink for NullSink {
     }
 }
 
-/// Ask the model to summarise `history[..cut]`.
+/// Ask the model to summarise `history[..cut]`. Answers the summary together
+/// with what the call cost — a summariser's tokens are spent like any other
+/// call's, and a caller that cannot see them cannot bank them.
 ///
 /// `cut == history.len()` summarises everything, which is what a sub session's
 /// seed and a summary-only compaction both want. An empty span summarises to
@@ -223,10 +225,13 @@ pub async fn summarise_span(
     cut: usize,
     instructions: Option<&str>,
     max_tokens: Option<u32>,
-) -> Result<String, LlmError> {
+) -> Result<(String, horsie_models::agent::Usage), LlmError> {
     let cut = cut.min(history.len());
     if cut == 0 {
-        return Ok(String::new());
+        return Ok((
+            String::new(),
+            horsie_models::agent::Usage::without_cache(0, 0),
+        ));
     }
     let mut messages = history[..cut].to_vec();
     messages.push(Message {
@@ -271,7 +276,7 @@ pub async fn summarise_span(
             message: "the summariser returned no text".into(),
         });
     }
-    Ok(text)
+    Ok((text, response.usage))
 }
 
 /// The exact text of a boundary message. One function so the run and the
