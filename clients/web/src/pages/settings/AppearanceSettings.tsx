@@ -1,6 +1,5 @@
 import { Check, Globe, Monitor, Moon, Sun } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { SETTINGS, useUiSettings } from "../../hooks/useUiSettings";
 import {
   SKINS,
   TEXT_SIZES,
@@ -81,7 +80,6 @@ export function AppearanceSettings() {
     useTheme();
   const { choice: localeChoice, locale, setChoice: setLocale } =
     useLocaleChoice();
-  const { values, toggle } = useUiSettings();
 
   // `system` first: it is the default, and it is the entry whose current
   // resolution is worth showing next to it.
@@ -224,39 +222,6 @@ export function AppearanceSettings() {
               </button>
             ))}
           </div>
-        </Section>
-
-        <Section
-          title={t("appearance.transcriptTitle")}
-        >
-          {SETTINGS.map((def) => (
-            <button
-              key={def.key}
-              type="button"
-              role="switch"
-              aria-checked={values[def.key]}
-              onClick={() => toggle(def.key)}
-              data-testid="setting-toggle"
-              data-key={def.key}
-              data-checked={values[def.key]}
-              className="row w-full items-start px-3 py-2.5 text-left"
-            >
-              <span
-                aria-hidden
-                className={cn(
-                  "mt-px flex h-4 w-4 shrink-0 items-center justify-center rounded-[3px]",
-                  values[def.key]
-                    ? "bg-accent text-accent-ink"
-                    : "shadow-[inset_0_0_0_1px_var(--rule-strong)]",
-                )}
-              >
-                {values[def.key] && <Check size={11} strokeWidth={3} />}
-              </span>
-              <span className="min-w-0 text-[0.8125rem] text-legend">
-                {t(`ui.${def.key}.label`)}
-              </span>
-            </button>
-          ))}
         </Section>
       </SettingsPage>
   );

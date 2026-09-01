@@ -1205,7 +1205,6 @@ const zhHans: typeof en = {
     modeSystem: "跟随系统",
     textSizeTitle: "文字大小",
     textSizeGroup: "文字大小",
-    transcriptTitle: "对话记录",
     languageTitle: "语言",
     languageGroup: "语言",
     languageSystem: "跟随系统",

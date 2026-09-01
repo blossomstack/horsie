@@ -1241,7 +1241,6 @@ const en = {
     modeSystem: "System",
     textSizeTitle: "Text size",
     textSizeGroup: "Text size",
-    transcriptTitle: "Transcript",
     languageTitle: "Language",
     languageGroup: "Language",
     languageSystem: "System",
