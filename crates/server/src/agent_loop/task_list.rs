@@ -124,6 +124,9 @@ impl TaskListState {
     pub fn apply(&mut self, action: TaskListAction) -> Result<(), String> {
         match action {
             TaskListAction::Create { tasks } => {
+                if tasks.is_empty() {
+                    return Err("'tasks' must not be empty".to_string());
+                }
                 self.tasks = tasks
                     .into_iter()
                     .enumerate()
@@ -137,6 +140,9 @@ impl TaskListState {
                 Ok(())
             }
             TaskListAction::Insert { tasks, position } => {
+                if tasks.is_empty() {
+                    return Err("'tasks' must not be empty".to_string());
+                }
                 let len = self.tasks.len();
                 let position = position.unwrap_or(len);
                 if position > len {
@@ -159,6 +165,9 @@ impl TaskListState {
                 Ok(())
             }
             TaskListAction::UpdateStatus { ids, status } => {
+                if ids.is_empty() {
+                    return Err("'ids' must not be empty".to_string());
+                }
                 let missing: Vec<String> = ids
                     .iter()
                     .filter(|id| !self.tasks.iter().any(|t| &t.id == *id))
@@ -179,15 +188,18 @@ impl TaskListState {
     }
 }
 
-/// One `task_list` tool call, already validated into a typed shape. Carried
-/// over the actor boundary as `AgentCommand::TaskListOp`'s payload.
-#[derive(Debug, Clone)]
+/// One `task_list` tool call, deserialized straight from the tool input by
+/// serde — the `action` field selects the variant. Carried over the actor
+/// boundary as `AgentCommand::TaskListOp`'s payload.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
 pub enum TaskListAction {
     Create {
         tasks: Vec<String>,
     },
     Insert {
         tasks: Vec<String>,
+        #[serde(default)]
         position: Option<usize>,
     },
     UpdateStatus {
@@ -198,86 +210,13 @@ pub enum TaskListAction {
 }
 
 impl TaskListAction {
+    /// Deserialize a tool call from its raw input. serde drives the whole parse
+    /// off the `action` tag; a shape mismatch (wrong type, unknown action,
+    /// missing field) surfaces as `InvalidInput` with serde's own message,
+    /// which goes back to the model so it can correct the call.
     pub fn from_input(input: &Value) -> Result<Self, ToolCallError> {
-        let action = input
-            .get("action")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ToolCallError::InvalidInput("missing 'action'".to_string()))?;
-        match action {
-            "create" => Ok(Self::Create {
-                tasks: task_texts(input)?,
-            }),
-            "insert" => Ok(Self::Insert {
-                tasks: task_texts(input)?,
-                position: input
-                    .get("position")
-                    .and_then(Value::as_u64)
-                    .map(|p| p as usize),
-            }),
-            "update_status" => Ok(Self::UpdateStatus {
-                ids: task_ids(input)?,
-                status: parse_status(input)?,
-            }),
-            "list" => Ok(Self::List),
-            other => Err(ToolCallError::InvalidInput(format!(
-                "unknown action '{other}'; expected create, insert, update_status, or list"
-            ))),
-        }
-    }
-}
-
-fn task_texts(input: &Value) -> Result<Vec<String>, ToolCallError> {
-    let tasks = input
-        .get("tasks")
-        .and_then(Value::as_array)
-        .ok_or_else(|| ToolCallError::InvalidInput("missing 'tasks'".to_string()))?;
-    if tasks.is_empty() {
-        return Err(ToolCallError::InvalidInput(
-            "'tasks' must not be empty".to_string(),
-        ));
-    }
-    tasks
-        .iter()
-        .map(|v| {
-            v.as_str().map(str::to_string).ok_or_else(|| {
-                ToolCallError::InvalidInput("'tasks' entries must be strings".to_string())
-            })
-        })
-        .collect()
-}
-
-fn task_ids(input: &Value) -> Result<Vec<u32>, ToolCallError> {
-    let ids = input
-        .get("ids")
-        .and_then(Value::as_array)
-        .ok_or_else(|| ToolCallError::InvalidInput("missing 'ids'".to_string()))?;
-    if ids.is_empty() {
-        return Err(ToolCallError::InvalidInput(
-            "'ids' must not be empty".to_string(),
-        ));
-    }
-    ids.iter()
-        .map(|v| {
-            v.as_u64()
-                .and_then(|n| u32::try_from(n).ok())
-                .ok_or_else(|| {
-                    ToolCallError::InvalidInput(
-                        "'ids' entries must be non-negative integers".to_string(),
-                    )
-                })
-        })
-        .collect()
-}
-
-fn parse_status(input: &Value) -> Result<TaskStatus, ToolCallError> {
-    match input.get("status").and_then(Value::as_str) {
-        Some("pending") => Ok(TaskStatus::Pending),
-        Some("in_progress") => Ok(TaskStatus::InProgress),
-        Some("completed") => Ok(TaskStatus::Completed),
-        Some(other) => Err(ToolCallError::InvalidInput(format!(
-            "unknown status '{other}'; expected pending, in_progress, or completed"
-        ))),
-        None => Err(ToolCallError::InvalidInput("missing 'status'".to_string())),
+        serde_json::from_value(input.clone())
+            .map_err(|e| ToolCallError::InvalidInput(e.to_string()))
     }
 }
 
@@ -289,7 +228,10 @@ pub fn task_list_tool_spec() -> ToolSpec {
             'insert' adds one or more new tasks at a position (default: end). \
             'update_status' marks one or more tasks by id as pending, \
             in_progress, or completed. 'list' returns the current state. \
-            Every action returns the full current list."
+            Every action returns the full current list. New tasks always start \
+            as pending; move them with 'update_status'. \
+            Example — create: {\"action\": \"create\", \"tasks\": [\"write tests\", \"ship it\"]}. \
+            Example — mark done: {\"action\": \"update_status\", \"ids\": [1], \"status\": \"completed\"}."
             .to_string(),
         input_schema: json!({
             "type": "object",
@@ -303,7 +245,7 @@ pub fn task_list_tool_spec() -> ToolSpec {
                 "tasks": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Task text, in order. Required for 'create' and 'insert'."
+                    "description": "Task texts, in order — one plain string per task, e.g. [\"write tests\", \"ship it\"]. Not objects. Required for 'create' and 'insert'."
                 },
                 "position": {
                     "type": "integer",
@@ -347,6 +289,19 @@ mod tests {
         TaskListAction::from_input(&json)
     }
 
+    fn parse_create(json: Value) -> TaskListAction {
+        let action = parse(json).unwrap();
+        assert!(matches!(action, TaskListAction::Create { .. }));
+        action
+    }
+
+    fn create_tasks(json: Value) -> Vec<String> {
+        match parse_create(json) {
+            TaskListAction::Create { tasks } => tasks,
+            other => panic!("expected create action, got {other:?}"),
+        }
+    }
+
     #[test]
     fn create_replaces_list_with_pending_tasks() {
         let mut state = TaskListState::default();
@@ -358,9 +313,66 @@ mod tests {
     }
 
     #[test]
+    fn create_parses_plain_string_tasks() {
+        let tasks = create_tasks(json!({"action": "create", "tasks": ["a", "b"]}));
+        assert_eq!(tasks, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
     fn create_rejects_empty_tasks() {
-        let err = parse(json!({"action": "create", "tasks": []})).unwrap_err();
+        // serde accepts an empty array; the empty batch is rejected in `apply`.
+        let mut state = TaskListState::default();
+        let err = state
+            .apply(TaskListAction::Create { tasks: vec![] })
+            .unwrap_err();
+        assert!(err.contains("must not be empty"));
+    }
+
+    #[test]
+    fn create_rejects_object_form() {
+        // Tasks are plain strings only. The object form a model sometimes
+        // reaches for (`{"text": ...}`) is now a hard InvalidInput rather than
+        // silently accepted -- the schema and description steer it to strings.
+        let err = parse(json!({"action": "create", "tasks": [{"text": "a"}]})).unwrap_err();
         assert!(matches!(err, ToolCallError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn create_rejects_non_string_entry() {
+        let err = parse(json!({"action": "create", "tasks": [42]})).unwrap_err();
+        assert!(matches!(err, ToolCallError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn insert_parses_plain_string_tasks() {
+        match parse(json!({"action": "insert", "tasks": ["a"]})).unwrap() {
+            TaskListAction::Insert { tasks, .. } => assert_eq!(tasks, vec!["a".to_string()]),
+            other => panic!("expected insert action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn insert_rejects_empty_tasks() {
+        let mut state = TaskListState::default();
+        let err = state
+            .apply(TaskListAction::Insert {
+                tasks: vec![],
+                position: None,
+            })
+            .unwrap_err();
+        assert!(err.contains("must not be empty"));
+    }
+
+    #[test]
+    fn update_status_rejects_empty_ids() {
+        let mut state = TaskListState::default();
+        let err = state
+            .apply(TaskListAction::UpdateStatus {
+                ids: vec![],
+                status: TaskStatus::Completed,
+            })
+            .unwrap_err();
+        assert!(err.contains("must not be empty"));
     }
 
     #[test]
