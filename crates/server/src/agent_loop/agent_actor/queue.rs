@@ -21,7 +21,90 @@ use horsie_agentcore::{
 };
 use horsie_models::now_ms;
 
-/// What this agent has accepted, and how it becomes the next input.
+/// What this agent has accepted, and what it is waiting to be told.
+///
+/// The fields are private to this file, which is the enforcement: no other
+/// component, and not the actor, can read or move them. What the rest of the
+/// server may know about a queue is the four methods below, forwarded by
+/// [`AgentState`].
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct QueueState {
+    /// Accepted-but-undelivered things addressed to this agent, oldest first.
+    ///
+    /// Durable for the same reason timers are — an accepted message is a
+    /// promise, and a crash must not forget it. Here rather than on the
+    /// session because a message is addressed to an *agent*: once one can name
+    /// a subagent or a workflow step, a session-level queue has nowhere to put
+    /// it.
+    inbox: Vec<crate::agent_loop::Incoming>,
+    /// Every question this agent is parked on, oldest first. A turn may ask
+    /// several at once, and none of them can be answered alone.
+    asks: Vec<crate::agent_loop::AskedQuestion>,
+    /// True while the agent has parked itself awaiting something that will
+    /// wake it — a timer, a subagent still working.
+    parked: bool,
+}
+
+impl QueueState {
+    pub(super) fn inbox(&self) -> &[crate::agent_loop::Incoming] {
+        &self.inbox
+    }
+
+    pub(super) fn asks(&self) -> &[crate::agent_loop::AskedQuestion] {
+        &self.asks
+    }
+
+    pub(super) fn parked(&self) -> bool {
+        self.parked
+    }
+
+    fn accept(&mut self, item: crate::agent_loop::Incoming) {
+        self.inbox.push(item);
+    }
+
+    fn cross_off(&mut self, ids: &[String]) {
+        self.inbox.retain(|i| !ids.iter().any(|id| id == i.id()));
+    }
+
+    fn park_on(&mut self, asks: Vec<crate::agent_loop::AskedQuestion>) {
+        self.asks = asks;
+    }
+
+    fn clear_asks(&mut self) {
+        self.asks.clear();
+    }
+
+    fn park(&mut self) {
+        self.parked = true;
+    }
+
+    fn unpark(&mut self) {
+        self.parked = false;
+    }
+}
+
+impl PartState for QueueState {
+    /// Parked on questions, with nothing queued entitled to abandon them.
+    ///
+    /// Asked of this component's own rule — the same one that decides what a
+    /// turn may take — so "what may override a park" is stated once.
+    fn blocks(&self, _state: &AgentState) -> Option<Blocked> {
+        (!self.asks.is_empty()
+            && crate::agent_loop::queued_offer(&self.inbox, &self.asks).is_none())
+        .then_some(Blocked::Parked)
+    }
+
+    /// Nothing. A sub session that inherited an ask would park on a question
+    /// nobody put to it, and an inherited queue would answer messages that
+    /// were addressed to another session.
+    fn carried(&self) -> Option<Self> {
+        None
+    }
+}
+
+/// The component itself: what this agent has accepted, and how it becomes the
+/// next input.
 #[derive(Default)]
 pub(super) struct Queue {
     /// Whether this agent load has fired its start hook. Deliberately **not**
@@ -62,7 +145,7 @@ impl Queue {
         // it, so it is told. Before the work, not after: this is what moves a
         // session to `Running`. A message joining a turn already in flight is
         // not a new turn and says nothing new.
-        if !state.turn_in_flight {
+        if !state.turn_in_flight() {
             cx.runtime
                 .parent
                 .deliver(AgentOutcome::Started {
@@ -247,12 +330,12 @@ impl Component for Queue {
                 // Work in flight means the questions are already gone — a turn
                 // beginning is what clears them — so there is nothing to
                 // answer.
-                if cx.scratch.running.is_some() || cx.state.asks.is_empty() {
+                if cx.scratch.running.is_some() || cx.state.asks().is_empty() {
                     let _ = reply.send(Err(crate::agent_loop::AnswerError::NothingPending));
                     return CommandEffect::none();
                 }
                 let state = cx.state.clone();
-                match crate::agent_loop::answered_turn(&state.inbox, &state.asks, answers) {
+                match crate::agent_loop::answered_turn(state.inbox(), state.asks(), answers) {
                     Ok(turn) => {
                         let _ = reply.send(Ok(()));
                         CommandEffect::persist(self.begin_turn(turn, &state, cx).await)
@@ -274,10 +357,15 @@ impl Component for Queue {
     }
 
     /// What the queue holds, what a turn took from it, and what it parked on.
-    // The fallthrough is unreachable by construction: `component::fold` routes
-    // every variant to exactly one component, so an event added later fails to
-    // compile *there* — where it should be classified — rather than silently
-    // reaching the wrong fold here.
+    ///
+    /// Two of these arms move the *turn's* flag. They do it by calling that
+    /// component's own method, never by touching its fields: taking input is
+    /// what makes a turn owed, and parking is what ends one, so the decision
+    /// belongs here even though the flag does not.
+    // The fallthrough is unreachable by construction: `Components::apply`
+    // routes every variant to exactly one component, so an event added later
+    // fails to compile *there* — where it should be classified — rather than
+    // silently reaching the wrong fold here.
     #[allow(clippy::wildcard_enum_match_arm)]
     fn apply(state: &mut AgentState, event: AgentDomainEvent) {
         match event {
@@ -296,7 +384,14 @@ impl Component for Queue {
                         })),
                     );
                 }
-                state.inbox.push(item);
+                if let Some(part) = state.part_mut::<QueueState>() {
+                    part.accept(item);
+                }
+            }
+            AgentDomainEvent::Consumed { ids, .. } => {
+                if let Some(part) = state.part_mut::<QueueState>() {
+                    part.cross_off(&ids);
+                }
             }
             AgentDomainEvent::TurnBegan {
                 consumed,
@@ -308,7 +403,7 @@ impl Component for Queue {
                 // never shown as queued, so crossing them off would name ids
                 // nothing holds.
                 let visible = state
-                    .inbox
+                    .inbox()
                     .iter()
                     .filter(|i| i.is_user() && consumed.iter().any(|id| id == i.id()))
                     .map(|i| i.id().to_string())
@@ -320,17 +415,17 @@ impl Component for Queue {
                         answered: answered.clone(),
                     })),
                 );
-                state
-                    .inbox
-                    .retain(|i| !consumed.iter().any(|id| id == i.id()));
-                // A turn beginning ends the park either way: the questions were
-                // answered, or the user moved on and they were abandoned. Both
-                // record a result for every call before the turn starts.
-                state.asks.clear();
-                state.turn_in_flight = true;
-            }
-            AgentDomainEvent::Consumed { ids, .. } => {
-                state.inbox.retain(|i| !ids.iter().any(|id| id == i.id()));
+                if let Some(part) = state.part_mut::<QueueState>() {
+                    part.cross_off(&consumed);
+                    // A turn beginning ends the park either way: the questions
+                    // were answered, or the user moved on and they were
+                    // abandoned. Both record a result for every call before
+                    // the turn starts.
+                    part.clear_asks();
+                }
+                if let Some(part) = state.part_mut::<TurnState>() {
+                    part.began();
+                }
             }
             AgentDomainEvent::AskRecorded { asks, at_ms } => {
                 for ask in &asks {
@@ -342,26 +437,34 @@ impl Component for Queue {
                         })),
                     );
                 }
-                state.asks = asks;
+                if let Some(part) = state.part_mut::<QueueState>() {
+                    part.park_on(asks);
+                }
                 // Parking on a question is a turn boundary: the run is over and
                 // the answer starts the next one.
-                state.turn_in_flight = false;
+                if let Some(part) = state.part_mut::<TurnState>() {
+                    part.ended();
+                }
             }
             AgentDomainEvent::InputMessage { message } => {
                 // A new turn began — the agent is no longer parked.
-                state.parked = false;
+                if let Some(part) = state.part_mut::<QueueState>() {
+                    part.unpark();
+                }
                 let at_ms = message.created_at_ms;
                 state.push(at_ms, AgentLogBody::Llm(message));
             }
             AgentDomainEvent::Parked { .. } => {
-                state.parked = true;
-                state.turn_in_flight = false;
-                // Parking is a turn ending properly: the budget is for turns
-                // that end with nothing to wake them.
-                state.nudges = 0;
+                if let Some(part) = state.part_mut::<QueueState>() {
+                    part.park();
+                }
+                // Parking is a turn ending properly: the nudge budget is for
+                // turns that end with nothing to wake them.
+                if let Some(part) = state.part_mut::<TurnState>() {
+                    part.ended_properly();
+                }
             }
             _ => {}
         }
     }
-
 }

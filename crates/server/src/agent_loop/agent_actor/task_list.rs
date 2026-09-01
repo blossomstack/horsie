@@ -14,6 +14,35 @@ use horsie_agentcore::{AgentLogBody, LifecycleEvent, TaskListLifecycle};
 use horsie_models::now_ms;
 use serde_json::Value;
 
+/// The agent's plan, as the model last left it.
+///
+/// A newtype over the domain state so that "the durable part" and "the list"
+/// are the same thing without the domain module having to know it is one.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct TaskListPart(crate::agent_loop::task_list::TaskListState);
+
+impl TaskListPart {
+    pub(super) fn list(&self) -> &crate::agent_loop::task_list::TaskListState {
+        &self.0
+    }
+}
+
+impl PartState for TaskListPart {
+    /// The plan carries. A sub session branched to continue this work inherits
+    /// what the work *is*; losing it would make the branch start over.
+    fn carried(&self) -> Option<Self> {
+        Some(self.clone())
+    }
+}
+
+/// The empty list a state with no task-list part answers with.
+pub(super) fn empty_list() -> &'static crate::agent_loop::task_list::TaskListState {
+    static EMPTY: std::sync::OnceLock<crate::agent_loop::task_list::TaskListState> =
+        std::sync::OnceLock::new();
+    EMPTY.get_or_init(crate::agent_loop::task_list::TaskListState::default)
+}
+
 /// Execute the `task_list` tool: the rendered list it answers and the event
 /// that records the mutation.
 fn execute_task_list_tool(
@@ -23,7 +52,7 @@ fn execute_task_list_tool(
     _self_ref: ActorRef<AgentCommand>,
 ) -> Result<(Value, Vec<AgentDomainEvent>), horsie_agentcore::ToolCallError> {
     let action = crate::agent_loop::task_list::TaskListAction::from_input(input)?;
-    let mut next = folded.task_list.clone();
+    let mut next = folded.task_list().clone();
     match next.apply(action) {
         Ok(()) => {
             let text = next.render();
@@ -75,7 +104,9 @@ impl TaskLists {
                     tasks: snapshot.wire_tasks(),
                 })),
             );
-            state.task_list = snapshot;
+            if let Some(part) = state.part_mut::<TaskListPart>() {
+                part.0 = snapshot;
+            }
         }
     }
 }

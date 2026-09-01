@@ -48,26 +48,29 @@ pub(super) mod testing;
 mod timers;
 mod turn;
 mod types;
+mod usage;
 
 pub use reads::{ReadOutcome, ReplayWindow};
 pub use state::{AgentState, UsageTotal, hook_entry, hook_entry_id};
 pub use types::*;
 
 use compaction::{COMPACT_AT_PERCENT, COMPACT_RETAIN_PERCENT, Compaction};
+use usage::UsageState;
+use boundary::Blocked;
 use component::{
-    Component, Components, Cx, Scratch, WorkKind, answer_tool_call, component_tool_specs,
-    is_component_tool,
+    Component, ComponentState, Components, Cx, Part, PartState, Scratch, WorkKind,
+    answer_tool_call, component_tool_specs, is_component_tool,
 };
 use log::LogWrites;
 use provision::Provision;
-use queue::Queue;
+use queue::{Queue, QueueState};
 use reads::Reads;
 use repair::{missing_tool_results, parked_call_ids, repair_unanswered_tool_calls};
 use seed::Seeding;
 use state::new_message_id;
-use task_list::TaskLists;
-use timers::Timers;
-use turn::Turn;
+use task_list::{TaskListPart, TaskLists};
+use timers::{TimerState, Timers};
+use turn::{Turn, TurnState};
 
 use crate::agent_loop::context::AgentRuntimeContext;
 use async_trait::async_trait;

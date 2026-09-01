@@ -31,13 +31,13 @@ use std::collections::BTreeMap;
 pub fn render_carried_state(state: &AgentState) -> String {
     let mut sections: Vec<String> = Vec::new();
 
-    if !state.task_list.tasks().is_empty() {
-        sections.push(state.task_list.render());
+    if !state.task_list().tasks().is_empty() {
+        sections.push(state.task_list().render());
     }
 
-    if !state.timers.is_empty() {
+    if !state.timers().is_empty() {
         let mut block = String::from("Armed timers:");
-        for t in &state.timers {
+        for t in state.timers() {
             block.push_str(&format!(
                 "\n- {} ({}) fires at {}ms: {}",
                 t.id,
@@ -53,9 +53,9 @@ pub fn render_carried_state(state: &AgentState) -> String {
         sections.push(block);
     }
 
-    if !state.asks.is_empty() {
+    if !state.asks().is_empty() {
         let mut block = String::from("Questions you are waiting on an answer to:");
-        for a in &state.asks {
+        for a in state.asks() {
             block.push_str(&format!(
                 "\n- [{}] {}",
                 a.tool_call_id.as_deref().unwrap_or("unknown call"),
@@ -99,7 +99,7 @@ pub fn has_outstanding_children(state: &AgentState) -> bool {
 /// is where the fact lives: the newest entry for an id is its current status.
 fn running_children(state: &AgentState) -> Vec<(String, String)> {
     let mut latest: BTreeMap<String, (String, String)> = BTreeMap::new();
-    for entry in &state.log {
+    for entry in state.log() {
         if let AgentLogBody::Lifecycle(LifecycleEvent::SubAgent(s)) = &entry.body {
             latest.insert(s.id.clone(), (s.title.clone(), s.status.clone()));
         }

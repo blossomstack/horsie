@@ -25,6 +25,7 @@
 use super::*;
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, CommandEffect};
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 /// What an agent can be doing off its own mailbox — one thing at a time.
@@ -167,6 +168,120 @@ impl Cx<'_> {
         self.tell(AgentCommand::Core(CoreCommand::Advance)).await;
     }
 }
+
+/// One component's durable state, tagged by the component that owns it.
+///
+/// A list rather than a set of named fields on [`AgentState`]: adding a
+/// component adds a variant here and a file, and touches nothing else. The
+/// payload types are opaque — their fields are private to the file that owns
+/// them, so nothing outside can read one without a method that file chose to
+/// offer.
+///
+/// Serialized with an internal `kind` tag, because a snapshot outlives the
+/// code that wrote it and positions in a list do not survive a component being
+/// removed.
+///
+/// Not every component has one. Provisioning, compaction, seeding and the read
+/// paths keep nothing durable of their own — a compaction boundary is a
+/// transcript entry, not a field — and a component with no state simply has no
+/// variant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum ComponentState {
+    Queue(QueueState),
+    Turn(TurnState),
+    Usage(UsageState),
+    Timers(TimerState),
+    TaskList(TaskListPart),
+}
+
+/// What every component's state can be asked, by code that does not know which
+/// one it is holding.
+///
+/// Both questions are polls over the whole list, and both are things a
+/// component added later must be able to answer without anyone editing a
+/// central rule. The defaults are the common case: most state neither blocks
+/// anything nor survives a branch.
+pub(super) trait PartState: Sized {
+    /// Why this part says the agent must not act yet. Vetoes commute — the
+    /// order the parts are asked in cannot matter — which is what makes this a
+    /// poll rather than another ordered decision.
+    fn blocks(&self, _state: &AgentState) -> Option<Blocked> {
+        None
+    }
+
+    /// What this part contributes to a sub session branched from here, if
+    /// anything. Everything that is *about the session* carries; everything in
+    /// flight, or that is a bill, does not.
+    fn carried(&self) -> Option<Self> {
+        None
+    }
+}
+
+/// Reaching one component's state out of the list, typed.
+///
+/// Implemented centrally, once per variant, because the implementation only
+/// names the variant — never a field — so it cannot become a way in.
+pub(super) trait Part: Sized {
+    fn get(parts: &[ComponentState]) -> Option<&Self>;
+    fn get_mut(parts: &mut Vec<ComponentState>) -> Option<&mut Self>;
+}
+
+/// The `Part` implementations and the two polls, generated from one list so a
+/// variant added above cannot be forgotten in any of them.
+macro_rules! parts {
+    ($($variant:ident($ty:ty)),+ $(,)?) => {
+        impl ComponentState {
+            /// Why this part says the agent must not act yet.
+            pub(super) fn blocks(&self, state: &AgentState) -> Option<Blocked> {
+                match self {
+                    $(Self::$variant(part) => part.blocks(state),)+
+                }
+            }
+
+            /// This part as a sub session inherits it.
+            pub(super) fn carried(&self) -> Option<Self> {
+                match self {
+                    $(Self::$variant(part) => part.carried().map(Self::$variant),)+
+                }
+            }
+        }
+
+        /// One empty state per component, in registry order.
+        pub(super) fn default_parts() -> Vec<ComponentState> {
+            vec![$(ComponentState::$variant(<$ty>::default()),)+]
+        }
+
+        $(impl Part for $ty {
+            fn get(parts: &[ComponentState]) -> Option<&Self> {
+                parts.iter().find_map(|p| match p {
+                    ComponentState::$variant(part) => Some(part),
+                    // `if let` in `find_map` shape: every other variant is
+                    // some other component's, which is the whole point.
+                    _other => None,
+                })
+            }
+
+            fn get_mut(parts: &mut Vec<ComponentState>) -> Option<&mut Self> {
+                if !parts.iter().any(|p| matches!(p, ComponentState::$variant(_))) {
+                    parts.push(ComponentState::$variant(<$ty>::default()));
+                }
+                parts.iter_mut().find_map(|p| match p {
+                    ComponentState::$variant(part) => Some(part),
+                    _other => None,
+                })
+            }
+        })+
+    };
+}
+
+parts!(
+    Queue(QueueState),
+    Turn(TurnState),
+    Usage(UsageState),
+    Timers(TimerState),
+    TaskList(TaskListPart),
+);
 
 /// The component registry: every component an agent runs, held and named in
 /// exactly one place.

@@ -33,7 +33,7 @@ pub(super) const INTERRUPTED_RESULT: &str = "interrupted, no result was recorded
 /// are exactly the dangling calls that are not wreckage.
 pub(super) fn parked_call_ids(state: &AgentState) -> Vec<String> {
     state
-        .asks
+        .asks()
         .iter()
         .filter_map(|a| a.tool_call_id.clone())
         .collect()

@@ -83,7 +83,7 @@ impl AgentState {
             .map(|(at_ms, e)| boundary_message(e, at_ms))
             .into_iter()
             .chain(
-                self.log
+                self.log()
                     .iter()
                     .filter(|e| e.seq >= from_seq)
                     .filter_map(|e| match &e.body {
@@ -114,7 +114,7 @@ impl AgentState {
     /// the first one.
     #[must_use]
     pub fn last_boundary(&self) -> Option<(u64, &CompactionEntry)> {
-        self.log.iter().rev().find_map(|e| match &e.body {
+        self.log().iter().rev().find_map(|e| match &e.body {
             AgentLogBody::Compaction(c) => Some((e.at_ms, c)),
             AgentLogBody::Llm(_) | AgentLogBody::Hook(_) | AgentLogBody::Lifecycle(_) => None,
         })
@@ -134,12 +134,12 @@ impl AgentState {
     /// seq and silently resurrect or drop messages around it.
     #[must_use]
     pub(super) fn resolve_boundary(&self, retained_from_message_id: Option<&str>) -> (u64, u64) {
-        let retain_nothing = (self.tail_seq().unwrap_or(0), self.next_seq);
+        let retain_nothing = (self.tail_seq().unwrap_or(0), self.next_seq());
         let Some(id) = retained_from_message_id else {
             return retain_nothing;
         };
         let Some(idx) = self
-            .log
+            .log()
             .iter()
             .position(|e| e.body.id().is_some_and(|got| got == id))
         else {
@@ -150,13 +150,13 @@ impl AgentState {
             );
             return retain_nothing;
         };
-        let retained_from_seq = self.log[idx].seq;
+        let retained_from_seq = self.log()[idx].seq;
         // The entry immediately before it in the log, read by position rather
         // than as `seq - 1`: the log is contiguous today, and this stays right
         // if it is ever front-trimmed.
         let covers_through_seq = idx
             .checked_sub(1)
-            .map_or(retained_from_seq, |prev| self.log[prev].seq);
+            .map_or(retained_from_seq, |prev| self.log()[prev].seq);
         (covers_through_seq, retained_from_seq)
     }
 
@@ -168,7 +168,7 @@ impl AgentState {
     /// on these.
     #[must_use]
     pub fn boundary_seqs(&self) -> Vec<u64> {
-        self.log
+        self.log()
             .iter()
             .filter(|e| matches!(e.body, AgentLogBody::Compaction(_)))
             .map(|e| e.seq)
@@ -193,7 +193,7 @@ impl Compaction {
     pub(super) fn due(&self, cx: &Cx<'_>) -> bool {
         cx.scratch.ctx.as_ref().is_some_and(|c| {
             c.budget
-                .is_some_and(|b| cx.state.context_tokens >= b.trigger_tokens())
+                .is_some_and(|b| cx.state.context_tokens() >= b.trigger_tokens())
         })
     }
 
@@ -472,10 +472,11 @@ impl Compaction {
             at_ms,
         } = event
         {
-            // The summarising call's cost, aggregated where every other cost
-            // is: nothing routes usage through another component.
-            if let Some(usage) = &usage {
-                state.usage_total.add(usage);
+            // The summarising call's cost, banked where every other cost is:
+            // nothing routes usage through another component, and nothing but
+            // the usage part knows how a cost is added.
+            if let (Some(usage), Some(part)) = (&usage, state.part_mut::<UsageState>()) {
+                part.bank(usage);
             }
             let (covers_through_seq, retained_from_seq) =
                 state.resolve_boundary(retained_from_message_id.as_deref());
@@ -493,7 +494,9 @@ impl Compaction {
             // reads, and the whole point of a compaction is that this
             // number just dropped. Leaving it at the pre-compaction size
             // would make the very next turn compact again immediately.
-            state.context_tokens = tokens_after;
+            if let Some(part) = state.part_mut::<UsageState>() {
+                part.context_is(tokens_after);
+            }
             state.push(at_ms, AgentLogBody::Compaction(entry));
         }
     }

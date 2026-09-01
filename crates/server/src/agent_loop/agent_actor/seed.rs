@@ -16,54 +16,6 @@ use horsie_actor::{CommandEffect, ReplyTo};
 use horsie_agentcore::AgentLogBody;
 use horsie_models::now_ms;
 
-impl AgentState {
-    /// Append `body` at the next sequence number.
-    ///
-    /// The single place a `seq` is handed out, so the fold cannot produce a gap
-    /// or a duplicate by accident.
-    /// This session as a sub session's starting point.
-    ///
-    /// Everything that is *about the session* carries; everything that is in
-    /// flight, or is a bill, does not. A sub session that inherited an ask
-    /// would park on a question nobody put to it; one that inherited
-    /// `turn_in_flight` would be reported interrupted before it had ever run;
-    /// one that inherited `usage_total` would make the session's aggregate
-    /// count the same tokens twice, once under each session.
-    ///
-    /// Cut at `at_seq` — the branch point, read when the sub session was asked
-    /// for. Not at the log's current end: journaling the sub session writes a
-    /// `Branched` entry onto this very log, and a source that is mid-turn goes
-    /// on appending while the seed is being built. Copying to the end handed
-    /// the sub session its own creation marker and whatever else had landed
-    /// since.
-    ///
-    /// `next_seq` becomes `at_seq` for the same reason: the sub session's own
-    /// entries number on from where the copied ones stop, so every cursor into
-    /// the copied log still resolves and nothing collides.
-    #[must_use]
-    pub fn snapshot_at(&self, at_seq: u64) -> Self {
-        Self {
-            log: self
-                .log
-                .iter()
-                .filter(|e| e.seq < at_seq)
-                .cloned()
-                .collect(),
-            next_seq: at_seq,
-            context_tokens: self.context_tokens,
-            task_list: self.task_list.clone(),
-            inbox: Vec::new(),
-            asks: Vec::new(),
-            nudges: 0,
-            timers: Vec::new(),
-            parked: false,
-            turn_in_flight: false,
-            usage_total: UsageTotal::default(),
-            last_turn_usage: None,
-        }
-    }
-}
-
 /// Being a sub session, and being branched from.
 pub(super) struct Seeding;
 
@@ -98,7 +50,7 @@ impl Component for Seeding {
                 // message: the other two modes leave the queued brief as the
                 // whole of this write's trace, and a brief that is not a
                 // person's message would not even log a `MessageQueued`.
-                if !state.log.is_empty() || !state.inbox.is_empty() {
+                if !state.log().is_empty() || !state.inbox().is_empty() {
                     let _ = reply.send(Ok(()));
                     return CommandEffect::none();
                 }
@@ -218,10 +170,10 @@ impl Seeding {
     #[allow(clippy::wildcard_enum_match_arm)]
     pub(super) fn apply(state: &mut AgentState, event: AgentDomainEvent) {
         if let AgentDomainEvent::SeedSummaryTaken { usage, .. } = &event {
-            // The summarising call's cost, aggregated where every other cost
-            // is. Nothing else about this agent changed.
-            if let Some(usage) = usage {
-                state.usage_total.add(usage);
+            // The summarising call's cost, banked where every other cost is.
+            // Nothing else about this agent changed.
+            if let (Some(usage), Some(part)) = (usage, state.part_mut::<UsageState>()) {
+                part.bank(usage);
             }
             return;
         }

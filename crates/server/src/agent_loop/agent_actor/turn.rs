@@ -39,6 +39,88 @@ const MAX_ITERATIONS: u32 = 100;
 const STUCK_THRESHOLD: usize = 5;
 const NUDGE_THRESHOLD: usize = 3;
 
+/// What survives a turn: whether one is owed a provider call, and how many
+/// times in a row this agent has ended one without the result it owed.
+///
+/// Private fields, so nothing else can decide a turn is over. Everything else
+/// a turn produces is either a transcript entry or a number the usage part
+/// keeps.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct TurnState {
+    /// True between a turn beginning and that turn reaching a boundary.
+    ///
+    /// Durable because only a crash can leave one open: every boundary an
+    /// agent reaches under its own power journals something, so a fold that
+    /// still reads `true` at recovery describes a turn no process is running
+    /// any more. That is the whole of how an interruption is detected, and it
+    /// is detected here because this is the only place the fact exists.
+    in_flight: bool,
+    /// Consecutive turns this agent ended without the result it owed.
+    ///
+    /// Durable, and reset by any turn that ends properly: it is the budget
+    /// behind the nudge, and a process that dies mid-nudge must not hand the
+    /// model a fresh one every restart.
+    nudges: u32,
+}
+
+impl TurnState {
+    pub(super) fn in_flight(&self) -> bool {
+        self.in_flight
+    }
+
+    pub(super) fn nudges(&self) -> u32 {
+        self.nudges
+    }
+
+    /// A turn began. Told by the queue, which is what takes the input that
+    /// makes the agent owe a call — the flag is this component's, the decision
+    /// is not.
+    pub(super) fn began(&mut self) {
+        self.in_flight = true;
+    }
+
+    /// A turn reached a boundary, however it got there.
+    pub(super) fn ended(&mut self) {
+        self.in_flight = false;
+    }
+
+    /// A turn ended the way it should have: the nudge budget is spent on
+    /// turns that end with nothing to wake them, and this was not one.
+    pub(super) fn ended_properly(&mut self) {
+        self.in_flight = false;
+        self.nudges = 0;
+    }
+
+    /// The model was told to try again.
+    pub(super) fn nudged(&mut self) {
+        self.in_flight = false;
+        self.nudges = self.nudges.saturating_add(1);
+    }
+}
+
+impl PartState for TurnState {
+    /// A call the model made that nothing has answered.
+    ///
+    /// Only while a call is owed. A turn that *ended* on a dangling call —
+    /// `submit_result` never gets a result — is history, and the prompt builder
+    /// repairs it; treating it as outstanding would leave the agent unable to
+    /// ever start another turn.
+    fn blocks(&self, state: &AgentState) -> Option<Blocked> {
+        if !self.in_flight {
+            return None;
+        }
+        let open = state.open_tool_calls();
+        (!open.is_empty()).then_some(Blocked::ToolCalls(open))
+    }
+
+    /// Nothing: a sub session that inherited `in_flight` would be reported
+    /// interrupted before it had ever run.
+    fn carried(&self) -> Option<Self> {
+        None
+    }
+}
+
 /// One turn's bookkeeping, all in memory on purpose: a crash mid-turn is an
 /// interrupted turn, and recovery already treats it as one.
 #[derive(Default)]
@@ -153,7 +235,7 @@ impl Turn {
             attempt: 0,
             fingerprints: VecDeque::new(),
             usage: Usage::without_cache(0, 0),
-            context_tokens: cx.state.context_tokens,
+            context_tokens: cx.state.context_tokens(),
             stopped: Vec::new(),
             dispatched: Vec::new(),
         })
@@ -638,6 +720,10 @@ impl Component for Turn {
     }
 
     /// What a run wrote, and what it cost.
+    ///
+    /// The cost goes to the usage part, through the one method that adds one:
+    /// this component holds no numbers of its own, and cannot reach that
+    /// part's fields.
     // The fallthrough is unreachable by construction: `Components::apply`
     // routes every variant to exactly one component, so an event added later
     // fails to compile *there* rather than silently reaching the wrong fold.
@@ -669,24 +755,34 @@ impl Component for Turn {
                 context_tokens,
                 ..
             } => {
-                state.usage_total.add(&usage);
-                state.context_tokens = context_tokens;
-                state.last_turn_usage = Some(usage);
-                state.turn_in_flight = false;
+                if let Some(part) = state.part_mut::<UsageState>() {
+                    part.turn_ended(usage, context_tokens, true);
+                }
+                if let Some(part) = state.part_mut::<TurnState>() {
+                    part.ended();
+                }
             }
             AgentDomainEvent::RunAborted {
                 usage,
                 context_tokens,
                 ..
             } => {
-                state.usage_total.add(&usage);
-                state.context_tokens = context_tokens;
-                state.turn_in_flight = false;
+                if let Some(part) = state.part_mut::<UsageState>() {
+                    part.turn_ended(usage, context_tokens, false);
+                }
+                if let Some(part) = state.part_mut::<TurnState>() {
+                    part.ended();
+                }
             }
-            AgentDomainEvent::RunCancelled { .. } => state.turn_in_flight = false,
+            AgentDomainEvent::RunCancelled { .. } => {
+                if let Some(part) = state.part_mut::<TurnState>() {
+                    part.ended();
+                }
+            }
             AgentDomainEvent::Nudged { .. } => {
-                state.nudges = state.nudges.saturating_add(1);
-                state.turn_in_flight = false;
+                if let Some(part) = state.part_mut::<TurnState>() {
+                    part.nudged();
+                }
             }
             _ => {}
         }
@@ -712,7 +808,7 @@ impl Component for Turn {
         // Tell the owner, from here rather than from a command: this hook runs
         // before the first live command, so the report is ordered ahead of
         // anything queued while the actor was loading.
-        if cx.state.turn_in_flight {
+        if cx.state.turn_in_flight() {
             cx.runtime
                 .parent
                 .deliver(AgentOutcome::Interrupted {
@@ -727,13 +823,13 @@ impl Component for Turn {
             // is the continuation. An empty history means nothing ran yet, and
             // a parked agent is waiting for a timer — neither is an interrupted
             // turn.
-            if !cx.params.interactive && !cx.state.parked && !cx.state.log.is_empty() {
+            if !cx.params.interactive && !cx.state.parked() && !cx.state.log().is_empty() {
                 // Queued rather than journaled as input directly: it is
                 // something addressed to this agent, and it becomes a turn the
                 // same way everything else addressed to it does.
                 events.push(AgentDomainEvent::Received {
                     item: crate::agent_loop::Incoming::Continue {
-                        id: format!("interrupted:{}", cx.state.next_seq),
+                        id: format!("interrupted:{}", cx.state.next_seq()),
                         reason: "continue the interrupted task".to_string(),
                     },
                     at_ms: now_ms(),
@@ -840,8 +936,8 @@ impl Turn {
                 parent
                     .deliver(AgentOutcome::UsageRecorded {
                         agent,
-                        usage_total: state.usage_total,
-                        context_tokens: state.context_tokens,
+                        usage_total: state.usage_total(),
+                        context_tokens: state.context_tokens(),
                     })
                     .await;
                 if cx.params.requires_result {
@@ -856,10 +952,10 @@ impl Turn {
                 // finishing is what wakes it, and its next conclusion is the
                 // report.
                 if cx.params.park_on_outstanding_work {
-                    if crate::agent_loop::queued_offer(&state.inbox, &state.asks).is_some() {
+                    if crate::agent_loop::queued_offer(state.inbox(), state.asks()).is_some() {
                         return CommandEffect::none();
                     }
-                    if !state.timers.is_empty()
+                    if !state.timers().is_empty()
                         || crate::agent_loop::carried_state::has_outstanding_children(state)
                     {
                         parent.deliver(AgentOutcome::Parked { agent }).await;
@@ -882,8 +978,8 @@ impl Turn {
                         parent
                             .deliver(AgentOutcome::UsageRecorded {
                                 agent,
-                                usage_total: state.usage_total,
-                                context_tokens: state.context_tokens,
+                                usage_total: state.usage_total(),
+                                context_tokens: state.context_tokens(),
                             })
                             .await;
                         parent
@@ -897,9 +993,9 @@ impl Turn {
                         // could not have been warned about at the tool
                         // boundary, where its own timers are invisible.
                         let mut events = Vec::new();
-                        if !state.timers.is_empty() {
+                        if !state.timers().is_empty() {
                             events.push(AgentDomainEvent::TimerCancelled {
-                                ids: state.timers.iter().map(|t| t.id.clone()).collect(),
+                                ids: state.timers().iter().map(|t| t.id.clone()).collect(),
                                 at_ms: now_ms(),
                             });
                         }
@@ -909,8 +1005,8 @@ impl Turn {
                         parent
                             .deliver(AgentOutcome::UsageRecorded {
                                 agent,
-                                usage_total: state.usage_total,
-                                context_tokens: state.context_tokens,
+                                usage_total: state.usage_total(),
+                                context_tokens: state.context_tokens(),
                             })
                             .await;
                         parent
@@ -935,8 +1031,8 @@ impl Turn {
                         parent
                             .deliver(AgentOutcome::UsageRecorded {
                                 agent,
-                                usage_total: state.usage_total,
-                                context_tokens: state.context_tokens,
+                                usage_total: state.usage_total(),
+                                context_tokens: state.context_tokens(),
                             })
                             .await;
                         self.correct_contradiction(calls, state)
@@ -950,8 +1046,8 @@ impl Turn {
                 parent
                     .deliver(AgentOutcome::UsageRecorded {
                         agent,
-                        usage_total: state.usage_total,
-                        context_tokens: state.context_tokens,
+                        usage_total: state.usage_total(),
+                        context_tokens: state.context_tokens(),
                     })
                     .await;
                 // A cancelled tool call has no result and never will get one.
@@ -981,8 +1077,8 @@ impl Turn {
                 parent
                     .deliver(AgentOutcome::UsageRecorded {
                         agent,
-                        usage_total: state.usage_total,
-                        context_tokens: state.context_tokens,
+                        usage_total: state.usage_total(),
+                        context_tokens: state.context_tokens(),
                     })
                     .await;
                 parent
@@ -1083,24 +1179,24 @@ impl Turn {
     ) -> CommandEffect<AgentDomainEvent> {
         // The queue first: a subagent report that landed while the turn was
         // ending starts the next turn, and nothing needs classifying at all.
-        if crate::agent_loop::queued_offer(&state.inbox, &state.asks).is_some() {
+        if crate::agent_loop::queued_offer(state.inbox(), state.asks()).is_some() {
             return CommandEffect::none();
         }
-        if !state.timers.is_empty()
+        if !state.timers().is_empty()
             || crate::agent_loop::carried_state::has_outstanding_children(state)
         {
             parent.deliver(AgentOutcome::Parked { agent }).await;
             let parked = AgentDomainEvent::Parked { at_ms: now_ms() };
             return CommandEffect::persist(vec![parked]).and_snapshot();
         }
-        if state.nudges >= MAX_RESULT_NUDGES {
+        if state.nudges() >= MAX_RESULT_NUDGES {
             parent
                 .deliver(AgentOutcome::Failed {
                     agent,
                     error: format!(
                         "the step ended {} turns without calling `{SUBMIT_RESULT_TOOL}`, \
                          and nothing would wake it",
-                        state.nudges + 1
+                        state.nudges() + 1
                     ),
                     recoverable: false,
                     terminal: false,
@@ -1112,14 +1208,14 @@ impl Turn {
         // emit nothing else. Not the first: a model that realises it is *not*
         // finished must still be able to go back to work, and a forcing would
         // forbid that.
-        if state.nudges + 1 >= MAX_RESULT_NUDGES {
+        if state.nudges() + 1 >= MAX_RESULT_NUDGES {
             cx.scratch.pending_tool_choice = Some(horsie_agentcore::ToolChoice::Required(
                 SUBMIT_RESULT_TOOL.to_string(),
             ));
         }
         let nudge = AgentDomainEvent::Received {
             item: crate::agent_loop::Incoming::User {
-                id: format!("nudge-result:{}", state.nudges),
+                id: format!("nudge-result:{}", state.nudges()),
                 text: format!(
                     "Your turn ended without calling `{SUBMIT_RESULT_TOOL}`, and nothing will \
                      wake you — you have no armed timers and no delegated work still running. \
@@ -1172,12 +1268,12 @@ impl Turn {
         let nudged = AgentDomainEvent::Nudged { at_ms };
         events.push(nudged);
         let folded = Components::apply_all(state, &events);
-        if folded.nudges > MAX_RESULT_NUDGES {
+        if folded.nudges() > MAX_RESULT_NUDGES {
             return CommandEffect::persist(events);
         }
         let resume = AgentDomainEvent::Received {
             item: crate::agent_loop::Incoming::Continue {
-                id: format!("contradiction:{}", folded.nudges),
+                id: format!("contradiction:{}", folded.nudges()),
                 reason,
             },
             at_ms,

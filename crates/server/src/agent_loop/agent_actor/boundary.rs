@@ -63,7 +63,7 @@ impl Components {
             return CommandEffect::none();
         }
         // 3. Whatever the queue is offering, in its order of precedence.
-        match crate::agent_loop::queued_offer(&cx.state.inbox, &cx.state.asks) {
+        match crate::agent_loop::queued_offer(cx.state.inbox(), cx.state.asks()) {
             Some(crate::agent_loop::Offer::Summary {
                 consumed,
                 sub_sessions,
@@ -86,7 +86,7 @@ impl Components {
                         consumed,
                         manual: true,
                         instructions,
-                        tokens_before: cx.state.context_tokens,
+                        tokens_before: cx.state.context_tokens(),
                     },
                     cx,
                 );
@@ -103,7 +103,7 @@ impl Components {
         // 4. Nothing queued. Either a turn is part-way through — the model
         //    called tools, they answered, and it is owed another call — or the
         //    agent is idle and this costs one branch.
-        if !cx.state.turn_in_flight {
+        if !cx.state.turn_in_flight() {
             return CommandEffect::none();
         }
         if self.needs_contexts(cx) {
@@ -119,7 +119,7 @@ impl Components {
                     consumed: Vec::new(),
                     manual: false,
                     instructions: None,
-                    tokens_before: cx.state.context_tokens,
+                    tokens_before: cx.state.context_tokens(),
                 },
                 cx,
             );
@@ -142,31 +142,13 @@ impl Components {
         true
     }
 
-    /// Every component's veto on doing anything next.
+    /// Every part's veto, asked of each in turn.
+    ///
+    /// A poll, not a rule: this code does not know what any of them will say,
+    /// or how many there are. A component added later gets a say by
+    /// implementing one method on its own state.
     fn blocked(&self, cx: &Cx<'_>) -> Option<Blocked> {
-        // The turn: a call the model made and nothing has answered. Derived
-        // from the log rather than counted in memory, so a crash mid-batch and
-        // a live batch look identical.
-        //
-        // Only while a call is owed. A turn that *ended* on a dangling call —
-        // `submit_result` never gets a result — is history, and the prompt
-        // builder repairs it; treating it as outstanding would leave the agent
-        // unable to ever start another turn.
-        if cx.state.turn_in_flight {
-            let open = cx.state.open_tool_calls();
-            if !open.is_empty() {
-                return Some(Blocked::ToolCalls(open));
-            }
-        }
-        // The queue: parked on questions, with nothing queued entitled to
-        // abandon them. Asked of the queue's own rule rather than re-derived
-        // here, so "what may override a park" is stated once.
-        if !cx.state.asks.is_empty()
-            && crate::agent_loop::queued_offer(&cx.state.inbox, &cx.state.asks).is_none()
-        {
-            return Some(Blocked::Parked);
-        }
-        None
+        cx.state.vetoes().next()
     }
 
     /// Stop whatever is in flight and answer the canceller.
@@ -188,7 +170,7 @@ impl Components {
         // repaired where they belong — under the message that made them.
         // Anything else in flight simply stops: a cancelled compaction leaves
         // the history it was going to fold exactly as it was.
-        if !cx.state.turn_in_flight {
+        if !cx.state.turn_in_flight() {
             return CommandEffect::none();
         }
         self.turn.cancelled(cx).await

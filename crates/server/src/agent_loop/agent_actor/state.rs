@@ -1,112 +1,169 @@
-//! The transcript and the running totals: what folding an agent's events
-//! leaves behind.
+//! The transcript, and every component's own durable state.
 //!
-//! [`AgentState`] is a durability contract — it is snapshotted, so a field that
-//! fails to deserialize takes down `recover()` for every existing session. Add
-//! optional fields; never rename or repurpose one.
+//! [`AgentState`] holds two things and no third. The [`Transcript`] is shared
+//! by construction — it is the one ordered thing a client reads, and nearly
+//! every component appends to it. Everything else belongs to exactly one
+//! component and lives behind [`ComponentState`], a list rather than a set of
+//! named fields so that adding a component adds an entry rather than editing
+//! this file.
+//!
+//! A component reaches its own state with [`AgentState::part`], which is typed:
+//! there is no downcast that can fail. It reaches nobody else's *fields* at
+//! all — each state's fields are private to the file that owns them, so the
+//! compiler, not a convention, is what stops one component reading another's
+//! internals. What others may know is whatever methods that file chooses to
+//! offer, and [`AgentState`]'s own accessors are those methods forwarded.
+//!
+//! This is a durability contract: it is snapshotted, and the parts are tagged
+//! by `kind`. A tag this build does not know is skipped with a warning rather
+//! than failing the load, so removing a component cannot make an old snapshot
+//! unreadable.
 
 use super::*;
 use horsie_agentcore::{AgentLogBody, AgentLogEntry, Usage};
 use serde::{Deserialize, Serialize};
 
-/// The session history reconstructed by folding [`AgentDomainEvent`]s, plus
-/// any timers the agent has armed and whether it is currently parked.
+/// The transcript and the component states folding an agent's events leaves
+/// behind.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentState {
+    /// Everything the user sees, whether or not the model saw it. Shared: a
+    /// timer, a hook, a tool result and a task-list change all land here, in
+    /// one order.
+    pub(super) transcript: Transcript,
+    /// One entry per component that has any durable state of its own.
+    #[serde(deserialize_with = "known_parts")]
+    parts: Vec<ComponentState>,
+}
+
+impl Default for AgentState {
+    fn default() -> Self {
+        Self {
+            transcript: Transcript::default(),
+            parts: component::default_parts(),
+        }
+    }
+}
+
+/// Skip parts this build has no component for, rather than failing the load.
+///
+/// A snapshot outlives the code that wrote it. A removed component leaves its
+/// tag behind in every snapshot ever taken, and refusing to load them would
+/// make deleting a component a migration; skipping makes it a deletion. The
+/// warning is what stops that being silent.
+fn known_parts<'de, D>(deserializer: D) -> Result<Vec<ComponentState>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|value| match serde_json::from_value(value) {
+            Ok(part) => Some(part),
+            Err(e) => {
+                tracing::warn!(error = %e, "skipping a component state this build cannot read");
+                None
+            }
+        })
+        .collect())
+}
+
+/// The one thing every component writes to: the ordered log, and the next
+/// sequence number to hand out.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
-pub struct AgentState {
-    /// The transcript: everything the user sees, whether or not the model saw
-    /// it. Read [`Self::prompt_messages`] to get what goes to a provider — this
-    /// field deliberately cannot be handed to one.
-    ///
-    /// Every field here carries `#[serde(default)]`, including this one: state
-    /// is snapshotted, so it is a durability contract. A field that fails to
-    /// deserialize takes down `recover()` for every existing session — the way
-    /// renamed event variants did on 2026-08-02. Add optional fields; never
-    /// rename or repurpose one.
-    ///
-    /// This one has been renamed twice — from `messages: Vec<Message>` when the
+pub struct Transcript {
+    /// Renamed twice in its life — from `messages: Vec<Message>` when the
     /// element type became a union, and from `history: Vec<HistoryEntry>` when
-    /// entries gained a sequence number. Renaming rather than retyping in place
-    /// is deliberate both times: serde ignores the now-unknown key and defaults
-    /// this to empty, so an old snapshot yields an empty transcript instead of
-    /// failing `recover()` and taking the supervisor down with it.
-    #[serde(default)]
-    pub log: Vec<AgentLogEntry>,
-    /// The next `seq` to hand out.
-    ///
+    /// entries gained a sequence number — because serde ignores a now-unknown
+    /// key, so a rename degrades to an empty transcript rather than failing
+    /// `recover()` for every session.
+    log: Vec<AgentLogEntry>,
     /// Deterministic across replay for the same reason `hook:{n}` is: the fold
-    /// is deterministic, so re-running it produces the same numbers. Held in
-    /// state rather than derived from `log.len()` so that front-trimming the
-    /// log for context management stays possible without renumbering.
-    #[serde(default)]
-    pub next_seq: u64,
-    /// Accepted-but-undelivered things addressed to this agent, oldest first.
+    /// is deterministic, so re-running it produces the same numbers. Held here
+    /// rather than derived from `log.len()` so front-trimming stays possible
+    /// without renumbering.
+    next_seq: u64,
+}
+
+impl Transcript {
+    /// Every entry, oldest first.
+    #[must_use]
+    pub fn entries(&self) -> &[AgentLogEntry] {
+        &self.log
+    }
+
+    /// The next sequence number this transcript will hand out.
+    #[must_use]
+    pub fn next_seq(&self) -> u64 {
+        self.next_seq
+    }
+
+    /// The seq of the newest entry, or `None` for an empty transcript. The
+    /// tail a cursor is compared against.
+    #[must_use]
+    pub fn tail_seq(&self) -> Option<u64> {
+        self.log.last().map(|e| e.seq)
+    }
+
+    /// Append `body` at the next sequence number.
     ///
-    /// The queue lives here rather than on the session because a message is
-    /// addressed to an *agent*: once one can name a subagent or a workflow
-    /// step, a session-level queue has nowhere to put it. Durable for the same
-    /// reason timers are — an accepted message is a promise, and a crash must
-    /// not forget it.
-    #[serde(default)]
-    pub inbox: Vec<crate::agent_loop::Incoming>,
-    /// Every question this agent is parked on, oldest first. A turn may ask
-    /// several at once, and the run cannot resume until all of them have a
-    /// result.
-    #[serde(default)]
-    pub asks: Vec<crate::agent_loop::AskedQuestion>,
-    /// Active timers — durable so they re-arm on recovery and back
-    /// `list`/`cancel`.
-    #[serde(default)]
-    pub timers: Vec<crate::agent_loop::timers::TimerRecord>,
-    /// True while the agent has parked itself awaiting a timer (no run in
-    /// flight).
-    #[serde(default)]
-    pub parked: bool,
-    /// Consecutive turns this agent ended without the result it owed.
+    /// The single place a `seq` is handed out, so the fold cannot produce a gap
+    /// or a duplicate by accident.
+    pub(super) fn push(&mut self, at_ms: u64, body: AgentLogBody) {
+        self.log.push(AgentLogEntry {
+            seq: self.next_seq,
+            at_ms,
+            body,
+        });
+        self.next_seq += 1;
+    }
+
+    /// Everything below `at_seq`, renumbering nothing — a sub session's
+    /// starting point. See [`AgentState::snapshot_at`].
+    fn cut(&self, at_seq: u64) -> Self {
+        Self {
+            log: self.log.iter().filter(|e| e.seq < at_seq).cloned().collect(),
+            next_seq: at_seq,
+        }
+    }
+}
+
+impl AgentState {
+    /// This component's own state, or `None` if it has never had any.
     ///
-    /// Durable, and reset by any turn that ends properly: it is the budget
-    /// behind the nudge, and a process that dies mid-nudge must not hand the
-    /// model a fresh one every restart.
-    #[serde(default)]
-    pub nudges: u32,
-    /// True between a turn beginning and that turn reaching a boundary.
+    /// Typed by the caller: `state.part::<QueueState>()`. No downcast, and no
+    /// way to name a part that does not exist.
+    #[must_use]
+    pub(super) fn part<T: Part>(&self) -> Option<&T> {
+        T::get(&self.parts)
+    }
+
+    /// This component's own state, created empty the first time it is asked
+    /// for. `None` is unreachable — the part is inserted just above — and the
+    /// callers treat it as "nothing to do" rather than panicking, because a
+    /// fold must never take the process down.
+    pub(super) fn part_mut<T: Part>(&mut self) -> Option<&mut T> {
+        T::get_mut(&mut self.parts)
+    }
+
+    /// This session as a sub session's starting point.
     ///
-    /// Durable because only a crash can leave one open: every boundary an agent
-    /// reaches under its own power journals something, so a fold that still
-    /// reads `true` at recovery describes a turn no process is running any
-    /// more. That is the whole of how an interruption is detected, and it is
-    /// detected *here* because this is the only place the fact exists — an
-    /// owner sees a status, which cannot say whose turn produced it.
+    /// Everything that is *about the session* carries; everything that is in
+    /// flight, or is a bill, does not — and each part says which it is, so a
+    /// component added later cannot be forgotten here.
     ///
-    /// "Under its own power" is not quite all of them. A turn that fails
-    /// *before* the loop is entered — start hooks that abandon it, a context or
-    /// toolbox that will not build — never reaches `Agent::run`, so no
-    /// `RunAborted` banks it and this stays set through a failure the owner was
-    /// told about directly. The owner reconciles that against the status it
-    /// already recorded; see `TurnEnd::Interrupted`.
-    #[serde(default)]
-    pub turn_in_flight: bool,
-    /// The agent's task list — durable so it survives an actor restart exactly
-    /// like timers do; see `crate::agent_loop::task_list`.
-    #[serde(default)]
-    pub task_list: crate::agent_loop::task_list::TaskListState,
-    /// Cumulative token usage across every completed run — durable agent
-    /// state, folded from `RunComplete`. `u64` so a long session's
-    /// re-sent-context input total can't overflow the per-turn `u32` wire
-    /// counters. Answers the session's usage readout without replaying the
-    /// whole journal.
-    #[serde(default)]
-    pub usage_total: UsageTotal,
-    /// The most recently completed run's own usage — a per-run cost figure,
-    /// summed across that run's tool-loop iterations but never across runs.
-    /// `None` before this agent's first completed run.
-    #[serde(default)]
-    pub last_turn_usage: Option<Usage>,
-    /// The most recently completed run's *last* provider call's prompt size
-    /// alone (never summed) — what's actually loaded in this agent's context
-    /// right now.
-    #[serde(default)]
-    pub context_tokens: u32,
+    /// Cut at `at_seq` — the branch point, read when the sub session was asked
+    /// for. Not at the log's current end: journaling the sub session writes a
+    /// `Branched` entry onto this very log, and a source that is mid-turn goes
+    /// on appending while the seed is being built.
+    #[must_use]
+    pub fn snapshot_at(&self, at_seq: u64) -> Self {
+        Self {
+            transcript: self.transcript.cut(at_seq),
+            parts: self.parts.iter().filter_map(ComponentState::carried).collect(),
+        }
+    }
 }
 
 /// Running token totals held in [`AgentState`]. Distinct from the per-turn
@@ -212,19 +269,40 @@ impl AgentState {
     /// `seq`.
     #[must_use]
     pub fn hook_entry_count(&self) -> usize {
-        self.log
+        self.transcript
+            .entries()
             .iter()
             .filter(|e| matches!(e.body, AgentLogBody::Hook(_)))
             .count()
     }
 
+    /// Every part's reason the agent must not act yet, in registry order.
+    ///
+    /// The parts are asked; nothing here knows which of them has an opinion.
+    pub(super) fn vetoes(&self) -> impl Iterator<Item = Blocked> + '_ {
+        self.parts.iter().filter_map(|part| part.blocks(self))
+    }
+
+    /// Every entry, oldest first.
+    #[must_use]
+    pub fn log(&self) -> &[AgentLogEntry] {
+        self.transcript.entries()
+    }
+
+    /// The next sequence number this agent will hand out.
+    #[must_use]
+    pub fn next_seq(&self) -> u64 {
+        self.transcript.next_seq()
+    }
+
+    /// The seq of the newest entry, or `None` for an empty log.
+    #[must_use]
+    pub fn tail_seq(&self) -> Option<u64> {
+        self.transcript.tail_seq()
+    }
+
     pub(super) fn push(&mut self, at_ms: u64, body: AgentLogBody) {
-        self.log.push(AgentLogEntry {
-            seq: self.next_seq,
-            at_ms,
-            body,
-        });
-        self.next_seq += 1;
+        self.transcript.push(at_ms, body);
     }
 
     /// Whether this agent has ever spoken to a provider.
@@ -235,7 +313,8 @@ impl AgentState {
     /// `startup` rather than `resume`.
     #[must_use]
     pub fn has_run(&self) -> bool {
-        self.log
+        self.transcript
+            .entries()
             .iter()
             .any(|e| matches!(e.body, AgentLogBody::Llm(_)))
     }
@@ -245,9 +324,7 @@ impl AgentState {
     ///
     /// Derived, never stored: the log already holds both halves of every call,
     /// so a second index could only ever disagree with it. Empty means the
-    /// agent owes the provider nothing but its next call — which is exactly
-    /// the condition [`Components::advance`](super::component::Components::advance)
-    /// waits for before running one.
+    /// agent owes the provider nothing but its next call.
     ///
     /// A parked call is exempt. The agent is *waiting* on that one, on purpose,
     /// and the answer arrives later as an ordinary result; treating it as
@@ -255,12 +332,11 @@ impl AgentState {
     ///
     /// The scan starts at the newest assistant message, not at the beginning:
     /// a new assistant message only ever lands once the previous one's calls
-    /// are all answered, so nothing before it can still be open. That bounds
-    /// this to the current step rather than the transcript.
+    /// are all answered, so nothing before it can still be open.
     #[must_use]
     pub fn open_tool_calls(&self) -> Vec<String> {
-        let from = self
-            .log
+        let entries = self.transcript.entries();
+        let from = entries
             .iter()
             .rposition(|e| match &e.body {
                 AgentLogBody::Llm(m) => m
@@ -271,9 +347,9 @@ impl AgentState {
                 | AgentLogBody::Lifecycle(_)
                 | AgentLogBody::Compaction(_) => false,
             })
-            .unwrap_or(self.log.len());
+            .unwrap_or(entries.len());
         let mut open: Vec<String> = Vec::new();
-        for entry in self.log.iter().skip(from) {
+        for entry in entries.iter().skip(from) {
             let AgentLogBody::Llm(message) = &entry.body else {
                 continue;
             };
@@ -290,39 +366,111 @@ impl AgentState {
                 }
             }
         }
-        open.retain(|id| !self.asks.iter().any(|a| a.tool_call_id.as_deref() == Some(id)));
+        let parked = self.asks();
+        open.retain(|id| {
+            !parked
+                .iter()
+                .any(|a| a.tool_call_id.as_deref() == Some(id.as_str()))
+        });
         open
     }
 
-    /// The seq of the newest entry, or `None` for an empty log. The tail a
-    /// cursor is compared against.
-    #[must_use]
-    pub fn tail_seq(&self) -> Option<u64> {
-        self.log.last().map(|e| e.seq)
-    }
-
     /// This agent's current values, for the agent document.
+    #[must_use]
     pub fn state_view(&self) -> AgentStateView {
         AgentStateView {
-            tasks: self.task_list.tasks().to_vec(),
-            usage_total: self.usage_total,
-            last_turn_usage: self.last_turn_usage.clone(),
-            context_tokens: self.context_tokens,
+            tasks: self.task_list().tasks().to_vec(),
+            usage_total: self.usage_total(),
+            last_turn_usage: self.last_turn_usage().cloned(),
+            context_tokens: self.context_tokens(),
             as_of_seq: self.tail_seq().unwrap_or(0),
         }
     }
 
-    /// This agent's own usage + context-size snapshot — always the full,
-    /// current picture (unlike `history_page`, there is no tail/scroll-back
-    /// distinction here).
+    /// This agent's usage and context size, without its transcript.
+    #[must_use]
     pub fn usage_snapshot(&self) -> AgentUsageSnapshot {
         AgentUsageSnapshot {
-            usage_total: self.usage_total,
-            last_turn_usage: self.last_turn_usage.clone(),
-            context_tokens: self.context_tokens,
+            usage_total: self.usage_total(),
+            last_turn_usage: self.last_turn_usage().cloned(),
+            context_tokens: self.context_tokens(),
         }
     }
 }
+
+/// What each part chooses to show the rest of the server.
+///
+/// Every one of these forwards to a method on the owning component's state;
+/// none of them reaches a field. Adding a reader means adding a method there,
+/// which is the point: the owner decides what is knowable about it.
+impl AgentState {
+    /// Accepted-but-undelivered things addressed to this agent, oldest first.
+    #[must_use]
+    pub fn inbox(&self) -> &[crate::agent_loop::Incoming] {
+        self.part::<QueueState>().map_or(&[], QueueState::inbox)
+    }
+
+    /// Every question this agent is parked on, oldest first.
+    #[must_use]
+    pub fn asks(&self) -> &[crate::agent_loop::AskedQuestion] {
+        self.part::<QueueState>().map_or(&[], QueueState::asks)
+    }
+
+    /// Whether the agent has parked itself awaiting something that will wake it.
+    #[must_use]
+    pub fn parked(&self) -> bool {
+        self.part::<QueueState>().is_some_and(QueueState::parked)
+    }
+
+    /// True between a turn beginning and that turn reaching a boundary.
+    #[must_use]
+    pub fn turn_in_flight(&self) -> bool {
+        self.part::<TurnState>().is_some_and(TurnState::in_flight)
+    }
+
+    /// Consecutive turns this agent ended without the result it owed.
+    #[must_use]
+    pub fn nudges(&self) -> u32 {
+        self.part::<TurnState>().map_or(0, TurnState::nudges)
+    }
+
+    /// Active timers, durable so they re-arm on recovery.
+    #[must_use]
+    pub fn timers(&self) -> &[crate::agent_loop::timers::TimerRecord] {
+        self.part::<TimerState>().map_or(&[], TimerState::records)
+    }
+
+    /// The agent's own task list.
+    #[must_use]
+    pub fn task_list(&self) -> &crate::agent_loop::task_list::TaskListState {
+        match self.part::<TaskListPart>() {
+            Some(part) => part.list(),
+            None => task_list::empty_list(),
+        }
+    }
+
+    /// Cumulative token usage across every completed turn.
+    #[must_use]
+    pub fn usage_total(&self) -> UsageTotal {
+        self.part::<UsageState>()
+            .map_or_else(UsageTotal::default, UsageState::total)
+    }
+
+    /// The most recently completed turn's own usage, summed across its calls
+    /// but never across turns.
+    #[must_use]
+    pub fn last_turn_usage(&self) -> Option<&Usage> {
+        self.part::<UsageState>().and_then(UsageState::last_turn)
+    }
+
+    /// The last provider call's prompt size alone — what is loaded in this
+    /// agent's context right now.
+    #[must_use]
+    pub fn context_tokens(&self) -> u32 {
+        self.part::<UsageState>().map_or(0, UsageState::context_tokens)
+    }
+}
+
 
 #[cfg(test)]
 #[allow(

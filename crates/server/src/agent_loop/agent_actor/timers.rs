@@ -15,6 +15,50 @@ use horsie_actor::{ActorRef, CommandEffect};
 use horsie_models::now_ms;
 use serde_json::Value;
 
+/// Timers this agent has armed against itself.
+///
+/// Durable so they re-arm on recovery: a timer is a promise the agent made to
+/// itself, and a crash must not silently drop it.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct TimerState {
+    armed: Vec<crate::agent_loop::timers::TimerRecord>,
+}
+
+impl TimerState {
+    pub(super) fn records(&self) -> &[crate::agent_loop::timers::TimerRecord] {
+        &self.armed
+    }
+
+    fn arm(&mut self, record: crate::agent_loop::timers::TimerRecord) {
+        self.armed.push(record);
+    }
+
+    fn cancel(&mut self, ids: &[crate::agent_loop::timers::TimerId]) {
+        self.armed.retain(|t| !ids.contains(&t.id));
+    }
+
+    fn fired(&mut self, id: &crate::agent_loop::timers::TimerId, next: Option<u64>) {
+        match next {
+            Some(next) => {
+                if let Some(t) = self.armed.iter_mut().find(|t| t.id == *id) {
+                    t.fire_at_unix_ms = next;
+                    t.fire_count += 1;
+                }
+            }
+            None => self.armed.retain(|t| t.id != *id),
+        }
+    }
+}
+
+impl PartState for TimerState {
+    /// Nothing: a timer belongs to the agent that armed it, and a sub session
+    /// waking on one nobody set for it would be a surprise.
+    fn carried(&self) -> Option<Self> {
+        None
+    }
+}
+
 /// Spawn a one-shot sleep that tells the actor `TimerFired` after `delay`. The
 /// firing is journaled/handled on the mailbox; a stale fire (timer since
 /// cancelled) is ignored there, so an un-cancellable sleep task is harmless.
@@ -80,18 +124,18 @@ fn execute_timer_tool(
         }
         "list_timers" => {
             let now = now_ms();
-            let views: Vec<_> = folded.timers.iter().map(|t| t.view(now)).collect();
+            let views: Vec<_> = folded.timers().iter().map(|t| t.view(now)).collect();
             serde_json::to_value(views)
                 .map(|v| (v, Vec::new()))
                 .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))
         }
         "cancel_timer" => {
             let ids: Vec<TimerId> = if input.get("all").and_then(Value::as_bool) == Some(true) {
-                folded.timers.iter().map(|t| t.id.clone()).collect()
+                folded.timers().iter().map(|t| t.id.clone()).collect()
             } else if let Some(id) = input.get("id").and_then(Value::as_str) {
                 let id = TimerId(id.to_string());
                 folded
-                    .timers
+                    .timers()
                     .iter()
                     .any(|t| t.id == id)
                     .then_some(id)
@@ -137,7 +181,7 @@ impl Component for Timers {
             }
             TimerCommand::TimerFired { id } => id,
         };
-        let Some(record) = cx.state.timers.iter().find(|t| t.id == id).cloned() else {
+        let Some(record) = cx.state.timers().iter().find(|t| t.id == id).cloned() else {
             // Cancelled or already removed — a stale sleep. Ignore.
             return CommandEffect::none();
         };
@@ -178,23 +222,25 @@ impl Component for Timers {
     #[allow(clippy::wildcard_enum_match_arm)]
     fn apply(state: &mut AgentState, event: AgentDomainEvent) {
         match event {
-            AgentDomainEvent::TimerArmed { record, .. } => state.timers.push(record),
+            AgentDomainEvent::TimerArmed { record, .. } => {
+                if let Some(part) = state.part_mut::<TimerState>() {
+                    part.arm(record);
+                }
+            }
             AgentDomainEvent::TimerCancelled { ids, .. } => {
-                state.timers.retain(|t| !ids.contains(&t.id));
+                if let Some(part) = state.part_mut::<TimerState>() {
+                    part.cancel(&ids);
+                }
             }
             AgentDomainEvent::TimerFired {
                 id,
                 next_fire_at_unix_ms,
                 ..
-            } => match next_fire_at_unix_ms {
-                Some(next) => {
-                    if let Some(t) = state.timers.iter_mut().find(|t| t.id == id) {
-                        t.fire_at_unix_ms = next;
-                        t.fire_count += 1;
-                    }
+            } => {
+                if let Some(part) = state.part_mut::<TimerState>() {
+                    part.fired(&id, next_fire_at_unix_ms);
                 }
-                None => state.timers.retain(|t| t.id != id),
-            },
+            }
             _ => {}
         }
     }
@@ -204,7 +250,7 @@ impl Component for Timers {
     /// mid-run, because a timer keeps its promise either way.
     async fn on_load(&mut self, cx: &mut Cx<'_>) {
         let now = now_ms();
-        for t in &cx.state.timers {
+        for t in cx.state.timers() {
             spawn_timer_sleep(cx.actor.self_ref(), t.id.clone(), t.remaining(now));
         }
     }
