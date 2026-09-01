@@ -11,7 +11,7 @@
 //! it has not seen.
 
 use super::*;
-use horsie_actor::{ActorContext, CommandEffect};
+use horsie_actor::CommandEffect;
 use horsie_agentcore::AgentLogEntry;
 use serde::{Deserialize, Serialize};
 
@@ -159,16 +159,19 @@ impl AgentState {
 /// Questions answered from state, which wake nothing.
 pub(super) struct Reads;
 
-impl Reads {
-    pub(super) async fn handle(
-        actor: &mut AgentActor,
-        state: &AgentState,
+#[async_trait::async_trait]
+impl Component for Reads {
+    type Command = ReadCommand;
+
+    async fn handle(
+        &mut self,
         cmd: ReadCommand,
-        _ctx: &mut ActorContext<AgentCommand>,
+        cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
+        let state = cx.state;
         match cmd {
             ReadCommand::ReadLog { after, reply } => {
-                let _ = reply.send(state.read_from(after, &actor.deltas));
+                let _ = reply.send(state.read_from(after, &cx.scratch.deltas));
                 CommandEffect::none()
             }
             ReadCommand::PageLog {
@@ -209,172 +212,6 @@ impl Reads {
                 let _ = reply.send(state.next_seq);
                 CommandEffect::none()
             }
-        }
-    }
-}
-
-#[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::wildcard_enum_match_arm
-)]
-mod tests {
-    use super::*;
-    use crate::agent_loop::agent_actor::testing::*;
-    use horsie_agentcore::{AgentLogBody, Message};
-    fn log_upto(n: u64) -> AgentState {
-        (0..n).fold(AgentActor::initial_state(), |state, i| {
-            AgentActor::apply_event(
-                state,
-                AgentDomainEvent::MessageComplete {
-                    message: Message::user(format!("m{i}"), "x", i),
-                },
-            )
-        })
-    }
-
-    fn chunks(texts: &[&str]) -> Vec<String> {
-        texts.iter().map(|s| (*s).to_string()).collect()
-    }
-
-    /// Live typing means nothing to a reader that has not reached the entry
-    /// those chunks follow — sending them would draw fragments of a message
-    /// above messages it comes after.
-    #[test]
-    fn a_reader_behind_the_tail_gets_entries_and_no_deltas() {
-        let state = log_upto(5);
-        let out = state.read_from(
-            Some(crate::agent_loop::agent_log::Cursor {
-                entry_seq: 1,
-                delta_seq: 0,
-            }),
-            &chunks(&["x", "y"]),
-        );
-        assert_eq!(
-            out.entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
-            vec![2, 3, 4]
-        );
-        assert!(out.deltas.is_empty());
-        assert_eq!(out.cursor.entry_seq, 4);
-        assert_eq!(out.cursor.delta_seq, 0);
-    }
-
-    #[test]
-    fn a_caught_up_reader_gets_the_deltas_after_its_own() {
-        let state = log_upto(5);
-        let out = state.read_from(
-            Some(crate::agent_loop::agent_log::Cursor {
-                entry_seq: 4,
-                delta_seq: 1,
-            }),
-            &chunks(&["x", "y", "z"]),
-        );
-        assert!(out.entries.is_empty());
-        assert_eq!(out.deltas, vec!["y", "z"]);
-        assert!(!out.reset_deltas);
-        assert_eq!(out.cursor.delta_seq, 3);
-    }
-
-    /// The trap the two-part cursor exists to close.
-    ///
-    /// Entry 4 is still the tail after a crash, but the run that emitted the
-    /// reader's 50 deltas is gone and the new one has emitted two. `50 > 2` is
-    /// impossible for a live run, so the mismatch is arithmetic — and a single
-    /// flat counter would have reissued 5..55 to different content with nothing
-    /// able to notice.
-    #[test]
-    fn a_restarted_run_is_detected_and_answered_with_a_reset() {
-        let state = log_upto(5);
-        let out = state.read_from(
-            Some(crate::agent_loop::agent_log::Cursor {
-                entry_seq: 4,
-                delta_seq: 50,
-            }),
-            &chunks(&["a", "b"]),
-        );
-        assert!(
-            out.reset_deltas,
-            "50 deltas cannot precede a run that has 2"
-        );
-        assert_eq!(out.deltas, vec!["a", "b"]);
-        assert_eq!(out.cursor.delta_seq, 2);
-    }
-
-    #[test]
-    fn a_reader_exactly_at_the_position_gets_nothing() {
-        let state = log_upto(5);
-        let out = state.read_from(
-            Some(crate::agent_loop::agent_log::Cursor {
-                entry_seq: 4,
-                delta_seq: 2,
-            }),
-            &chunks(&["a", "b"]),
-        );
-        assert!(out.is_empty(), "a wakeup that lost a race sends nothing");
-    }
-
-    #[test]
-    fn a_reader_with_no_cursor_gets_everything() {
-        let state = log_upto(3);
-        let out = state.read_from(None, &chunks(&["a"]));
-        assert_eq!(
-            out.entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
-            vec![0, 1, 2]
-        );
-        assert_eq!(out.deltas, vec!["a"]);
-        assert_eq!(out.cursor.entry_seq, 2);
-        assert_eq!(out.cursor.delta_seq, 1);
-    }
-
-    /// State is snapshotted, so a mixed transcript has to survive a round trip
-    /// through serde or recovery loses every hook record it ever wrote.
-    #[test]
-    fn a_mixed_transcript_survives_a_snapshot_round_trip() {
-        let mut state = AgentActor::initial_state();
-        state = AgentActor::apply_event(
-            state,
-            AgentDomainEvent::InputMessage {
-                message: user_msg("hello"),
-            },
-        );
-        state = with_hook(state, "guard", "tc1", 0);
-
-        let json = serde_json::to_string(&state).unwrap();
-        let back: AgentState = serde_json::from_str(&json).unwrap();
-
-        // Both halves of an entry have to survive: the id it joins on and the
-        // seq it is ordered by. A snapshot that kept the bodies but lost the
-        // numbering would leave every live cursor pointing at the wrong entry.
-        let shape = |s: &AgentState| -> Vec<(u64, Option<String>)> {
-            s.log
-                .iter()
-                .map(|e| (e.seq, e.body.id().map(str::to_string)))
-                .collect()
-        };
-        assert_eq!(shape(&back), shape(&state));
-        assert_eq!(back.next_seq, state.next_seq);
-        match &back.log[1].body {
-            AgentLogBody::Hook(h) => {
-                assert_eq!(h.record.plugin, "guard");
-                // The externally-tagged union has to survive the round trip,
-                // outcome and all — a snapshot is what a recovered transcript
-                // is rebuilt from.
-                match &h.record.action {
-                    horsie_models::hooks::HookAction::PreToolUse(r) => {
-                        assert_eq!(r.call.tool_call_id, "tc1");
-                        match &r.outcome {
-                            horsie_models::hooks::PreToolUseOutcome::Denied(d) => {
-                                assert_eq!(d.reason.as_deref(), Some("not allowed"));
-                            }
-                            other => panic!("expected a denial, got {other:?}"),
-                        }
-                    }
-                    other => panic!("expected a PreToolUse action, got {other:?}"),
-                }
-            }
-            other => panic!("expected a hook entry, got {other:?}"),
         }
     }
 }

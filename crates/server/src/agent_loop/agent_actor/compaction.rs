@@ -178,13 +178,13 @@ impl AgentState {
 /// anything, it is a consequence of a run.
 pub(super) struct Compaction;
 
-impl Component for Compaction {
+impl Compaction {
     /// Where the prompt now starts, and the context size that leaves behind.
     // `if let` rather than a `match`, because this module owns exactly one
     // variant. Which one is decided in `AgentActor::apply_event`, so an event
     // added later fails to compile *there* — where it has to be classified —
     // rather than silently reaching the wrong fold here.
-    fn apply(state: &mut AgentState, event: AgentDomainEvent) {
+    pub(super) fn apply(state: &mut AgentState, event: AgentDomainEvent) {
         if let AgentDomainEvent::Compacted {
             summary,
             carried_state,

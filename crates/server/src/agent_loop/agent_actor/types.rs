@@ -122,8 +122,17 @@ pub enum QueueCommand {
     StartPrepared(Box<PreparedStart>),
 }
 
-/// The turn in flight: stopping it, and what its spawned steps report back.
+/// The turn in flight: starting and stopping it, and what its spawned steps
+/// report back.
 pub enum RunCommand {
+    /// Internal: the queue committed a turn. Told *after* the turn's input
+    /// events are persisted, so the turn component reads them folded. The
+    /// consumed items, answers and input are already in state; this carries
+    /// only what is not: the summarisation riding on the turn.
+    StartTurn {
+        summarise: Option<crate::agent_loop::Summarise>,
+        summarise_only: bool,
+    },
     /// Cancel an in-flight run. `ack`, if given, fires once the turn is over —
     /// immediately when none is in flight. The actor answers it in the handler
     /// itself: the generation fence guarantees a cancelled turn's straggler

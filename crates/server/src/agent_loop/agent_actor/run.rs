@@ -1,22 +1,21 @@
-//! The turn in flight: the actor-owned loop.
+//! The turn component: the actor-owned loop.
 //!
-//! There is no background run loop any more. The actor drives each step of a
-//! turn itself: it dispatches one provider call, reads what came back, routes
+//! There is no background run loop any more. This component drives each step
+//! of a turn: it dispatches one provider call, reads what came back, routes
 //! the tool calls, and dispatches the next call — journaling each step as an
 //! ordinary command effect. Everything that does I/O — the per-turn setup, the
-//! provider call, a remote tool call, a summarisation — still happens on a
-//! spawned task, never on the mailbox, and reports back as a command carrying
-//! the turn's generation so a cancelled turn's stragglers are dropped.
+//! provider call, a remote tool call, a summarisation — happens on a spawned
+//! task, never on the mailbox, and reports back as a command carrying the
+//! turn's generation so a cancelled turn's stragglers are dropped.
 //!
-//! What ended the turn and what that means is [`super::conclude`]'s job,
-//! unchanged: the handlers here synthesize the same [`RunReport`] the old
-//! background loop used to send.
+//! A turn arrives as [`RunCommand::StartTurn`], told by the queue after it
+//! journaled the turn's input — the two components never call each other.
+//! What an ending *means* is [`super::conclude`]'s half of this component.
 
 use super::*;
-use crate::agent_loop::context::AgentOutcome;
 use crate::agent_loop::inbox::Summarise;
 use async_trait::async_trait;
-use horsie_actor::{ActorContext, ActorRef, CommandEffect, ReplyTo};
+use horsie_actor::{ActorRef, CommandEffect, ReplyTo};
 use horsie_agentcore::{
     AgentEvent, AgentInput, AgentLogBody, CompactionBudget, EventSink, EventSinkError, LlmError,
     Message, StepError, StepRequest, StoppedCall, ToolOutcome, ToolSpec, Toolbox, Usage,
@@ -35,8 +34,22 @@ const MAX_ITERATIONS: u32 = 100;
 const STUCK_THRESHOLD: usize = 5;
 const NUDGE_THRESHOLD: usize = 3;
 
-/// Result of a turn, interpreted by [`super::conclude`]. The handlers here
-/// synthesize one at each of the turn's endings.
+/// The turn in flight, and what a crash may leave of it. All in-memory on
+/// purpose — a crash mid-turn is an interrupted turn, and recovery already
+/// treats it as one.
+#[derive(Default)]
+pub(super) struct Turn {
+    /// The turn in flight, if any.
+    flight: Option<TurnFlight>,
+    /// Id of the next turn. Monotonic for this actor's loaded lifetime, which
+    /// is all the fence needs — a report can only be stale within it.
+    next_turn_id: u64,
+    /// Callers waiting to hear that the in-flight turn has terminated (see
+    /// [`RunCommand::Cancel`]). Drained the moment a turn concludes.
+    pub(super) cancel_acks: Vec<ReplyTo<()>>,
+}
+
+/// Result of a turn, interpreted by [`super::conclude`].
 pub struct RunReport {
     /// Which turn this is the report of, against the generation fence.
     pub(super) run_id: u64,
@@ -59,7 +72,7 @@ pub struct SeedSummary {
 #[derive(Debug)]
 pub(super) enum RunOutcome {
     /// Agent ended its turn with plain text. Whether that is a park or a
-    /// mistake is decided by the actor, which alone knows what would wake it.
+    /// mistake is decided here, where what would wake the agent is known.
     Completed {
         text: String,
     },
@@ -72,8 +85,8 @@ pub(super) enum RunOutcome {
         error: String,
         recoverable: bool,
     },
-    /// The failure was already delivered to the parent; the actor only needs
-    /// to clear its turn.
+    /// The failure was already delivered to the parent; only the turn needs
+    /// clearing.
     AlreadyReported,
 }
 
@@ -81,8 +94,8 @@ pub(super) enum RunOutcome {
 pub(super) struct TurnCtx {
     pub provider: Arc<dyn horsie_agentcore::LlmProvider>,
     /// The fully-composed, selection-filtered toolbox remote calls dispatch
-    /// through. Inline tools (timers, `task_list`) never reach it — the actor
-    /// claims them by name first.
+    /// through. Inline tools (timers, `task_list`) never reach it — this
+    /// component claims them by name first.
     pub toolbox: Arc<dyn Toolbox>,
     /// What the model is shown, already filtered.
     pub specs: Vec<ToolSpec>,
@@ -103,10 +116,8 @@ struct PendingCall {
     input: Value,
 }
 
-/// The in-flight turn: its identity, its cancel token, and the in-memory
-/// bookkeeping the old background loop held in locals. Lost on crash on
-/// purpose — a crash mid-turn is an interrupted turn, and recovery already
-/// treats it as one.
+/// One turn's in-flight bookkeeping — what the old background loop held in
+/// locals.
 pub(super) struct TurnFlight {
     pub(super) id: u64,
     pub(super) cancel: CancellationToken,
@@ -144,7 +155,7 @@ pub(super) enum StepOutcome {
         sub_sessions: Vec<Uuid>,
         result: Result<String, String>,
     },
-    /// A compaction happened; the actor journals the boundary.
+    /// A compaction happened; the boundary is journaled here.
     Compacted(Box<CompactedData>),
     /// A compaction found nothing to fold, was refused by a hook, or failed.
     /// `notice` says whether to tell the user (a typed `/compact` deserves an
@@ -180,7 +191,7 @@ fn sum_optional(a: Option<u32>, b: Option<u32>) -> Option<u32> {
 
 /// Adds the timer and `task_list` specs to a composed toolbox so the
 /// selection filter sees the whole surface. Execution never reaches it for
-/// those names — the actor claims them on the mailbox — so its `execute` for
+/// those names — the turn claims them on the mailbox — so its `execute` for
 /// them is an error by construction.
 struct WithInlineSpecs {
     inner: Arc<dyn Toolbox>,
@@ -215,10 +226,10 @@ fn is_inline_name(name: &str) -> bool {
         || name == crate::agent_loop::task_list::TASK_LIST_TOOL
 }
 
-/// Forwards streamed text chunks to the actor's delta buffer, tagged with the
-/// turn so a cancelled turn's stragglers are dropped. Everything else a
-/// provider emits is ignored: coarse events are journaled from the step's
-/// response, not from the stream.
+/// Forwards streamed text chunks to the mailbox, tagged with the turn so a
+/// cancelled turn's stragglers are dropped. Everything else a provider emits
+/// is ignored: coarse events are journaled from the step's response, not from
+/// the stream.
 struct DeltaSink {
     actor: ActorRef<AgentCommand>,
     turn: u64,
@@ -240,26 +251,27 @@ impl EventSink for DeltaSink {
     }
 }
 
-impl AgentActor {
+impl Turn {
     /// Begin a turn: record the flight and spawn the per-turn setup.
     ///
-    /// Nothing here journals — the turn's input was journaled by the caller,
-    /// and the first step dispatches only after `Prepared` reports back, so it
-    /// reads a state those events are already folded into.
-    pub(super) fn start_turn(
+    /// Nothing here journals — the turn's input was journaled by whoever told
+    /// `StartTurn`, and the first step dispatches only after `Prepared`
+    /// reports back, so it reads a state those events are already folded into.
+    pub(super) fn start(
         &mut self,
-        ctx: &ActorContext<AgentCommand>,
-        context_tokens: u32,
+        cx: &mut Cx<'_>,
         summarise: Option<Summarise>,
         summarise_only: bool,
     ) {
+        cx.scratch.turn_live = true;
         let cancel = CancellationToken::new();
-        let id = self.next_run_id;
-        self.next_run_id += 1;
-        self.running = Some(TurnFlight {
+        let id = self.next_turn_id;
+        self.next_turn_id += 1;
+        self.flight = Some(TurnFlight {
             id,
             cancel: cancel.clone(),
-            tool_choice: self
+            tool_choice: cx
+                .scratch
                 .pending_tool_choice
                 .take()
                 .unwrap_or(horsie_agentcore::ToolChoice::Auto),
@@ -270,17 +282,17 @@ impl AgentActor {
             attempt: 0,
             fingerprints: VecDeque::new(),
             usage: Usage::without_cache(0, 0),
-            context_tokens,
+            context_tokens: cx.state.context_tokens,
             pending_calls: Vec::new(),
             stopped: Vec::new(),
         });
 
-        let self_ref = ctx.self_ref();
-        let context_provider = self.ctx.context_provider.clone();
-        let configured_prompt = self.params.system_prompt.clone();
-        let run_def_tools = self.params.tools.clone();
-        let thinking_effort = self.params.thinking_effort;
-        let conversation_id = self.ctx.journal_id.to_string();
+        let self_ref = cx.actor.self_ref();
+        let context_provider = cx.runtime.context_provider.clone();
+        let configured_prompt = cx.params.system_prompt.clone();
+        let run_def_tools = cx.params.tools.clone();
+        let thinking_effort = cx.params.thinking_effort;
+        let conversation_id = cx.runtime.journal_id.to_string();
 
         tokio::spawn(async move {
             // Provide this turn's contexts off the mailbox: rehydrate the
@@ -348,16 +360,32 @@ impl AgentActor {
         });
     }
 
+    /// The turn is over, however it ended: clear the flight and lower the
+    /// queue's gate. Called by conclude at every ending.
+    pub(super) fn clear_flight(&mut self, cx: &mut Cx<'_>) {
+        self.flight = None;
+        cx.scratch.turn_live = false;
+    }
+
+    /// The turn in flight's id, for conclude's superseded-report guard.
+    pub(super) fn flight_id(&self) -> Option<u64> {
+        self.flight.as_ref().map(|f| f.id)
+    }
+
     /// The message a cancelled run was part-way through writing, if it had
     /// written anything worth keeping.
     ///
     /// Reads the deltas, which are the only copy: a streamed message becomes
     /// durable when the provider finishes it, and a cancelled call never
-    /// reaches that point. Whitespace alone is not an answer, so it is not
-    /// worth an entry.
-    pub(super) fn aborted_message(&self) -> Option<Message> {
-        let text = self.deltas.concat();
+    /// reaches that point.
+    pub(super) fn aborted_message(cx: &Cx<'_>) -> Option<Message> {
+        let text = cx.scratch.deltas.concat();
         (!text.trim().is_empty()).then(|| Message::assistant_text(new_message_id(), text, now_ms()))
+    }
+
+    /// The turn in flight, if `turn` still names it — the generation fence.
+    fn fenced(&mut self, turn: u64) -> Option<&mut TurnFlight> {
+        self.flight.as_mut().filter(|f| f.id == turn)
     }
 
     /// Merge `events` with whatever concluding the turn adds, in one effect.
@@ -366,9 +394,9 @@ impl AgentActor {
         mut events: Vec<AgentDomainEvent>,
         report: RunReport,
         folded: &AgentState,
-        ctx: &ActorContext<AgentCommand>,
+        cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
-        let tail = self.handle_finished(report, folded, ctx).await;
+        let tail = self.conclude(report, folded, cx).await;
         let snapshot = tail.snapshots();
         events.extend(tail.events().iter().cloned());
         let effect = CommandEffect::persist(events);
@@ -385,9 +413,9 @@ impl AgentActor {
         state: &AgentState,
         error: String,
         recoverable: bool,
-        ctx: &ActorContext<AgentCommand>,
+        cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
-        let Some(flight) = &self.running else {
+        let Some(flight) = &self.flight else {
             return CommandEffect::persist(events);
         };
         let run_id = flight.id;
@@ -396,10 +424,7 @@ impl AgentActor {
             context_tokens: flight.context_tokens,
             at_ms: now_ms(),
         });
-        let folded = events
-            .iter()
-            .cloned()
-            .fold(state.clone(), AgentActor::apply_event);
+        let folded = fold_all(state, &events);
         self.finish(
             events,
             RunReport {
@@ -408,7 +433,7 @@ impl AgentActor {
                 seed_summary: None,
             },
             &folded,
-            ctx,
+            cx,
         )
         .await
     }
@@ -420,13 +445,13 @@ impl AgentActor {
         &mut self,
         events: Vec<AgentDomainEvent>,
         folded: &AgentState,
-        ctx: &ActorContext<AgentCommand>,
+        cx: &mut Cx<'_>,
         delay: Option<Duration>,
     ) -> CommandEffect<AgentDomainEvent> {
-        let Some(flight) = &self.running else {
+        let Some(flight) = &self.flight else {
             return CommandEffect::persist(events);
         };
-        let max_iterations = self.params.max_iterations.unwrap_or(MAX_ITERATIONS);
+        let max_iterations = cx.params.max_iterations.unwrap_or(MAX_ITERATIONS);
         if flight.iteration >= max_iterations {
             return self
                 .fail_turn(
@@ -434,7 +459,7 @@ impl AgentActor {
                     folded,
                     format!("max iterations exceeded (max={max_iterations})"),
                     false,
-                    ctx,
+                    cx,
                 )
                 .await;
         }
@@ -443,20 +468,15 @@ impl AgentActor {
                 .is_some_and(|b| flight.context_tokens >= b.trigger_tokens())
         });
         match due {
-            true => self.spawn_compact(folded, None, ctx),
-            false => self.spawn_llm(folded, ctx, delay),
+            true => self.spawn_compact(folded, None, cx),
+            false => self.spawn_llm(folded, cx, delay),
         }
         CommandEffect::persist(events)
     }
 
     /// Spawn one provider call over the folded state's prompt.
-    fn spawn_llm(
-        &self,
-        folded: &AgentState,
-        ctx: &ActorContext<AgentCommand>,
-        delay: Option<Duration>,
-    ) {
-        let Some(flight) = &self.running else { return };
+    fn spawn_llm(&self, folded: &AgentState, cx: &Cx<'_>, delay: Option<Duration>) {
+        let Some(flight) = &self.flight else { return };
         let Some(tctx) = flight.ctxs.clone() else {
             return;
         };
@@ -472,11 +492,11 @@ impl AgentActor {
             tool_choice: flight.tool_choice.clone(),
             max_tokens: None,
             thinking_effort: tctx.thinking_effort,
-            artifact_source: self.ctx.artifacts.clone(),
+            artifact_source: cx.runtime.artifacts.clone(),
         };
         let turn = flight.id;
         let cancel = flight.cancel.clone();
-        let self_ref = ctx.self_ref();
+        let self_ref = cx.actor.self_ref();
         tokio::spawn(async move {
             if let Some(delay) = delay {
                 tokio::select! {
@@ -506,13 +526,8 @@ impl AgentActor {
 
     /// Spawn a compaction step. `manual` carries `/compact`'s instructions;
     /// `None` is the automatic budget check firing.
-    fn spawn_compact(
-        &self,
-        folded: &AgentState,
-        manual: Option<Option<String>>,
-        ctx: &ActorContext<AgentCommand>,
-    ) {
-        let Some(flight) = &self.running else { return };
+    fn spawn_compact(&self, folded: &AgentState, manual: Option<Option<String>>, cx: &Cx<'_>) {
+        let Some(flight) = &self.flight else { return };
         let Some(tctx) = flight.ctxs.clone() else {
             return;
         };
@@ -524,7 +539,7 @@ impl AgentActor {
         let history = repair_unanswered_tool_calls(folded.prompt_messages());
         let turn = flight.id;
         let cancel = flight.cancel.clone();
-        let self_ref = ctx.self_ref();
+        let self_ref = cx.actor.self_ref();
         tokio::spawn(async move {
             let outcome = tokio::select! {
                 biased;
@@ -543,20 +558,15 @@ impl AgentActor {
     }
 
     /// Spawn the summarisation sub sessions are waiting on.
-    fn spawn_summarise(
-        &self,
-        folded: &AgentState,
-        sub_sessions: Vec<Uuid>,
-        ctx: &ActorContext<AgentCommand>,
-    ) {
-        let Some(flight) = &self.running else { return };
+    fn spawn_summarise(&self, folded: &AgentState, sub_sessions: Vec<Uuid>, cx: &Cx<'_>) {
+        let Some(flight) = &self.flight else { return };
         let Some(tctx) = flight.ctxs.clone() else {
             return;
         };
         let history = repair_unanswered_tool_calls(folded.prompt_messages());
         let turn = flight.id;
         let cancel = flight.cancel.clone();
-        let self_ref = ctx.self_ref();
+        let self_ref = cx.actor.self_ref();
         tokio::spawn(async move {
             let result = tokio::select! {
                 biased;
@@ -592,12 +602,11 @@ impl AgentActor {
     async fn handle_step(
         &mut self,
         report: StepReport,
-        state: &AgentState,
-        ctx: &ActorContext<AgentCommand>,
+        cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
         // The generation fence: a report from a superseded turn says nothing
         // about the one in flight now.
-        if self.running.as_ref().map(|f| f.id) != Some(report.turn) {
+        if self.fenced(report.turn).is_none() {
             tracing::warn!(
                 turn = report.turn,
                 "dropping the report of a superseded step"
@@ -606,48 +615,49 @@ impl AgentActor {
         }
         match report.outcome {
             StepOutcome::Prepared(tctx) => {
-                let Some(flight) = self.running.as_mut() else {
+                let Some(flight) = self.flight.as_mut() else {
                     return CommandEffect::none();
                 };
                 flight.ctxs = Some(Arc::new(*tctx));
-                let Some(flight) = self.running.as_ref() else {
-                    return CommandEffect::none();
-                };
                 match flight.summarise.clone() {
                     Some(Summarise::SubSession(subs)) => {
-                        self.spawn_summarise(state, subs, ctx);
+                        self.spawn_summarise(cx.state, subs, cx);
                         CommandEffect::none()
                     }
                     Some(Summarise::Compact(instructions)) => {
-                        self.spawn_compact(state, Some(instructions), ctx);
+                        self.spawn_compact(cx.state, Some(instructions), cx);
                         CommandEffect::none()
                     }
-                    None => self.dispatch_model_step(Vec::new(), state, ctx, None).await,
+                    None => {
+                        let state = cx.state.clone();
+                        self.dispatch_model_step(Vec::new(), &state, cx, None).await
+                    }
                 }
             }
             StepOutcome::ProvideFailed(error) => {
                 // Reported exactly as the old path did — `terminal` above all,
                 // which tells the session its sandbox is gone for good.
-                let Some(run_id) = self.running.as_ref().map(|f| f.id) else {
+                let Some(run_id) = self.flight_id() else {
                     return CommandEffect::none();
                 };
-                self.ctx
+                cx.runtime
                     .parent
-                    .deliver(AgentOutcome::Failed {
-                        agent: self.ctx.journal_id,
+                    .deliver(crate::agent_loop::context::AgentOutcome::Failed {
+                        agent: cx.runtime.journal_id,
                         error: error.message,
                         recoverable: true,
                         terminal: error.terminal,
                     })
                     .await;
-                self.handle_finished(
+                let state = cx.state.clone();
+                self.conclude(
                     RunReport {
                         run_id,
                         outcome: RunOutcome::AlreadyReported,
                         seed_summary: None,
                     },
-                    state,
-                    ctx,
+                    &state,
+                    cx,
                 )
                 .await
             }
@@ -657,20 +667,21 @@ impl AgentActor {
             } => {
                 // Delivered before the turn's own outcome, and unconditionally:
                 // the sub sessions waiting are a different session's business.
-                self.ctx
+                cx.runtime
                     .parent
-                    .deliver(AgentOutcome::SeedSummary {
-                        agent: self.ctx.journal_id,
+                    .deliver(crate::agent_loop::context::AgentOutcome::SeedSummary {
+                        agent: cx.runtime.journal_id,
                         sub_sessions,
                         result,
                     })
                     .await;
-                let Some(flight) = self.running.as_ref() else {
+                let Some(flight) = self.flight.as_ref() else {
                     return CommandEffect::none();
                 };
-                match flight.summarise_only {
+                let (run_id, summarise_only) = (flight.id, flight.summarise_only);
+                let state = cx.state.clone();
+                match summarise_only {
                     true => {
-                        let run_id = flight.id;
                         self.finish(
                             Vec::new(),
                             RunReport {
@@ -680,12 +691,12 @@ impl AgentActor {
                                 },
                                 seed_summary: None,
                             },
-                            state,
-                            ctx,
+                            &state,
+                            cx,
                         )
                         .await
                     }
-                    false => self.dispatch_model_step(Vec::new(), state, ctx, None).await,
+                    false => self.dispatch_model_step(Vec::new(), &state, cx, None).await,
                 }
             }
             StepOutcome::Compacted(data) => {
@@ -699,11 +710,8 @@ impl AgentActor {
                     tokens_after: data.tokens_after,
                     at_ms: now_ms(),
                 }];
-                let folded = events
-                    .iter()
-                    .cloned()
-                    .fold(state.clone(), AgentActor::apply_event);
-                let Some(flight) = self.running.as_mut() else {
+                let folded = fold_all(cx.state, &events);
+                let Some(flight) = self.flight.as_mut() else {
                     return CommandEffect::none();
                 };
                 // What the next auto-compaction check reads; the fold updated
@@ -722,7 +730,7 @@ impl AgentActor {
                                 seed_summary: None,
                             },
                             &folded,
-                            ctx,
+                            cx,
                         )
                         .await
                     }
@@ -730,13 +738,13 @@ impl AgentActor {
                         // Straight to the call, not back through the budget
                         // check: a compaction that left the prompt over the
                         // trigger must not loop.
-                        self.spawn_llm(&folded, ctx, None);
+                        self.spawn_llm(&folded, cx, None);
                         CommandEffect::persist(events)
                     }
                 }
             }
             StepOutcome::CompactSkipped { notice } => {
-                let Some(flight) = self.running.as_ref() else {
+                let Some(flight) = self.flight.as_ref() else {
                     return CommandEffect::none();
                 };
                 let mut events = Vec::new();
@@ -754,10 +762,7 @@ impl AgentActor {
                         at_ms: now_ms(),
                     });
                 }
-                let folded = events
-                    .iter()
-                    .cloned()
-                    .fold(state.clone(), AgentActor::apply_event);
+                let folded = fold_all(cx.state, &events);
                 let (run_id, summarise_only) = (flight.id, flight.summarise_only);
                 match summarise_only {
                     true => {
@@ -771,18 +776,18 @@ impl AgentActor {
                                 seed_summary: None,
                             },
                             &folded,
-                            ctx,
+                            cx,
                         )
                         .await
                     }
                     false => {
-                        self.spawn_llm(&folded, ctx, None);
+                        self.spawn_llm(&folded, cx, None);
                         CommandEffect::persist(events)
                     }
                 }
             }
-            StepOutcome::Responded(response) => self.handle_responded(*response, state, ctx).await,
-            StepOutcome::LlmFailed(error) => self.handle_llm_failed(error, state, ctx).await,
+            StepOutcome::Responded(response) => self.handle_responded(*response, cx).await,
+            StepOutcome::LlmFailed(error) => self.handle_llm_failed(error, cx).await,
         }
     }
 
@@ -790,10 +795,9 @@ impl AgentActor {
     async fn handle_responded(
         &mut self,
         response: horsie_agentcore::StepResponse,
-        state: &AgentState,
-        ctx: &ActorContext<AgentCommand>,
+        cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
-        let Some(flight) = self.running.as_mut() else {
+        let Some(flight) = self.flight.as_mut() else {
             return CommandEffect::none();
         };
         flight.iteration += 1;
@@ -816,10 +820,7 @@ impl AgentActor {
         let mut events = vec![AgentDomainEvent::MessageComplete {
             message: response.message.clone(),
         }];
-        let mut folded = events
-            .iter()
-            .cloned()
-            .fold(state.clone(), AgentActor::apply_event);
+        let mut folded = fold_all(cx.state, &events);
 
         // A truncated turn is not a finished turn. Tool calls are exempt: a
         // backend may report `length` alongside a complete tool call, and the
@@ -832,26 +833,20 @@ impl AgentActor {
                     &folded,
                     "response truncated at the max_tokens limit".to_string(),
                     false,
-                    ctx,
+                    cx,
                 )
                 .await;
         }
 
         if tool_calls.is_empty() {
-            let Some(flight) = self.running.as_ref() else {
-                return CommandEffect::persist(events);
-            };
             events.push(AgentDomainEvent::RunComplete {
                 usage: flight.usage.clone(),
                 iterations: flight.iteration,
                 context_tokens: flight.context_tokens,
                 at_ms: now_ms(),
             });
-            let folded = events
-                .iter()
-                .cloned()
-                .fold(state.clone(), AgentActor::apply_event);
             let run_id = flight.id;
+            let folded = fold_all(cx.state, &events);
             return self
                 .finish(
                     events,
@@ -863,7 +858,7 @@ impl AgentActor {
                         seed_summary: None,
                     },
                     &folded,
-                    ctx,
+                    cx,
                 )
                 .await;
         }
@@ -871,15 +866,13 @@ impl AgentActor {
         // Stuck and nudge detection over the same fingerprints the old loop
         // kept.
         let fingerprint = tool_fingerprint(&tool_calls);
-        let Some(flight) = self.running.as_mut() else {
-            return CommandEffect::persist(events);
-        };
         flight.fingerprints.push_back(fingerprint.clone());
         if flight.fingerprints.len() > STUCK_THRESHOLD {
             flight.fingerprints.pop_front();
         }
         let all_same = flight.fingerprints.iter().all(|f| f == &fingerprint);
-        if flight.fingerprints.len() >= STUCK_THRESHOLD && all_same {
+        let window = flight.fingerprints.len();
+        if window >= STUCK_THRESHOLD && all_same {
             let tool = tool_calls[0].1.clone();
             return self
                 .fail_turn(
@@ -889,11 +882,11 @@ impl AgentActor {
                         "stuck in loop: tool '{tool}' called identically {STUCK_THRESHOLD} times"
                     ),
                     false,
-                    ctx,
+                    cx,
                 )
                 .await;
         }
-        if flight.fingerprints.len() >= NUDGE_THRESHOLD && all_same {
+        if window >= NUDGE_THRESHOLD && all_same {
             // Answer every call with a nudge instead of executing it, and let
             // the model try again. Journaled now — the fold is the only source
             // of history — where the old loop kept them in run-task locals.
@@ -907,24 +900,21 @@ impl AgentActor {
                 );
                 events.push(AgentDomainEvent::InputMessage { message });
             }
-            let folded = events
-                .iter()
-                .cloned()
-                .fold(state.clone(), AgentActor::apply_event);
-            return self.dispatch_model_step(events, &folded, ctx, None).await;
+            let folded = fold_all(cx.state, &events);
+            return self.dispatch_model_step(events, &folded, cx, None).await;
         }
 
         // Route the batch: inline tools decided here on the mailbox, remote
         // ones dispatched to spawned tasks that report back per call.
+        let inline_names = flight
+            .ctxs
+            .as_ref()
+            .map(|c| c.inline_names.clone())
+            .unwrap_or_default();
         let mut remote: Vec<PendingCall> = Vec::new();
         for (id, name, input) in tool_calls {
-            let inline = self
-                .running
-                .as_ref()
-                .and_then(|f| f.ctxs.as_ref())
-                .is_some_and(|c| c.inline_names.contains(&name));
-            if inline {
-                let executed = execute_inline(&folded, &name, &input, ctx);
+            if inline_names.contains(&name) {
+                let executed = execute_inline(&folded, &name, &input, cx.actor.self_ref());
                 let (output, is_error, inline_events) = match executed {
                     Ok((value, evs)) => (
                         value
@@ -937,7 +927,7 @@ impl AgentActor {
                     Err(e) => (e.to_string(), true, Vec::new()),
                 };
                 for event in inline_events {
-                    folded = AgentActor::apply_event(folded, event.clone());
+                    folded = fold(folded, event.clone());
                     events.push(event);
                 }
                 let complete = AgentDomainEvent::ToolComplete {
@@ -947,41 +937,38 @@ impl AgentActor {
                     artifacts: Vec::new(),
                     at_ms: now_ms(),
                 };
-                folded = AgentActor::apply_event(folded, complete.clone());
+                folded = fold(folded, complete.clone());
                 events.push(complete);
             } else {
                 remote.push(PendingCall { id, name, input });
             }
         }
 
-        let Some(flight) = self.running.as_mut() else {
+        let Some(flight) = self.flight.as_mut() else {
             return CommandEffect::persist(events);
         };
-        let no_remote = remote.is_empty();
-        if !no_remote {
-            let Some(tctx) = flight.ctxs.clone() else {
-                return CommandEffect::persist(events);
-            };
-            let turn = flight.id;
-            let cancel = flight.cancel.clone();
-            let self_ref = ctx.self_ref();
-            for call in remote {
-                spawn_tool_call(
-                    &tctx.toolbox,
-                    call.name.clone(),
-                    call.input.clone(),
-                    call.id.clone(),
-                    turn,
-                    cancel.clone(),
-                    self_ref.clone(),
-                );
-                flight.pending_calls.push(call);
-            }
-        }
-        if no_remote {
+        if remote.is_empty() {
             // The whole batch was inline; nothing will report back, so the
             // next call dispatches now.
-            return self.dispatch_model_step(events, &folded, ctx, None).await;
+            return self.dispatch_model_step(events, &folded, cx, None).await;
+        }
+        let Some(tctx) = flight.ctxs.clone() else {
+            return CommandEffect::persist(events);
+        };
+        let turn = flight.id;
+        let cancel = flight.cancel.clone();
+        let self_ref = cx.actor.self_ref();
+        for call in remote {
+            spawn_tool_call(
+                &tctx.toolbox,
+                call.name.clone(),
+                call.input.clone(),
+                call.id.clone(),
+                turn,
+                cancel.clone(),
+                self_ref.clone(),
+            );
+            flight.pending_calls.push(call);
         }
         CommandEffect::persist(events)
     }
@@ -990,16 +977,15 @@ impl AgentActor {
     async fn handle_llm_failed(
         &mut self,
         error: LlmError,
-        state: &AgentState,
-        ctx: &ActorContext<AgentCommand>,
+        cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
-        let Some(flight) = self.running.as_mut() else {
+        let Some(flight) = self.flight.as_mut() else {
             return CommandEffect::none();
         };
         // Retrying re-issues *one request* over the same folded history —
         // nothing was journaled by the failed attempt, so the old "did the
         // attempt write anything durable" check holds by construction.
-        if error.is_transient() && flight.attempt < self.params.max_retries {
+        if error.is_transient() && flight.attempt < cx.params.max_retries {
             flight.attempt += 1;
             let delay = error
                 .retry_after()
@@ -1010,18 +996,19 @@ impl AgentActor {
                 delay_ms = delay.as_millis(),
                 "transient provider error; retrying the call"
             );
-            self.spawn_llm(state, ctx, Some(delay));
+            self.spawn_llm(cx.state, cx, Some(delay));
             return CommandEffect::none();
         }
+        let state = cx.state.clone();
         self.fail_turn(
             Vec::new(),
-            state,
+            &state,
             error.to_string(),
             // Report the classification rather than assuming recoverable: a
             // permanent failure shown as transient invites the user to retry
             // something that can never succeed.
             error.is_transient(),
-            ctx,
+            cx,
         )
         .await
     }
@@ -1032,14 +1019,10 @@ impl AgentActor {
         turn: u64,
         tool_call_id: String,
         outcome: ToolReturn,
-        state: &AgentState,
-        ctx: &ActorContext<AgentCommand>,
+        cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
-        if self.running.as_ref().map(|f| f.id) != Some(turn) {
+        let Some(flight) = self.fenced(turn) else {
             tracing::warn!(turn, tool_call_id, "dropping a superseded tool result");
-            return CommandEffect::none();
-        }
-        let Some(flight) = self.running.as_mut() else {
             return CommandEffect::none();
         };
         let Some(position) = flight
@@ -1072,19 +1055,16 @@ impl AgentActor {
                 input: call.input,
             }),
         }
-        let folded = events
-            .iter()
-            .cloned()
-            .fold(state.clone(), AgentActor::apply_event);
+        let folded = fold_all(cx.state, &events);
         if !flight.pending_calls.is_empty() {
             return CommandEffect::persist(events);
         }
         // The batch settled.
         let stopped = std::mem::take(&mut flight.stopped);
-        if stopped.is_empty() {
-            return self.dispatch_model_step(events, &folded, ctx, None).await;
-        }
         let run_id = flight.id;
+        if stopped.is_empty() {
+            return self.dispatch_model_step(events, &folded, cx, None).await;
+        }
         self.finish(
             events,
             RunReport {
@@ -1093,9 +1073,203 @@ impl AgentActor {
                 seed_summary: None,
             },
             &folded,
-            ctx,
+            cx,
         )
         .await
+    }
+}
+
+#[async_trait]
+impl Component for Turn {
+    type Command = RunCommand;
+
+    async fn handle(
+        &mut self,
+        cmd: RunCommand,
+        cx: &mut Cx<'_>,
+    ) -> CommandEffect<AgentDomainEvent> {
+        match cmd {
+            RunCommand::StartTurn {
+                summarise,
+                summarise_only,
+            } => {
+                // The queue gates on `turn_live`, so a second start reaching
+                // here is a bug — refuse it rather than orphan the first
+                // turn's cancel token.
+                if self.flight.is_some() {
+                    tracing::warn!("refusing to start a turn while one is in flight");
+                    return CommandEffect::none();
+                }
+                self.start(cx, summarise, summarise_only);
+                CommandEffect::none()
+            }
+            RunCommand::Cancel { ack } => {
+                match (&self.flight, ack) {
+                    (Some(flight), ack) => {
+                        flight.cancel.cancel();
+                        // Answered by the conclusion below: the fence
+                        // guarantees the dying tasks can write nothing more,
+                        // so "the run is over" is true the moment it lands.
+                        self.cancel_acks.extend(ack);
+                        let run_id = flight.id;
+                        // Bank what the turn spent before concluding — the
+                        // conclusion reads usage off the folded state.
+                        let events = vec![AgentDomainEvent::RunAborted {
+                            usage: flight.usage.clone(),
+                            context_tokens: flight.context_tokens,
+                            at_ms: now_ms(),
+                        }];
+                        let folded = fold_all(cx.state, &events);
+                        self.finish(
+                            events,
+                            RunReport {
+                                run_id,
+                                outcome: RunOutcome::Cancelled,
+                                seed_summary: None,
+                            },
+                            &folded,
+                            cx,
+                        )
+                        .await
+                    }
+                    // Nothing in flight (idle, or paused on a pending ask): the
+                    // caller's guarantee already holds.
+                    (None, Some(ack)) => {
+                        let _ = ack.send(());
+                        CommandEffect::none()
+                    }
+                    (None, None) => CommandEffect::none(),
+                }
+            }
+            RunCommand::PersistProgress { events, ack } => {
+                CommandEffect::persist(events).and_ack(ack)
+            }
+            RunCommand::StepDone(report) => self.handle_step(*report, cx).await,
+            RunCommand::ToolReturned {
+                turn,
+                tool_call_id,
+                outcome,
+            } => {
+                self.handle_tool_returned(turn, tool_call_id, outcome, cx)
+                    .await
+            }
+            RunCommand::StreamDelta { turn, text } => {
+                // The fence again: a dead turn's chunks must not pollute the
+                // next turn's delta buffer.
+                if self.flight.as_ref().map(|f| f.id) == Some(turn) {
+                    cx.scratch.deltas.push(text);
+                    cx.publish_revision();
+                }
+                CommandEffect::none()
+            }
+        }
+    }
+
+    /// What a run wrote, and what it cost.
+    // The fallthrough is unreachable by construction: `component::fold` routes
+    // every variant to exactly one component, so an event added later fails to
+    // compile *there* — where it should be classified — rather than silently
+    // reaching the wrong fold here.
+    #[allow(clippy::wildcard_enum_match_arm)]
+    fn apply(state: &mut AgentState, event: AgentDomainEvent) {
+        match event {
+            AgentDomainEvent::MessageComplete { message }
+            | AgentDomainEvent::MessageAborted { message } => {
+                let at_ms = message.created_at_ms;
+                state.push(at_ms, AgentLogBody::Llm(message));
+            }
+            AgentDomainEvent::ToolComplete {
+                tool_call_id,
+                output,
+                is_error,
+                artifacts,
+                at_ms,
+            } => {
+                let mut message = Message::tool_result(tool_call_id, output, is_error, at_ms);
+                if let Some(horsie_agentcore::ContentPart::ToolResult(r)) =
+                    message.parts.first_mut()
+                {
+                    r.artifacts = artifacts;
+                }
+                state.push(at_ms, AgentLogBody::Llm(message));
+            }
+            AgentDomainEvent::RunComplete {
+                usage,
+                context_tokens,
+                ..
+            } => {
+                state.usage_total.add(&usage);
+                state.context_tokens = context_tokens;
+                state.last_turn_usage = Some(usage);
+                state.turn_in_flight = false;
+            }
+            AgentDomainEvent::RunAborted {
+                usage,
+                context_tokens,
+                ..
+            } => {
+                state.usage_total.add(&usage);
+                state.context_tokens = context_tokens;
+                state.turn_in_flight = false;
+            }
+            AgentDomainEvent::RunCancelled { .. } => state.turn_in_flight = false,
+            AgentDomainEvent::Nudged { .. } => {
+                state.nudges = state.nudges.saturating_add(1);
+                state.turn_in_flight = false;
+            }
+            _ => {}
+        }
+    }
+
+    /// Repair the tool call the dead process was running, report the turn it
+    /// died inside, and — for an agent nobody will message — re-drive it.
+    async fn on_load(&mut self, cx: &mut Cx<'_>) {
+        // A tool call the dead process was running has no result and never
+        // will. Record the repair once, here, where it still belongs at the
+        // end of the transcript.
+        let repairs = missing_tool_results(&cx.state.prompt_messages(), &parked_call_ids(cx.state));
+        if !repairs.is_empty() {
+            let (ack, _) = tokio::sync::oneshot::channel();
+            let ack = ReplyTo::from_sender(ack);
+            cx.tell(AgentCommand::Run(RunCommand::PersistProgress {
+                events: repairs
+                    .into_iter()
+                    .map(|message| AgentDomainEvent::InputMessage { message })
+                    .collect(),
+                ack,
+            }))
+            .await;
+        }
+        // A turn still open in the fold is one no process is running any more.
+        // Tell the owner, from here rather than from a command: this hook runs
+        // before the first live command, so the report is ordered ahead of
+        // anything queued while the actor was loading.
+        if cx.state.turn_in_flight {
+            cx.runtime
+                .parent
+                .deliver(crate::agent_loop::context::AgentOutcome::Interrupted {
+                    agent: cx.runtime.journal_id,
+                })
+                .await;
+        }
+        // Interactive sessions never self-continue: the user's next message is
+        // the continuation. An empty history means nothing ran yet, and a
+        // parked agent is waiting for a timer — neither is an interrupted
+        // turn.
+        if cx.params.interactive || cx.state.parked || cx.state.log.is_empty() {
+            return;
+        }
+        // The continuation is journaled — the fold is the only source of
+        // history now, so an input the model must see has to be in it.
+        let message = AgentInput::user_message(new_message_id(), "continue the interrupted task")
+            .to_message(now_ms());
+        let (ack, _) = tokio::sync::oneshot::channel();
+        cx.tell(AgentCommand::Run(RunCommand::PersistProgress {
+            events: vec![AgentDomainEvent::InputMessage { message }],
+            ack: ReplyTo::from_sender(ack),
+        }))
+        .await;
+        self.start(cx, None, false);
     }
 }
 
@@ -1237,212 +1411,17 @@ fn spawn_tool_call(
 }
 
 /// Execute one inline tool on the mailbox: the value it answers and the events
-/// that record it. Timers and the task list live here because their state is
-/// the actor's own — no ask round-trip, no toolbox wrapper.
+/// that record it. Timers and the task list are decided here because their
+/// state is the agent's own — no ask round-trip, no toolbox wrapper. Both are
+/// pure domain functions over the state, not calls into another component.
 fn execute_inline(
     folded: &AgentState,
     name: &str,
     input: &Value,
-    ctx: &ActorContext<AgentCommand>,
+    self_ref: ActorRef<AgentCommand>,
 ) -> Result<(Value, Vec<AgentDomainEvent>), horsie_agentcore::ToolCallError> {
     if name == crate::agent_loop::task_list::TASK_LIST_TOOL {
-        return TaskLists::execute_inline(folded, input);
+        return task_list::execute_task_list_tool(folded, input);
     }
-    Timers::execute_inline(folded, name, input, ctx)
-}
-
-/// The turn in flight: stopping it, and what its steps report.
-pub(super) struct Run;
-
-impl Run {
-    pub(super) async fn handle(
-        actor: &mut AgentActor,
-        state: &AgentState,
-        cmd: RunCommand,
-        ctx: &mut ActorContext<AgentCommand>,
-    ) -> CommandEffect<AgentDomainEvent> {
-        match cmd {
-            RunCommand::Cancel { ack } => {
-                match (&actor.running, ack) {
-                    (Some(flight), ack) => {
-                        flight.cancel.cancel();
-                        // Answered by the conclusion below: the fence
-                        // guarantees the dying tasks can write nothing more,
-                        // so "the run is over" is true the moment it lands.
-                        actor.cancel_acks.extend(ack);
-                        let run_id = flight.id;
-                        // Bank what the turn spent before concluding — the
-                        // conclusion reads usage off the folded state.
-                        let events = vec![AgentDomainEvent::RunAborted {
-                            usage: flight.usage.clone(),
-                            context_tokens: flight.context_tokens,
-                            at_ms: now_ms(),
-                        }];
-                        let folded = events
-                            .iter()
-                            .cloned()
-                            .fold(state.clone(), AgentActor::apply_event);
-                        actor
-                            .finish(
-                                events,
-                                RunReport {
-                                    run_id,
-                                    outcome: RunOutcome::Cancelled,
-                                    seed_summary: None,
-                                },
-                                &folded,
-                                ctx,
-                            )
-                            .await
-                    }
-                    // Nothing in flight (idle, or paused on a pending ask): the
-                    // caller's guarantee already holds.
-                    (None, Some(ack)) => {
-                        let _ = ack.send(());
-                        CommandEffect::none()
-                    }
-                    (None, None) => CommandEffect::none(),
-                }
-            }
-            RunCommand::PersistProgress { events, ack } => {
-                CommandEffect::persist(events).and_ack(ack)
-            }
-            RunCommand::StepDone(report) => actor.handle_step(*report, state, ctx).await,
-            RunCommand::ToolReturned {
-                turn,
-                tool_call_id,
-                outcome,
-            } => {
-                actor
-                    .handle_tool_returned(turn, tool_call_id, outcome, state, ctx)
-                    .await
-            }
-            RunCommand::StreamDelta { turn, text } => {
-                // The fence again: a dead turn's chunks must not pollute the
-                // next turn's delta buffer.
-                if actor.running.as_ref().map(|f| f.id) == Some(turn) {
-                    actor.deltas.push(text);
-                    actor.publish_revision();
-                }
-                CommandEffect::none()
-            }
-        }
-    }
-}
-
-#[async_trait]
-impl Component for Run {
-    /// Repair the tool call the dead process was running, report the turn it
-    /// died inside, and — for an agent nobody will message — re-drive it.
-    async fn on_load(actor: &mut AgentActor, state: &AgentState, ctx: &ActorContext<AgentCommand>) {
-        // A tool call the dead process was running has no result and never
-        // will. Record the repair once, here, where it still belongs at the
-        // end of the transcript.
-        let repairs = missing_tool_results(&state.prompt_messages(), &parked_call_ids(state));
-        if !repairs.is_empty() {
-            let (ack, _) = tokio::sync::oneshot::channel();
-            let ack = ReplyTo::from_sender(ack);
-            let _ = ctx
-                .self_ref()
-                .tell(AgentCommand::Run(RunCommand::PersistProgress {
-                    events: repairs
-                        .into_iter()
-                        .map(|message| AgentDomainEvent::InputMessage { message })
-                        .collect(),
-                    ack,
-                }))
-                .await;
-        }
-        // A turn still open in the fold is one no process is running any more.
-        // Tell the owner, from here rather than from a command: this hook runs
-        // before the first live command, so the report is ordered ahead of
-        // anything queued while the actor was loading.
-        if state.turn_in_flight {
-            actor
-                .ctx
-                .parent
-                .deliver(AgentOutcome::Interrupted {
-                    agent: actor.ctx.journal_id,
-                })
-                .await;
-        }
-        // Interactive sessions never self-continue: the user's next message is
-        // the continuation. An empty history means nothing ran yet, and a
-        // parked agent is waiting for a timer — neither is an interrupted
-        // turn.
-        if actor.params.interactive || state.parked || state.log.is_empty() {
-            return;
-        }
-        // The continuation is journaled — the fold is the only source of
-        // history now, so an input the model must see has to be in it. A
-        // process that dies again before progressing journals another one,
-        // which is the honest record of what happened.
-        let message = AgentInput::user_message(new_message_id(), "continue the interrupted task")
-            .to_message(now_ms());
-        let (ack, _) = tokio::sync::oneshot::channel();
-        let _ = ctx
-            .self_ref()
-            .tell(AgentCommand::Run(RunCommand::PersistProgress {
-                events: vec![AgentDomainEvent::InputMessage { message }],
-                ack: ReplyTo::from_sender(ack),
-            }))
-            .await;
-        actor.start_turn(ctx, state.context_tokens, None, false);
-    }
-
-    /// What a run wrote, and what it cost.
-    // The fallthrough is unreachable by construction: `AgentActor::apply_event`
-    // routes every variant to exactly one module, so an event added later fails
-    // to compile *there* — where it should be classified — rather than silently
-    // reaching the wrong fold here.
-    #[allow(clippy::wildcard_enum_match_arm)]
-    fn apply(state: &mut AgentState, event: AgentDomainEvent) {
-        match event {
-            AgentDomainEvent::MessageComplete { message }
-            | AgentDomainEvent::MessageAborted { message } => {
-                let at_ms = message.created_at_ms;
-                state.push(at_ms, AgentLogBody::Llm(message));
-            }
-            AgentDomainEvent::ToolComplete {
-                tool_call_id,
-                output,
-                is_error,
-                artifacts,
-                at_ms,
-            } => {
-                let mut message = Message::tool_result(tool_call_id, output, is_error, at_ms);
-                if let Some(horsie_agentcore::ContentPart::ToolResult(r)) =
-                    message.parts.first_mut()
-                {
-                    r.artifacts = artifacts;
-                }
-                state.push(at_ms, AgentLogBody::Llm(message));
-            }
-            AgentDomainEvent::RunComplete {
-                usage,
-                context_tokens,
-                ..
-            } => {
-                state.usage_total.add(&usage);
-                state.context_tokens = context_tokens;
-                state.last_turn_usage = Some(usage);
-                state.turn_in_flight = false;
-            }
-            AgentDomainEvent::RunAborted {
-                usage,
-                context_tokens,
-                ..
-            } => {
-                state.usage_total.add(&usage);
-                state.context_tokens = context_tokens;
-                state.turn_in_flight = false;
-            }
-            AgentDomainEvent::RunCancelled { .. } => state.turn_in_flight = false,
-            AgentDomainEvent::Nudged { .. } => {
-                state.nudges = state.nudges.saturating_add(1);
-                state.turn_in_flight = false;
-            }
-            _ => {}
-        }
-    }
+    timers::execute_timer_tool(folded, name, input, self_ref)
 }

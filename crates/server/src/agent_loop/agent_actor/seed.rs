@@ -12,7 +12,7 @@
 //! leaves a seeded sub session with nothing to do.
 
 use super::*;
-use horsie_actor::{ActorContext, CommandEffect, ReplyTo};
+use horsie_actor::{CommandEffect, ReplyTo};
 use horsie_agentcore::AgentLogBody;
 use horsie_models::now_ms;
 
@@ -67,13 +67,16 @@ impl AgentState {
 /// Being a sub session, and being branched from.
 pub(super) struct Seeding;
 
-impl Seeding {
-    pub(super) async fn handle(
-        _actor: &mut AgentActor,
-        state: &AgentState,
+#[async_trait::async_trait]
+impl Component for Seeding {
+    type Command = SeedCommand;
+
+    async fn handle(
+        &mut self,
         cmd: SeedCommand,
-        ctx: &mut ActorContext<AgentCommand>,
+        cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
+        let state = cx.state;
         match cmd {
             SeedCommand::Snapshot { at_seq, reply } => {
                 let _ = reply.send(Box::new(state.snapshot_at(at_seq)));
@@ -97,10 +100,7 @@ impl Seeding {
                 // person's message would not even log a `MessageQueued`.
                 if !state.log.is_empty() || !state.inbox.is_empty() {
                     let _ = reply.send(Ok(()));
-                    let _ = ctx
-                        .self_ref()
-                        .tell(AgentCommand::Queue(QueueCommand::Drain))
-                        .await;
+                    cx.drain().await;
                     return CommandEffect::none();
                 }
                 let (tx, rx) = tokio::sync::oneshot::channel();
@@ -114,10 +114,7 @@ impl Seeding {
                 });
                 // Decided after the write, exactly as `Enqueue` does: the queue
                 // a turn drains has to be the durable one.
-                let _ = ctx
-                    .self_ref()
-                    .tell(AgentCommand::Queue(QueueCommand::Drain))
-                    .await;
+                cx.drain().await;
                 CommandEffect::persist(vec![
                     AgentDomainEvent::Seeded {
                         state: seeded,
@@ -138,13 +135,13 @@ impl Seeding {
     }
 }
 
-impl Component for Seeding {
+impl Seeding {
     /// The history this agent adopted, and the seed appended after it.
     // `if let` rather than a `match`, because this module owns exactly one
-    // variant. Which one is decided in `AgentActor::apply_event`, so an event
-    // added later fails to compile *there* — where it has to be classified —
-    // rather than silently reaching the wrong fold here.
-    fn apply(state: &mut AgentState, event: AgentDomainEvent) {
+    // variant. Which one is decided in `component::fold`, so an event added
+    // later fails to compile *there* rather than silently reaching the wrong
+    // fold here.
+    pub(super) fn apply(state: &mut AgentState, event: AgentDomainEvent) {
         if let AgentDomainEvent::Seeded {
             state: seeded,
             seed,

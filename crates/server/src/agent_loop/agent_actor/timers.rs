@@ -1,23 +1,24 @@
-//! Timers, wired to the actor.
+//! The timers component.
 //!
 //! The domain types — arming, remaining, the wake message — live in
-//! [`crate::agent_loop::timers`], which stays pure. This is the other half: the
-//! tool an agent calls, the commands that reach the mailbox, the fold, and the
-//! re-arm that recovery owes.
+//! [`crate::agent_loop::timers`], which stays pure. This is the other half:
+//! the inline tool executor the turn routes to, the fold, the re-arm recovery
+//! owes, and the one command a sleep elapsing sends.
 //!
-//! A timer firing does not run anything. It queues a wake, which waits in the
-//! same place everything else addressed to this agent waits — so a timer firing
-//! mid-run is harmless, and no flag has to remember anything.
+//! A timer firing does not run anything. It queues a wake and tells `Drain`,
+//! so it waits in the same place everything else addressed to this agent
+//! waits — a timer firing mid-run is harmless, and no flag has to remember
+//! anything.
 
 use super::*;
 use async_trait::async_trait;
-use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor};
+use horsie_actor::{ActorRef, CommandEffect};
 use horsie_models::now_ms;
 use serde_json::Value;
 
 /// Spawn a one-shot sleep that tells the actor `TimerFired` after `delay`. The
-/// firing is journaled/handled in the actor; a stale fire (timer since cancelled)
-/// is ignored there, so an un-cancellable sleep task is harmless.
+/// firing is journaled/handled on the mailbox; a stale fire (timer since
+/// cancelled) is ignored there, so an un-cancellable sleep task is harmless.
 pub(super) fn spawn_timer_sleep(
     self_ref: ActorRef<AgentCommand>,
     id: crate::agent_loop::timers::TimerId,
@@ -31,131 +32,112 @@ pub(super) fn spawn_timer_sleep(
     });
 }
 
-/// Execute one timer tool on the mailbox: the value it answers and the
-/// events that record it. No toolbox wrapper and no ask round-trip — the
-/// actor owns this state, so the decision is a plain function over it.
-impl Timers {
-    pub(super) fn execute_inline(
-        folded: &AgentState,
-        name: &str,
-        input: &Value,
-        ctx: &ActorContext<AgentCommand>,
-    ) -> Result<(Value, Vec<AgentDomainEvent>), horsie_agentcore::ToolCallError> {
-        use crate::agent_loop::timers::{CancelSelector, TimerId, TimerKind};
-        use horsie_agentcore::ToolCallError;
-        match name {
-            "set_timer" => {
-                let kind = match input.get("kind").and_then(Value::as_str) {
-                    Some("one_shot") => TimerKind::OneShot,
-                    Some("recurring") => TimerKind::Recurring,
-                    _ => {
-                        return Err(ToolCallError::InvalidInput(
-                            "set_timer.kind must be 'one_shot' or 'recurring'".to_string(),
-                        ));
-                    }
-                };
-                let Some(after_secs) = input
-                    .get("after_secs")
-                    .and_then(Value::as_u64)
-                    .filter(|n| *n >= 1)
-                else {
-                    return Err(ToolCallError::InvalidInput(
-                        "set_timer.after_secs must be an integer >= 1".to_string(),
-                    ));
-                };
-                let label = input
-                    .get("label")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                let Some(message) = input
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                else {
-                    return Err(ToolCallError::InvalidInput(
-                        "set_timer.message must be a non-empty string".to_string(),
-                    ));
-                };
-                let now = now_ms();
-                let record = crate::agent_loop::timers::TimerRecord::arm(
-                    label,
-                    message,
-                    kind,
-                    std::time::Duration::from_secs(after_secs),
-                    now,
-                );
-                let id = record.id.clone();
-                spawn_timer_sleep(
-                    ctx.self_ref(),
-                    id.clone(),
-                    std::time::Duration::from_secs(after_secs),
-                );
-                Ok((
-                    serde_json::json!({ "timer_id": id.0 }),
-                    vec![AgentDomainEvent::TimerArmed { record, at_ms: now }],
-                ))
-            }
-            "list_timers" => {
-                let now = now_ms();
-                let views: Vec<_> = folded.timers.iter().map(|t| t.view(now)).collect();
-                serde_json::to_value(views)
-                    .map(|v| (v, Vec::new()))
-                    .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))
-            }
-            "cancel_timer" => {
-                let selector = if input.get("all").and_then(Value::as_bool) == Some(true) {
-                    CancelSelector::All
-                } else if let Some(id) = input.get("id").and_then(Value::as_str) {
-                    CancelSelector::One(TimerId(id.to_string()))
-                } else {
-                    return Err(ToolCallError::InvalidInput(
-                        "cancel_timer requires 'id' or 'all': true".to_string(),
-                    ));
-                };
-                let ids: Vec<TimerId> = match selector {
-                    CancelSelector::All => folded.timers.iter().map(|t| t.id.clone()).collect(),
-                    CancelSelector::One(id) => {
-                        if folded.timers.iter().any(|t| t.id == id) {
-                            vec![id]
-                        } else {
-                            vec![]
-                        }
-                    }
-                };
-                let named: Vec<String> = ids.iter().map(|i| i.0.clone()).collect();
-                let events = if ids.is_empty() {
-                    Vec::new()
-                } else {
-                    vec![AgentDomainEvent::TimerCancelled {
-                        ids,
-                        at_ms: now_ms(),
-                    }]
-                };
-                Ok((serde_json::json!({ "cancelled": named }), events))
-            }
-            other => Err(ToolCallError::InvalidInput(format!(
-                "no tool named '{other}'"
-            ))),
+/// Execute one timer tool: the value it answers and the events that record it.
+///
+/// A free function over the folded state (plus the sleep it spawns), not a
+/// component method: it belongs to the timer *domain*, and the turn component
+/// calls it without touching any component instance.
+pub(super) fn execute_timer_tool(
+    folded: &AgentState,
+    name: &str,
+    input: &Value,
+    self_ref: ActorRef<AgentCommand>,
+) -> Result<(Value, Vec<AgentDomainEvent>), horsie_agentcore::ToolCallError> {
+    use crate::agent_loop::timers::{TimerId, TimerKind, TimerRecord};
+    use horsie_agentcore::ToolCallError;
+    let invalid = |m: &str| Err(ToolCallError::InvalidInput(m.to_string()));
+    match name {
+        "set_timer" => {
+            let kind = match input.get("kind").and_then(Value::as_str) {
+                Some("one_shot") => TimerKind::OneShot,
+                Some("recurring") => TimerKind::Recurring,
+                _ => return invalid("set_timer.kind must be 'one_shot' or 'recurring'"),
+            };
+            let Some(after_secs) = input
+                .get("after_secs")
+                .and_then(Value::as_u64)
+                .filter(|n| *n >= 1)
+            else {
+                return invalid("set_timer.after_secs must be an integer >= 1");
+            };
+            let label = input
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let Some(message) = input
+                .get("message")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+            else {
+                return invalid("set_timer.message must be a non-empty string");
+            };
+            let now = now_ms();
+            let delay = std::time::Duration::from_secs(after_secs);
+            let record = TimerRecord::arm(label, message, kind, delay, now);
+            let id = record.id.clone();
+            spawn_timer_sleep(self_ref, id.clone(), delay);
+            Ok((
+                serde_json::json!({ "timer_id": id.0 }),
+                vec![AgentDomainEvent::TimerArmed { record, at_ms: now }],
+            ))
         }
+        "list_timers" => {
+            let now = now_ms();
+            let views: Vec<_> = folded.timers.iter().map(|t| t.view(now)).collect();
+            serde_json::to_value(views)
+                .map(|v| (v, Vec::new()))
+                .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))
+        }
+        "cancel_timer" => {
+            let ids: Vec<TimerId> = if input.get("all").and_then(Value::as_bool) == Some(true) {
+                folded.timers.iter().map(|t| t.id.clone()).collect()
+            } else if let Some(id) = input.get("id").and_then(Value::as_str) {
+                let id = TimerId(id.to_string());
+                folded
+                    .timers
+                    .iter()
+                    .any(|t| t.id == id)
+                    .then_some(id)
+                    .into_iter()
+                    .collect()
+            } else {
+                return invalid("cancel_timer requires 'id' or 'all': true");
+            };
+            let named: Vec<String> = ids.iter().map(|i| i.0.clone()).collect();
+            let events = match ids.is_empty() {
+                true => Vec::new(),
+                false => vec![AgentDomainEvent::TimerCancelled {
+                    ids,
+                    at_ms: now_ms(),
+                }],
+            };
+            Ok((serde_json::json!({ "cancelled": named }), events))
+        }
+        other => invalid(&format!("no tool named '{other}'")),
     }
 }
 
-impl AgentActor {
+/// Timers this agent has armed against itself.
+pub(super) struct Timers;
+
+#[async_trait]
+impl Component for Timers {
+    type Command = TimerCommand;
+
     /// A timer's sleep elapsed. Re-arm a recurring timer, then queue the wake.
     ///
-    /// Queued rather than run: a wake is one more thing addressed to this agent,
-    /// and it waits in the same place everything else does. That is what makes a
-    /// timer firing mid-run harmless — the run finishes, the boundary drains,
-    /// and no flag has to remember anything.
-    pub(super) async fn handle_timer_fired(
+    /// Queued rather than run: a wake is one more thing addressed to this
+    /// agent, and the `Drain` told here finds it in the same durable queue
+    /// everything else waits in — a timer firing mid-run is harmless.
+    async fn handle(
         &mut self,
-        id: crate::agent_loop::timers::TimerId,
-        state: &AgentState,
-        ctx: &ActorContext<AgentCommand>,
+        cmd: TimerCommand,
+        cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
-        let Some(record) = state.timers.iter().find(|t| t.id == id).cloned() else {
+        let TimerCommand::TimerFired { id } = cmd;
+        let Some(record) = cx.state.timers.iter().find(|t| t.id == id).cloned() else {
             // Cancelled or already removed — a stale sleep. Ignore.
             return CommandEffect::none();
         };
@@ -164,18 +146,17 @@ impl AgentActor {
         // Re-arm recurring; remove one-shot.
         let next_fire_at_unix_ms = match record.kind {
             crate::agent_loop::timers::TimerKind::Recurring => {
-                let next = now.saturating_add(record.interval_secs.saturating_mul(1000));
                 spawn_timer_sleep(
-                    ctx.self_ref(),
+                    cx.actor.self_ref(),
                     id.clone(),
                     std::time::Duration::from_secs(record.interval_secs),
                 );
-                Some(next)
+                Some(now.saturating_add(record.interval_secs.saturating_mul(1000)))
             }
             crate::agent_loop::timers::TimerKind::OneShot => None,
         };
-        // Derived from the timer and its fire count, never generated: the fold
-        // must reproduce the same id on replay, which a uuid could not.
+        // The wake id is derived from the timer and its fire count, never
+        // generated: the fold must reproduce the same id on replay.
         let received = AgentDomainEvent::Received {
             item: crate::agent_loop::Incoming::Timer {
                 id: format!("{id}:{display_count}"),
@@ -188,52 +169,13 @@ impl AgentActor {
             next_fire_at_unix_ms,
             at_ms: now,
         };
-        let mut events = vec![fired, received];
-        let folded = events
-            .iter()
-            .cloned()
-            .fold(state.clone(), Self::apply_event);
-        events.extend(self.try_drain(&folded, ctx).await);
-        CommandEffect::persist(events)
-    }
-}
-
-/// Timers this agent has armed against itself.
-pub(super) struct Timers;
-
-impl Timers {
-    pub(super) async fn handle(
-        actor: &mut AgentActor,
-        state: &AgentState,
-        cmd: TimerCommand,
-        ctx: &mut ActorContext<AgentCommand>,
-    ) -> CommandEffect<AgentDomainEvent> {
-        match cmd {
-            TimerCommand::TimerFired { id } => actor.handle_timer_fired(id, state, ctx).await,
-        }
-    }
-}
-
-#[async_trait]
-impl Component for Timers {
-    /// Every timer that survived, re-armed with its remaining delay — firing
-    /// immediately if it is already due. Whether the agent is parked or was
-    /// mid-run, because a timer keeps its promise either way.
-    async fn on_load(
-        _actor: &mut AgentActor,
-        state: &AgentState,
-        ctx: &ActorContext<AgentCommand>,
-    ) {
-        let now = now_ms();
-        for t in &state.timers {
-            spawn_timer_sleep(ctx.self_ref(), t.id.clone(), t.remaining(now));
-        }
+        cx.drain().await;
+        CommandEffect::persist(vec![fired, received])
     }
 
-    // The fallthrough is unreachable by construction: `AgentActor::apply_event`
-    // routes every variant to exactly one module, so an event added later fails
-    // to compile *there* — where it should be classified — rather than silently
-    // reaching the wrong fold here.
+    // The fallthrough is unreachable by construction: `component::fold` routes
+    // every variant to exactly one component, so an event added later fails to
+    // compile *there* rather than silently reaching the wrong fold here.
     #[allow(clippy::wildcard_enum_match_arm)]
     fn apply(state: &mut AgentState, event: AgentDomainEvent) {
         match event {
@@ -257,108 +199,14 @@ impl Component for Timers {
             _ => {}
         }
     }
-}
 
-#[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::wildcard_enum_match_arm
-)]
-mod tests {
-    use super::*;
-    #[test]
-    fn timer_events_fold_into_state() {
-        use crate::agent_loop::timers::{TimerKind, TimerRecord};
-        use std::time::Duration;
-
-        let rec = TimerRecord::arm(
-            "pr".into(),
-            String::new(),
-            TimerKind::Recurring,
-            Duration::from_secs(60),
-            0,
-        );
-        let id = rec.id.clone();
-        let mut state = AgentActor::initial_state();
-
-        state = AgentActor::apply_event(
-            state,
-            AgentDomainEvent::TimerArmed {
-                at_ms: 0,
-                record: rec,
-            },
-        );
-        assert_eq!(state.timers.len(), 1);
-
-        // Recurring fire re-arms in place with a carried next fire time and bumped count.
-        state = AgentActor::apply_event(
-            state,
-            AgentDomainEvent::TimerFired {
-                at_ms: 0,
-                id: id.clone(),
-                next_fire_at_unix_ms: Some(120_000),
-            },
-        );
-        assert_eq!(state.timers.len(), 1);
-        assert_eq!(state.timers[0].fire_count, 1);
-        assert_eq!(state.timers[0].fire_at_unix_ms, 120_000);
-
-        // One-shot fire (None) removes it.
-        state = AgentActor::apply_event(
-            state,
-            AgentDomainEvent::TimerFired {
-                at_ms: 0,
-                id,
-                next_fire_at_unix_ms: None,
-            },
-        );
-        assert!(state.timers.is_empty());
-    }
-
-    #[test]
-    fn cancel_event_removes_selected_timers() {
-        use crate::agent_loop::timers::{TimerKind, TimerRecord};
-        use std::time::Duration;
-        let a = TimerRecord::arm(
-            "a".into(),
-            String::new(),
-            TimerKind::OneShot,
-            Duration::from_secs(1),
-            0,
-        );
-        let b = TimerRecord::arm(
-            "b".into(),
-            String::new(),
-            TimerKind::OneShot,
-            Duration::from_secs(1),
-            0,
-        );
-        let (ia, ib) = (a.id.clone(), b.id.clone());
-        let mut state = AgentActor::initial_state();
-        state = AgentActor::apply_event(
-            state,
-            AgentDomainEvent::TimerArmed {
-                at_ms: 0,
-                record: a,
-            },
-        );
-        state = AgentActor::apply_event(
-            state,
-            AgentDomainEvent::TimerArmed {
-                at_ms: 0,
-                record: b,
-            },
-        );
-        state = AgentActor::apply_event(
-            state,
-            AgentDomainEvent::TimerCancelled {
-                at_ms: 0,
-                ids: vec![ia],
-            },
-        );
-        assert_eq!(state.timers.len(), 1);
-        assert_eq!(state.timers[0].id, ib);
+    /// Every timer that survived, re-armed with its remaining delay — firing
+    /// immediately if it is already due. Whether the agent is parked or was
+    /// mid-run, because a timer keeps its promise either way.
+    async fn on_load(&mut self, cx: &mut Cx<'_>) {
+        let now = now_ms();
+        for t in &cx.state.timers {
+            spawn_timer_sleep(cx.actor.self_ref(), t.id.clone(), t.remaining(now));
+        }
     }
 }

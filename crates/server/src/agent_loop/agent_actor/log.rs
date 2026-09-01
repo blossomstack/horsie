@@ -13,7 +13,8 @@
 //! start a turn — which is what keeps recovery quiet.
 
 use super::*;
-use horsie_actor::{ActorContext, CommandEffect, EventSourcedActor};
+use async_trait::async_trait;
+use horsie_actor::CommandEffect;
 use horsie_agentcore::{AgentLogBody, LifecycleEvent};
 use horsie_models::now_ms;
 
@@ -52,12 +53,14 @@ pub(super) fn runtime_readiness(event: &LifecycleEvent) -> Option<bool> {
 /// Things written into this agent's log by somebody else.
 pub(super) struct LogWrites;
 
-impl LogWrites {
-    pub(super) async fn handle(
-        actor: &mut AgentActor,
-        state: &AgentState,
+#[async_trait]
+impl Component for LogWrites {
+    type Command = LogCommand;
+
+    async fn handle(
+        &mut self,
         cmd: LogCommand,
-        ctx: &mut ActorContext<AgentCommand>,
+        cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
         match cmd {
             LogCommand::RecordLifecycle { event, at_ms } => {
@@ -68,18 +71,16 @@ impl LogWrites {
                 // nothing about the runtime cannot start a turn. That is what
                 // keeps recovery quiet: it journals a `TurnEnded(Interrupted)`,
                 // which is not a runtime fact and drains nothing.
-                let moved = runtime_readiness(&event).filter(|next| *next != actor.ready);
+                let moved = runtime_readiness(&event).filter(|next| *next != cx.scratch.ready);
                 if let Some(next) = moved {
-                    actor.ready = next;
+                    cx.scratch.ready = next;
                 }
-                let recorded = AgentDomainEvent::LifecycleRecorded { event, at_ms };
-                if moved != Some(true) {
-                    return CommandEffect::persist(vec![recorded]);
+                if moved == Some(true) {
+                    // The runtime arriving is what lets a waiting queue start
+                    // a turn; the drain finds this record already folded.
+                    cx.drain().await;
                 }
-                let folded = AgentActor::apply_event(state.clone(), recorded.clone());
-                let mut events = vec![recorded];
-                events.extend(actor.try_drain(&folded, ctx).await);
-                CommandEffect::persist(events)
+                CommandEffect::persist(vec![AgentDomainEvent::LifecycleRecorded { event, at_ms }])
             }
             LogCommand::HooksRan { records } => {
                 let at_ms = now_ms();
@@ -87,7 +88,7 @@ impl LogWrites {
                 // the event: `agent_frame` sees only the event, so deriving the
                 // id at fold time would give the live stream different cursors
                 // than `/history`.
-                let mut seq = state.hook_entry_count();
+                let mut seq = cx.state.hook_entry_count();
                 let events = records
                     .into_iter()
                     .map(|record| {
@@ -100,14 +101,11 @@ impl LogWrites {
             }
         }
     }
-}
 
-impl Component for LogWrites {
     /// What the session did, and what a plugin did to a tool call.
-    // The fallthrough is unreachable by construction: `AgentActor::apply_event`
-    // routes every variant to exactly one module, so an event added later fails
-    // to compile *there* — where it should be classified — rather than silently
-    // reaching the wrong fold here.
+    // The fallthrough is unreachable by construction: `component::fold` routes
+    // every variant to exactly one component, so an event added later fails to
+    // compile *there* rather than silently reaching the wrong fold here.
     #[allow(clippy::wildcard_enum_match_arm)]
     fn apply(state: &mut AgentState, event: AgentDomainEvent) {
         match event {
