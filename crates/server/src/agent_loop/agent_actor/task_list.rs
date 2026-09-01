@@ -9,82 +9,35 @@
 //! lets replay skip re-deriving and re-validating every past mutation.
 
 use super::*;
-use async_trait::async_trait;
-use horsie_actor::{ActorContext, ActorRef, CommandEffect};
-use horsie_agentcore::ToolOutcome;
-use horsie_agentcore::Toolbox;
 use horsie_agentcore::{AgentLogBody, LifecycleEvent, TaskListLifecycle};
 use horsie_models::now_ms;
 use serde_json::Value;
-use std::sync::Arc;
-
-/// Wraps an agent's toolbox, adding the always-available `task_list` tool. It
-/// executes by `ask`ing the owning [`AgentActor`] (never forwarded to the
-/// sandboxed runtime), so its state is durable -- journaled and replayed
-/// exactly like timers (see `crate::agent_loop::task_list`).
-pub(super) struct TaskListToolbox {
-    pub(super) inner: Arc<dyn Toolbox>,
-    pub(super) actor: ActorRef<AgentCommand>,
-}
-
-#[async_trait]
-impl Toolbox for TaskListToolbox {
-    fn specs(&self) -> Vec<horsie_agentcore::ToolSpec> {
-        let mut specs = self.inner.specs();
-        specs.push(crate::agent_loop::task_list::task_list_tool_spec());
-        specs
-    }
-
-    async fn execute(
-        &self,
-        name: &str,
-        input: Value,
-        tool_call_id: &str,
-    ) -> Result<horsie_agentcore::ToolOutcome, horsie_agentcore::ToolCallError> {
-        use horsie_agentcore::ToolCallError;
-        if name != crate::agent_loop::task_list::TASK_LIST_TOOL {
-            return self.inner.execute(name, input, tool_call_id).await;
-        }
-        let action = crate::agent_loop::task_list::TaskListAction::from_input(&input)?;
-        let result = self
-            .actor
-            .ask(|reply| AgentCommand::TaskList(TaskListCommand::TaskListOp { action, reply }))
-            .await
-            .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?;
-        result
-            .map(|text| ToolOutcome::result(Value::String(text)))
-            .map_err(ToolCallError::InvalidInput)
-    }
-}
 
 /// The agent's own task list.
 pub(super) struct TaskLists;
 
 impl TaskLists {
-    pub(super) async fn handle(
-        _actor: &mut AgentActor,
-        state: &AgentState,
-        cmd: TaskListCommand,
-        _ctx: &mut ActorContext<AgentCommand>,
-    ) -> CommandEffect<AgentDomainEvent> {
-        match cmd {
-            TaskListCommand::TaskListOp { action, reply } => {
-                let mut next = state.task_list.clone();
-                match next.apply(action) {
-                    Ok(()) => {
-                        let text = next.render();
-                        let _ = reply.send(Ok(text));
-                        CommandEffect::persist(vec![AgentDomainEvent::TaskListChanged {
-                            snapshot: next,
-                            at_ms: now_ms(),
-                        }])
-                    }
-                    Err(msg) => {
-                        let _ = reply.send(Err(msg));
-                        CommandEffect::none()
-                    }
-                }
+    /// Execute the `task_list` tool on the mailbox: the rendered list it
+    /// answers and the event that records the mutation. No toolbox wrapper and
+    /// no ask round-trip — the actor owns this state.
+    pub(super) fn execute_inline(
+        folded: &AgentState,
+        input: &Value,
+    ) -> Result<(Value, Vec<AgentDomainEvent>), horsie_agentcore::ToolCallError> {
+        let action = crate::agent_loop::task_list::TaskListAction::from_input(input)?;
+        let mut next = folded.task_list.clone();
+        match next.apply(action) {
+            Ok(()) => {
+                let text = next.render();
+                Ok((
+                    Value::String(text),
+                    vec![AgentDomainEvent::TaskListChanged {
+                        snapshot: next,
+                        at_ms: now_ms(),
+                    }],
+                ))
             }
+            Err(msg) => Err(horsie_agentcore::ToolCallError::InvalidInput(msg)),
         }
     }
 }

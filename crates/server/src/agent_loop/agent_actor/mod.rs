@@ -31,7 +31,6 @@ mod reads;
 mod repair;
 mod run;
 mod seed;
-mod sink;
 mod state;
 mod task_list;
 #[cfg(test)]
@@ -48,21 +47,35 @@ use component::Component;
 use log::LogWrites;
 use queue::Queue;
 use reads::Reads;
-use repair::{
-    missing_tool_results, parked_call_ids, repair_unanswered_tool_calls,
-    repair_unanswered_tool_calls_except,
-};
-use run::{Run, RunHandle, RunOutcome, RunReport, SeedSummary};
+use repair::{missing_tool_results, parked_call_ids, repair_unanswered_tool_calls};
+use run::{Run, RunOutcome, RunReport, SeedSummary, StepReport, TurnFlight};
 use seed::Seeding;
-use sink::{CapturingSink, PersistSink, coarse_appends_an_entry, coarse_event};
 use state::new_message_id;
-use task_list::{TaskListToolbox, TaskLists};
-use timers::{TimerToolbox, Timers};
+use task_list::TaskLists;
+use timers::Timers;
 
 use crate::agent_loop::context::AgentRuntimeContext;
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, CommandEffect, EventSourcedActor, PersistenceId, ReplyTo};
 use std::sync::Arc;
+
+/// Whether folding this event appends a log entry — i.e. consumes a `seq`.
+///
+/// Kept beside the fold deliberately: the two must agree, and a variant added
+/// to one without the other would either strand deltas under an entry that
+/// superseded them or clear them for an event that appended nothing.
+pub(super) fn coarse_appends_an_entry(e: &AgentDomainEvent) -> bool {
+    matches!(
+        e,
+        AgentDomainEvent::InputMessage { .. }
+            | AgentDomainEvent::MessageComplete { .. }
+            | AgentDomainEvent::MessageAborted { .. }
+            | AgentDomainEvent::ToolComplete { .. }
+            | AgentDomainEvent::HookRan { .. }
+            | AgentDomainEvent::LifecycleRecorded { .. }
+            | AgentDomainEvent::TaskListChanged { .. }
+    )
+}
 
 /// Events an agent may journal between snapshots before the next turn boundary
 /// takes one.
@@ -93,7 +106,7 @@ pub trait AgentObserver: Send + Sync {
 pub struct AgentActor {
     ctx: AgentRuntimeContext,
     params: AgentParams,
-    running: Option<RunHandle>,
+    running: Option<TurnFlight>,
     /// Where durable history is published, when anyone is listening. `None` for
     /// workflow agents, which have no live stream.
     observer: Option<Arc<dyn AgentObserver>>,
@@ -307,7 +320,6 @@ impl EventSourcedActor for AgentActor {
             AgentCommand::Queue(c) => Queue::handle(self, state, c, ctx).await,
             AgentCommand::Run(c) => Run::handle(self, state, c, ctx).await,
             AgentCommand::Timer(c) => Timers::handle(self, state, c, ctx).await,
-            AgentCommand::TaskList(c) => TaskLists::handle(self, state, c, ctx).await,
             AgentCommand::Read(c) => Reads::handle(self, state, c, ctx).await,
             AgentCommand::Log(c) => LogWrites::handle(self, state, c, ctx).await,
             AgentCommand::Seed(c) => Seeding::handle(self, state, c, ctx).await,

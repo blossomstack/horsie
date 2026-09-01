@@ -110,20 +110,6 @@ pub(super) fn repair_unanswered_tool_calls(messages: Vec<Message>) -> Vec<Messag
     repair_dangling(messages, &std::collections::HashSet::new())
 }
 
-/// [`repair_unanswered_tool_calls`] for the resume-from-ask path, where
-/// `answering` are the tool calls this very command is supplying results for
-/// (e.g. every `ask_user` of a parked turn). They are about to be answered for
-/// real, so they are not
-/// dangling: repairing it too would put *two* results on one `tool_use_id` — the
-/// duplicate shape stricter providers reject outright, and pure noise for the
-/// ones that don't.
-pub(super) fn repair_unanswered_tool_calls_except(
-    messages: Vec<Message>,
-    answering: &std::collections::HashSet<String>,
-) -> Vec<Message> {
-    repair_dangling(messages, answering)
-}
-
 pub(super) fn repair_dangling(
     messages: Vec<Message>,
     answering: &std::collections::HashSet<String>,

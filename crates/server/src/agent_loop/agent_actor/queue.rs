@@ -201,25 +201,13 @@ impl AgentActor {
             return events;
         }
 
-        // The ids answered here are not dangling, whatever the recovered
-        // history says: their results are in this very input.
-        let answering: std::collections::HashSet<String> =
-            results.iter().map(|r| r.tool_call_id.clone()).collect();
-        // Sanitize on every turn start: a history recovered from a
-        // mid-turn crash may carry dangling tool calls (a no-op when
-        // well-formed).
-        let mut history = repair_unanswered_tool_calls_except(folded.prompt_messages(), &answering);
-
         // Results that precede a user message belong to the history, not
         // to the input: the turn is started by what the user said.
         let starts_a_user_turn = message.is_some() || !subagent_results.is_empty();
         let agent_input = if starts_a_user_turn {
             if !results.is_empty() {
                 let recorded = AgentInput::tool_results(results).to_message(now_ms());
-                events.push(AgentDomainEvent::InputMessage {
-                    message: recorded.clone(),
-                });
-                history.push(recorded);
+                events.push(AgentDomainEvent::InputMessage { message: recorded });
             }
             AgentInput::user_message_with_results(
                 new_message_id(),
@@ -244,10 +232,11 @@ impl AgentActor {
                 message: agent_input.to_message(now_ms()),
             });
         }
-        self.start_run(
-            agent_input,
+        // The turn's whole input is in `events` now; the first step dispatches
+        // only after these are persisted and folded, so it reads them from
+        // state rather than being handed a history.
+        self.start_turn(
             ctx,
-            history,
             folded.context_tokens,
             summarise.clone(),
             summarise_only,

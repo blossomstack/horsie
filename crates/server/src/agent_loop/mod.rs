@@ -26,8 +26,8 @@ mod workspace;
 pub use agent_actor::{
     AgentActor, AgentCommand, AgentDomainEvent, AgentObserver, AgentParams, AgentState,
     AgentStateView, AgentUsageSnapshot, CoreCommand, LogCommand, QueueCommand, ReadCommand,
-    ReadOutcome, ReplayWindow, RunCommand, SeedCommand, TaskListCommand, TimerCommand, UsageTotal,
-    hook_entry, hook_entry_id,
+    ReadOutcome, ReplayWindow, RunCommand, SeedCommand, TimerCommand, UsageTotal, hook_entry,
+    hook_entry_id,
 };
 pub use agent_log::{
     Anchor, Cursor, LogFilter, LogPage, REPLAY_CAP, kind_of, page, replay_window, search,

@@ -9,7 +9,6 @@ use super::*;
 use crate::agent_loop::context::AgentRunDef;
 use horsie_actor::ReplyTo;
 use horsie_agentcore::{LifecycleEvent, Message, Usage};
-use horsie_models::agent::ArtifactRef;
 use serde::{Deserialize, Serialize};
 
 /// Per-agent configuration distilled from an [`AgentRunDef`]. Runtime only.
@@ -82,8 +81,6 @@ pub enum AgentCommand {
     Run(RunCommand),
     /// Timers this agent has armed against itself.
     Timer(TimerCommand),
-    /// The agent's own task list.
-    TaskList(TaskListCommand),
     /// Questions answered from state, which wake nothing.
     Read(ReadCommand),
     /// Things written into this agent's log by somebody else.
@@ -125,61 +122,56 @@ pub enum QueueCommand {
     StartPrepared(Box<PreparedStart>),
 }
 
-/// The turn in flight: stopping it, and what it writes and reports.
+/// The turn in flight: stopping it, and what its spawned steps report back.
 pub enum RunCommand {
-    /// Cancel an in-flight run. `ack`, if given, fires once the run has
-    /// actually terminated — immediately when none is in flight — so a caller
-    /// that must know this incarnation will write nothing more (e.g. a session
-    /// about to spawn a replacement agent on the same journal) can wait for it
-    /// rather than racing it.
+    /// Cancel an in-flight run. `ack`, if given, fires once the turn is over —
+    /// immediately when none is in flight. The actor answers it in the handler
+    /// itself: the generation fence guarantees a cancelled turn's straggler
+    /// reports change nothing, so there is no unwind to wait for.
     Cancel { ack: Option<ReplyTo<()>> },
-    /// Internal: coarse events captured mid-run. `ack` lets the emitting loop
-    /// await the durable write before continuing, so persistence applies
-    /// backpressure on the agent loop, and reports the write outcome so a
-    /// journal failure aborts the run instead of proceeding on an unrecorded
-    /// history. Persistence still flows through this one mailbox.
+    /// Internal: events to journal outside a step's own handler — recovery
+    /// repairs, and tests. `ack` reports the durable write.
     PersistProgress {
         events: Vec<AgentDomainEvent>,
         ack: ReplyTo<Result<(), horsie_actor::JournalError>>,
     },
-    /// Internal: a background run finished. Boxed to keep the command enum
-    /// small.
-    RunFinished(Box<RunReport>),
+    /// Internal: one spawned step of the turn finished — the per-turn setup,
+    /// a summarisation, a compaction, or a provider call. Boxed to keep the
+    /// command enum small.
+    StepDone(Box<StepReport>),
+    /// Internal: one dispatched tool call answered (or timed out inside its
+    /// own toolbox). Carried per call rather than per batch so a fast tool's
+    /// result is durable while a slow one still runs.
+    ToolReturned {
+        turn: u64,
+        tool_call_id: String,
+        outcome: ToolReturn,
+    },
+    /// Internal: one chunk of the message a step is streaming. Unjournaled;
+    /// carries the turn generation so a cancelled turn's stragglers are
+    /// dropped instead of polluting the next turn's delta buffer.
+    StreamDelta { turn: u64, text: String },
 }
 
-/// Timers this agent has armed against itself.
+/// What a dispatched tool call came back with.
+pub enum ToolReturn {
+    /// An ordinary result — including an error result, which the model reads.
+    Result {
+        output: String,
+        is_error: bool,
+        artifacts: Vec<horsie_models::agent::ArtifactRef>,
+    },
+    /// The call ended the run (`ask_user`, `submit_result`, ...). No result is
+    /// recorded — the dangling `tool_use` is the shape of a parked agent.
+    Stopped,
+}
+
+/// Timers this agent has armed against itself. The control tools are decided
+/// inline on the mailbox now; only the sleep's report remains a command.
 pub enum TimerCommand {
-    /// Arm a timer; replies with the new timer id once recorded.
-    ArmTimer {
-        label: String,
-        message: String,
-        kind: crate::agent_loop::timers::TimerKind,
-        after_secs: u64,
-        reply: ReplyTo<crate::agent_loop::timers::TimerId>,
-    },
-    /// List active timers.
-    ListTimers {
-        reply: ReplyTo<Vec<crate::agent_loop::timers::TimerView>>,
-    },
-    /// Cancel one or all timers; replies with the ids actually removed.
-    CancelTimer {
-        selector: crate::agent_loop::timers::CancelSelector,
-        reply: ReplyTo<Vec<crate::agent_loop::timers::TimerId>>,
-    },
     /// Internal: a timer's sleep elapsed.
     TimerFired {
         id: crate::agent_loop::timers::TimerId,
-    },
-}
-
-/// The agent's own task list.
-pub enum TaskListCommand {
-    /// Apply a `task_list` mutation (or just render `list`); durable like
-    /// timers. Replies with the rendered list, or an error message if the
-    /// action was rejected (unknown id, out-of-range position, ...).
-    TaskListOp {
-        action: crate::agent_loop::task_list::TaskListAction,
-        reply: ReplyTo<Result<String, String>>,
     },
 }
 
@@ -239,13 +231,6 @@ pub enum ReadCommand {
     /// document. Distinct from `GetHistory`, which returns transcript appends:
     /// these are values a client re-reads rather than accumulates.
     GetState { reply: ReplyTo<AgentStateView> },
-    /// The exact facts a compaction must carry across verbatim.
-    ///
-    /// Answered from state on the mailbox, and asked from a *running* agent's
-    /// own task: a compaction can happen mid-turn, and the task list it must
-    /// preserve may have been changed by a tool call earlier in that same turn.
-    /// Reading a copy taken at run start would carry a stale one.
-    CarriedState { reply: ReplyTo<String> },
 }
 
 /// Things written into this agent's log by somebody else.
@@ -257,14 +242,6 @@ pub enum LogCommand {
     /// because the agent is the sole writer of its own log, which is what makes
     /// the order deterministic with no merge anywhere.
     RecordLifecycle { event: LifecycleEvent, at_ms: u64 },
-    /// One chunk of the message currently being written.
-    ///
-    /// Routed through the mailbox rather than straight to readers so it is
-    /// ordered against the entries around it: a chunk cannot overtake the entry
-    /// it precedes, and the entry that supersedes it cannot land first. That
-    /// ordering is the only reason this is a command at all — nothing here is
-    /// journaled.
-    RecordDelta { text: String },
     /// Plugin hooks ran against one of this agent's tool calls. A `tell` with
     /// no ack: nothing waits on an audit trail, and recording what a hook did
     /// must never be able to slow the call it describes.
@@ -377,10 +354,12 @@ pub enum AgentDomainEvent {
         tool_call_id: String,
         output: String,
         is_error: bool,
-        /// What the result produced besides text. Missing from journals written
-        /// before artifact-bearing tools existed.
+        /// What the tool produced beyond text — already-stored references.
+        /// Journaled so the prompt the fold rebuilds carries them: the model's
+        /// next call within the same turn must be able to see a screenshot a
+        /// tool just took, and the fold is now the only source of history.
         #[serde(default)]
-        artifacts: Vec<ArtifactRef>,
+        artifacts: Vec<horsie_models::agent::ArtifactRef>,
         /// When the tool finished. Journaled rather than re-read at fold time:
         /// this variant rebuilds its `Message` in `apply_event`, so a recovered
         /// transcript would otherwise stamp every past tool result with the
@@ -562,22 +541,5 @@ mod tests {
     #[test]
     fn from_def_owes_no_result() {
         assert!(!AgentParams::from_def(&def_fixture()).requires_result);
-    }
-
-    #[test]
-    fn old_tool_complete_events_default_to_no_artifacts() {
-        let event: AgentDomainEvent = serde_json::from_value(serde_json::json!({
-            "ToolComplete": {
-                "tool_call_id": "tc1",
-                "output": "ok",
-                "is_error": false,
-                "at_ms": 42
-            }
-        }))
-        .unwrap();
-        assert!(matches!(
-            event,
-            AgentDomainEvent::ToolComplete { artifacts, .. } if artifacts.is_empty()
-        ));
     }
 }

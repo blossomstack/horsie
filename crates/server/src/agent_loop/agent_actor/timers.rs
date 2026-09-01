@@ -12,11 +12,8 @@
 use super::*;
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor};
-use horsie_agentcore::ToolOutcome;
-use horsie_agentcore::Toolbox;
 use horsie_models::now_ms;
 use serde_json::Value;
-use std::sync::Arc;
 
 /// Spawn a one-shot sleep that tells the actor `TimerFired` after `delay`. The
 /// firing is journaled/handled in the actor; a stale fire (timer since cancelled)
@@ -34,27 +31,16 @@ pub(super) fn spawn_timer_sleep(
     });
 }
 
-/// Wraps an agent's toolbox, adding the three timer control tools. They execute by
-/// `ask`ing the owning [`AgentActor`] (never forwarded to the sandboxed runtime).
-pub(super) struct TimerToolbox {
-    pub(super) inner: Arc<dyn Toolbox>,
-    pub(super) actor: ActorRef<AgentCommand>,
-}
-
-#[async_trait]
-impl Toolbox for TimerToolbox {
-    fn specs(&self) -> Vec<horsie_agentcore::ToolSpec> {
-        let mut specs = self.inner.specs();
-        specs.extend(crate::agent_loop::timers::timer_tool_specs());
-        specs
-    }
-
-    async fn execute(
-        &self,
+/// Execute one timer tool on the mailbox: the value it answers and the
+/// events that record it. No toolbox wrapper and no ask round-trip — the
+/// actor owns this state, so the decision is a plain function over it.
+impl Timers {
+    pub(super) fn execute_inline(
+        folded: &AgentState,
         name: &str,
-        input: Value,
-        tool_call_id: &str,
-    ) -> Result<horsie_agentcore::ToolOutcome, horsie_agentcore::ToolCallError> {
+        input: &Value,
+        ctx: &ActorContext<AgentCommand>,
+    ) -> Result<(Value, Vec<AgentDomainEvent>), horsie_agentcore::ToolCallError> {
         use crate::agent_loop::timers::{CancelSelector, TimerId, TimerKind};
         use horsie_agentcore::ToolCallError;
         match name {
@@ -92,29 +78,30 @@ impl Toolbox for TimerToolbox {
                         "set_timer.message must be a non-empty string".to_string(),
                     ));
                 };
-                let id = self
-                    .actor
-                    .ask(|reply| {
-                        AgentCommand::Timer(TimerCommand::ArmTimer {
-                            label,
-                            message,
-                            kind,
-                            after_secs,
-                            reply,
-                        })
-                    })
-                    .await
-                    .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?;
-                Ok(ToolOutcome::result(serde_json::json!({ "timer_id": id.0 })))
+                let now = now_ms();
+                let record = crate::agent_loop::timers::TimerRecord::arm(
+                    label,
+                    message,
+                    kind,
+                    std::time::Duration::from_secs(after_secs),
+                    now,
+                );
+                let id = record.id.clone();
+                spawn_timer_sleep(
+                    ctx.self_ref(),
+                    id.clone(),
+                    std::time::Duration::from_secs(after_secs),
+                );
+                Ok((
+                    serde_json::json!({ "timer_id": id.0 }),
+                    vec![AgentDomainEvent::TimerArmed { record, at_ms: now }],
+                ))
             }
             "list_timers" => {
-                let views = self
-                    .actor
-                    .ask(|reply| AgentCommand::Timer(TimerCommand::ListTimers { reply }))
-                    .await
-                    .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?;
+                let now = now_ms();
+                let views: Vec<_> = folded.timers.iter().map(|t| t.view(now)).collect();
                 serde_json::to_value(views)
-                    .map(ToolOutcome::from)
+                    .map(|v| (v, Vec::new()))
                     .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))
             }
             "cancel_timer" => {
@@ -127,15 +114,30 @@ impl Toolbox for TimerToolbox {
                         "cancel_timer requires 'id' or 'all': true".to_string(),
                     ));
                 };
-                let ids = self
-                    .actor
-                    .ask(|reply| AgentCommand::Timer(TimerCommand::CancelTimer { selector, reply }))
-                    .await
-                    .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?;
-                let ids: Vec<String> = ids.into_iter().map(|i| i.0).collect();
-                Ok(ToolOutcome::result(serde_json::json!({ "cancelled": ids })))
+                let ids: Vec<TimerId> = match selector {
+                    CancelSelector::All => folded.timers.iter().map(|t| t.id.clone()).collect(),
+                    CancelSelector::One(id) => {
+                        if folded.timers.iter().any(|t| t.id == id) {
+                            vec![id]
+                        } else {
+                            vec![]
+                        }
+                    }
+                };
+                let named: Vec<String> = ids.iter().map(|i| i.0.clone()).collect();
+                let events = if ids.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![AgentDomainEvent::TimerCancelled {
+                        ids,
+                        at_ms: now_ms(),
+                    }]
+                };
+                Ok((serde_json::json!({ "cancelled": named }), events))
             }
-            _ => self.inner.execute(name, input, tool_call_id).await,
+            other => Err(ToolCallError::InvalidInput(format!(
+                "no tool named '{other}'"
+            ))),
         }
     }
 }
@@ -207,62 +209,6 @@ impl Timers {
         ctx: &mut ActorContext<AgentCommand>,
     ) -> CommandEffect<AgentDomainEvent> {
         match cmd {
-            TimerCommand::ArmTimer {
-                label,
-                message,
-                kind,
-                after_secs,
-                reply,
-            } => {
-                let now = now_ms();
-                let record = crate::agent_loop::timers::TimerRecord::arm(
-                    label,
-                    message,
-                    kind,
-                    std::time::Duration::from_secs(after_secs),
-                    now,
-                );
-                let id = record.id.clone();
-                spawn_timer_sleep(
-                    ctx.self_ref(),
-                    id.clone(),
-                    std::time::Duration::from_secs(after_secs),
-                );
-                let _ = reply.send(id);
-                CommandEffect::persist(vec![AgentDomainEvent::TimerArmed {
-                    record,
-                    at_ms: now_ms(),
-                }])
-            }
-            TimerCommand::ListTimers { reply } => {
-                let now = now_ms();
-                let views = state.timers.iter().map(|t| t.view(now)).collect();
-                let _ = reply.send(views);
-                CommandEffect::none()
-            }
-            TimerCommand::CancelTimer { selector, reply } => {
-                let ids: Vec<crate::agent_loop::timers::TimerId> = match selector {
-                    crate::agent_loop::timers::CancelSelector::All => {
-                        state.timers.iter().map(|t| t.id.clone()).collect()
-                    }
-                    crate::agent_loop::timers::CancelSelector::One(id) => {
-                        if state.timers.iter().any(|t| t.id == id) {
-                            vec![id]
-                        } else {
-                            vec![]
-                        }
-                    }
-                };
-                let _ = reply.send(ids.clone());
-                if ids.is_empty() {
-                    CommandEffect::none()
-                } else {
-                    CommandEffect::persist(vec![AgentDomainEvent::TimerCancelled {
-                        ids,
-                        at_ms: now_ms(),
-                    }])
-                }
-            }
             TimerCommand::TimerFired { id } => actor.handle_timer_fired(id, state, ctx).await,
         }
     }

@@ -81,11 +81,6 @@ impl LogWrites {
                 events.extend(actor.try_drain(&folded, ctx).await);
                 CommandEffect::persist(events)
             }
-            LogCommand::RecordDelta { text } => {
-                actor.deltas.push(text);
-                actor.publish_revision();
-                CommandEffect::none()
-            }
             LogCommand::HooksRan { records } => {
                 let at_ms = now_ms();
                 // Counted here, against the state as it stands, and carried on

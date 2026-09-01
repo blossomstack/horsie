@@ -205,12 +205,6 @@ impl Reads {
                 let _ = reply.send(state.state_view());
                 CommandEffect::none()
             }
-            ReadCommand::CarriedState { reply } => {
-                let _ = reply.send(crate::agent_loop::carried_state::render_carried_state(
-                    state,
-                ));
-                CommandEffect::none()
-            }
             ReadCommand::LogHead { reply } => {
                 let _ = reply.send(state.next_seq);
                 CommandEffect::none()

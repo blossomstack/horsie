@@ -111,74 +111,6 @@ fn running_children(state: &AgentState) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The owner's half of compaction, answered by the agent actor and its runtime.
-///
-/// Held by the *run's* task, not by the actor, for the same reason the hook
-/// sinks are: a thirty-second hook must not be able to block a cancel.
-pub struct ActorCompactionPolicy {
-    actor: horsie_actor::ActorRef<super::AgentCommand>,
-    context: std::sync::Arc<dyn super::ContextProvider>,
-}
-
-impl ActorCompactionPolicy {
-    #[must_use]
-    pub fn new(
-        actor: horsie_actor::ActorRef<super::AgentCommand>,
-        context: std::sync::Arc<dyn super::ContextProvider>,
-    ) -> Self {
-        Self { actor, context }
-    }
-}
-
-#[async_trait::async_trait]
-impl horsie_agentcore::CompactionPolicy for ActorCompactionPolicy {
-    async fn carried_state(&self) -> String {
-        // A failed ask means the actor is gone, which means this run is about
-        // to be torn down anyway. An empty block is the safe answer: the
-        // compaction still records what it summarised, and nothing invents
-        // state that could not be read.
-        self.actor
-            .ask(|reply| super::AgentCommand::Read(super::ReadCommand::CarriedState { reply }))
-            .await
-            .unwrap_or_default()
-    }
-
-    async fn before(
-        &self,
-        plan: &horsie_agentcore::CompactionPlan,
-    ) -> horsie_agentcore::PreCompactDecision {
-        let records = self
-            .context
-            .compaction_hooks(horsie_models::runtime::ServerHookEvent::PreCompact(
-                horsie_models::runtime::PreCompactInput {
-                    trigger: plan.trigger.to_string(),
-                    instructions: plan.instructions.clone(),
-                },
-            ))
-            .await;
-        match precompact_refusal(&records) {
-            Some(reason) => horsie_agentcore::PreCompactDecision::Abandon(reason),
-            None => horsie_agentcore::PreCompactDecision::Proceed,
-        }
-    }
-
-    async fn after(&self, result: &horsie_agentcore::CompactionResult) {
-        // Fire-and-forget: the boundary already exists, so nothing a
-        // `PostCompact` hook says could change it, and the records reach the
-        // transcript through the sink either way.
-        let _ = self
-            .context
-            .compaction_hooks(horsie_models::runtime::ServerHookEvent::PostCompact(
-                horsie_models::runtime::PostCompactInput {
-                    trigger: result.trigger.to_string(),
-                    tokens_before: result.tokens_before,
-                    tokens_after: result.tokens_after,
-                },
-            ))
-            .await;
-    }
-}
-
 /// Why a `PreCompact` hook refused, if one did.
 ///
 /// A block *or* a halt: `{"decision":"block"}` says "not this compaction" and
@@ -187,7 +119,7 @@ impl horsie_agentcore::CompactionPolicy for ActorCompactionPolicy {
 /// than compacting but better than compacting past a hook that was about to
 /// save something.
 #[must_use]
-fn precompact_refusal(records: &[horsie_models::hooks::HookRecord]) -> Option<String> {
+pub(crate) fn precompact_refusal(records: &[horsie_models::hooks::HookRecord]) -> Option<String> {
     use horsie_models::hooks::{HookAction, StopOutcome};
     records.iter().find_map(|r| {
         if let Some(halt) = &r.halt {
