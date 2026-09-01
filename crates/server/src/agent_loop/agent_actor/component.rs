@@ -91,13 +91,80 @@ impl Cx<'_> {
     }
 }
 
+/// The component registry: every component an agent runs, held and named in
+/// exactly one place.
+///
+/// The actor holds one of these and delegates wholesale — it never names a
+/// component. Adding a component means editing this struct and its three
+/// exhaustive routings below, all in this file, all checked at compile time:
+/// a new command group or event variant that is not routed fails to build
+/// *here*, where it has to be classified.
+///
+/// This is also the seam for building an agent's components from its spec
+/// later: construction is centralized in [`Components::new`], so a spec-driven
+/// variant changes this file and nothing above it.
+pub(super) struct Components {
+    timers: Timers,
+    turn: Turn,
+    queue: Queue,
+    reads: Reads,
+    log: LogWrites,
+    seed: Seeding,
+}
+
+impl Components {
+    pub fn new() -> Self {
+        Self {
+            timers: Timers,
+            turn: Turn::default(),
+            queue: Queue::default(),
+            reads: Reads,
+            log: LogWrites,
+            seed: Seeding,
+        }
+    }
+
+    /// Route one command to the component that owns its group. Exhaustive:
+    /// a command group added later fails to compile here.
+    ///
+    /// `Core` is deliberately absent — the actor's own lifetime is the one
+    /// thing that is nobody's component.
+    pub async fn handle(
+        &mut self,
+        cmd: AgentCommand,
+        cx: &mut Cx<'_>,
+    ) -> Option<CommandEffect<AgentDomainEvent>> {
+        Some(match cmd {
+            AgentCommand::Queue(c) => self.queue.handle(c, cx).await,
+            AgentCommand::Run(c) => self.turn.handle(c, cx).await,
+            AgentCommand::Timer(c) => self.timers.handle(c, cx).await,
+            AgentCommand::Read(c) => self.reads.handle(c, cx).await,
+            AgentCommand::Log(c) => self.log.handle(c, cx).await,
+            AgentCommand::Seed(c) => self.seed.handle(c, cx).await,
+            AgentCommand::Core(_) => return None,
+        })
+    }
+
+    /// Ask each component, in registration order, to repair what a dead
+    /// process left it holding. The queue drains last, so it sees whatever
+    /// gate the turn's own repair raised.
+    pub async fn on_load(&mut self, cx: &mut Cx<'_>) {
+        self.timers.on_load(cx).await;
+        self.turn.on_load(cx).await;
+        self.queue.on_load(cx).await;
+    }
+}
+
 /// Fold one event into state by routing it to the component that owns it.
 ///
 /// The one shared state-transition function — live handling, replay and every
 /// component's own fold-forward all go through here, so they cannot disagree.
-/// Exhaustive on purpose, and the only place that is: an event added later
-/// fails to compile *here*, where it has to be classified, rather than
-/// silently reaching the wrong fold.
+/// Exhaustive on purpose: an event added later fails to compile *here*, where
+/// it has to be classified, rather than silently reaching the wrong fold.
+///
+/// A free function rather than a method because a fold is pure and replay must
+/// not depend on which components an agent was instantiated with: any journal
+/// ever written stays readable, whatever a future spec chooses to run.
 pub(super) fn fold(mut state: AgentState, event: AgentDomainEvent) -> AgentState {
     match event {
         e @ AgentDomainEvent::Seeded { .. } => Seeding::apply(&mut state, e),

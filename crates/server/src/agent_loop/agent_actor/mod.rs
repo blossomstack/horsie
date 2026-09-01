@@ -48,7 +48,7 @@ pub use state::{AgentState, UsageTotal, hook_entry, hook_entry_id};
 pub use types::*;
 
 use compaction::{COMPACT_AT_PERCENT, COMPACT_RETAIN_PERCENT, Compaction};
-use component::{Component, Cx, Scratch, fold, fold_all};
+use component::{Component, Components, Cx, Scratch, fold, fold_all};
 use log::LogWrites;
 use queue::Queue;
 use reads::Reads;
@@ -112,13 +112,9 @@ pub struct AgentActor {
     params: AgentParams,
     /// The transient half of the state — see [`component::Scratch`].
     scratch: Scratch,
-    // The components, one per command group.
-    queue: Queue,
-    turn: Turn,
-    timers: Timers,
-    reads: Reads,
-    log: LogWrites,
-    seed: Seeding,
+    /// Every component this agent runs, centralized in one registry the actor
+    /// delegates to wholesale — it knows neither their types nor their number.
+    components: Components,
     /// Where durable history is published, when anyone is listening. `None` for
     /// workflow agents, which have no live stream.
     observer: Option<Arc<dyn AgentObserver>>,
@@ -142,12 +138,7 @@ impl AgentActor {
             runtime: ctx,
             params,
             scratch,
-            queue: Queue::default(),
-            turn: Turn::default(),
-            timers: Timers,
-            reads: Reads,
-            log: LogWrites,
-            seed: Seeding,
+            components: Components::new(),
             observer: None,
             events_since_snapshot: 0,
             revision,
@@ -216,8 +207,8 @@ impl EventSourcedActor for AgentActor {
         fold(state, event)
     }
 
-    /// Route each command to the component that owns it. The actor decides
-    /// nothing here.
+    /// Hand the command to the component registry. The actor decides nothing
+    /// here and does not know what components exist.
     async fn handle_command(
         &mut self,
         state: &AgentState,
@@ -231,17 +222,11 @@ impl EventSourcedActor for AgentActor {
             params: &self.params,
             actor: ctx,
         };
-        let effect = match cmd {
-            AgentCommand::Queue(c) => self.queue.handle(c, &mut cx).await,
-            AgentCommand::Run(c) => self.turn.handle(c, &mut cx).await,
-            AgentCommand::Timer(c) => self.timers.handle(c, &mut cx).await,
-            AgentCommand::Read(c) => self.reads.handle(c, &mut cx).await,
-            AgentCommand::Log(c) => self.log.handle(c, &mut cx).await,
-            AgentCommand::Seed(c) => self.seed.handle(c, &mut cx).await,
-            // Inlined rather than given a component: stopping is the actor's
-            // whole answer, and there is no state, no event and no second
-            // command to keep it company.
-            AgentCommand::Core(CoreCommand::Shutdown) => CommandEffect::stop(),
+        // The registry answers everything but the actor's own lifetime:
+        // stopping is the one thing that is nobody's component.
+        let effect = match self.components.handle(cmd, &mut cx).await {
+            Some(effect) => effect,
+            None => CommandEffect::stop(),
         };
         self.with_snapshot_cadence(effect)
     }
@@ -285,10 +270,6 @@ impl EventSourcedActor for AgentActor {
             params: &self.params,
             actor: ctx,
         };
-        self.timers.on_load(&mut cx).await;
-        self.turn.on_load(&mut cx).await;
-        // Last, so anything the turn set up (a self-continue's gate) is
-        // already in the scratch the drain reads.
-        self.queue.on_load(&mut cx).await;
+        self.components.on_load(&mut cx).await;
     }
 }
