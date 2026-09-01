@@ -1,18 +1,11 @@
 //! Deciding what a compaction keeps, and the summarising call itself.
 //!
-//! Everything here is either a pure function over a slice of messages
-//! ([`choose_cut`], [`summary_prompt`], [`boundary_text`]) or one provider
-//! call ([`summarise_span`]). Orchestration — when to compact, which hooks to
-//! fire, what state to carry across — belongs to the agent actor, which owns
-//! the history and the journal.
+//! Everything here is a pure function over a slice of messages. The
+//! summarising call itself is an ordinary [`crate::run_step`] configured bare
+//! — no tools, no system prompt — by whoever orchestrates the compaction;
+//! this module only decides what it covers and what its prompt says.
 
-use crate::error::LlmError;
-use crate::events::{EventSink, EventSinkError};
-use crate::provider::{CompletionRequest, LlmProvider, ToolChoice};
-use horsie_models::agent::{ContentPart, Message, Role, TextPart};
-use horsie_models::events::AgentEvent;
-use horsie_models::now_ms;
-use std::sync::Arc;
+use horsie_models::agent::{ContentPart, Message, Role};
 
 /// How much room a compaction is working with.
 ///
@@ -192,91 +185,6 @@ pub fn summary_prompt(instructions: Option<&str>) -> String {
         prompt.push_str(extra);
     }
     prompt
-}
-
-/// Swallows everything. The summarising call is not a turn, and its streaming
-/// deltas must never reach a transcript — a viewer would watch the summary
-/// being typed as though the agent had started answering.
-struct NullSink;
-
-#[async_trait::async_trait]
-impl EventSink for NullSink {
-    async fn emit(&self, _event: AgentEvent) -> Result<(), EventSinkError> {
-        Ok(())
-    }
-}
-
-/// Ask the model to summarise `history[..cut]`. Answers the summary together
-/// with what the call cost — a summariser's tokens are spent like any other
-/// call's, and a caller that cannot see them cannot bank them.
-///
-/// `cut == history.len()` summarises everything, which is what a sub session's
-/// seed and a summary-only compaction both want. An empty span summarises to
-/// nothing rather than erroring — a sub session branched from a session that
-/// has not started yet is empty, not broken.
-///
-/// # Errors
-/// Whatever the summarising provider call fails with, plus a summariser that
-/// answered with no text at all.
-pub async fn summarise_span(
-    provider: &Arc<dyn LlmProvider>,
-    conversation_id: &str,
-    history: &[Message],
-    cut: usize,
-    instructions: Option<&str>,
-    max_tokens: Option<u32>,
-) -> Result<(String, horsie_models::agent::Usage), LlmError> {
-    let cut = cut.min(history.len());
-    if cut == 0 {
-        return Ok((
-            String::new(),
-            horsie_models::agent::Usage::without_cache(0, 0),
-        ));
-    }
-    let mut messages = history[..cut].to_vec();
-    messages.push(Message {
-        id: format!("compaction-request:{cut}"),
-        role: Role::User,
-        parts: vec![ContentPart::Text(TextPart {
-            text: summary_prompt(instructions),
-        })],
-        created_at_ms: now_ms(),
-        started_at_ms: None,
-    });
-    let response = provider
-        .complete(
-            CompletionRequest {
-                messages: &messages,
-                // A summariser reads the transcript's text. Handing it the
-                // images too would re-upload every one of them for a call
-                // whose whole purpose is to make the context smaller.
-                artifacts: crate::provider::ArtifactBytes::empty(),
-                // No system prompt: the workspace and tool guidance are
-                // instructions for doing the work, and this call is not
-                // doing the work. They would only bias the summary.
-                system: None,
-                // No tools, which is also what makes `tool_choice`
-                // irrelevant — every provider omits it when tools are
-                // empty.
-                tools: Vec::new(),
-                tool_choice: ToolChoice::Auto,
-                max_tokens,
-                thinking_effort: None,
-                conversation_id,
-            },
-            "compaction",
-            &NullSink,
-        )
-        .await?;
-
-    let text = crate::step::extract_text(&response.parts);
-    if text.trim().is_empty() {
-        return Err(LlmError::ApiError {
-            status: 502,
-            message: "the summariser returned no text".into(),
-        });
-    }
-    Ok((text, response.usage))
 }
 
 /// The exact text of a boundary message. One function so the run and the

@@ -150,16 +150,17 @@ impl Component for Seeding {
                 let history = repair_unanswered_tool_calls(state.prompt_messages());
                 let self_ref = cx.actor.self_ref();
                 tokio::spawn(async move {
+                    // The compaction component's summarise machinery, shared:
+                    // the same bare `run_step`, over the whole history.
                     let result = tokio::select! {
                         biased;
                         () = cancel.cancelled() => return,
-                        result = horsie_agentcore::summarise_span(
-                            &tctx.provider,
-                            &tctx.conversation_id,
+                        result = compaction::summarise_step(
+                            &tctx,
                             &history,
                             history.len(),
                             None,
-                            None,
+                            &cancel,
                         ) => result,
                     };
                     let (result, usage) = match result {

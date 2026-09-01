@@ -223,7 +223,7 @@ impl Component for Compaction {
                     let (outcome, usage) = tokio::select! {
                         biased;
                         () = cancel.cancelled() => return,
-                        outcome = run_compaction(&job, &tctx, history, carried_state) => outcome,
+                        outcome = run_compaction(&job, &tctx, history, carried_state, &cancel) => outcome,
                     };
                     let _ = self_ref
                         .tell(AgentCommand::Compaction(CompactionCommand::Landed(
@@ -289,6 +289,75 @@ impl Component for Compaction {
     }
 }
 
+/// Swallows everything a summarise step streams. A summary is not a turn,
+/// and its deltas must never reach a transcript — a viewer would watch the
+/// summary being typed as though the agent had started answering.
+struct NullSink;
+
+#[async_trait::async_trait]
+impl horsie_agentcore::EventSink for NullSink {
+    async fn emit(
+        &self,
+        _event: horsie_agentcore::AgentEvent,
+    ) -> Result<(), horsie_agentcore::EventSinkError> {
+        Ok(())
+    }
+}
+
+/// The shared summarise utility: the same [`horsie_agentcore::run_step`] the
+/// turn drives, configured bare — no tools, no system prompt (workspace and
+/// tool guidance are instructions for doing the work, and this step is not
+/// doing the work), no artifacts (re-uploading every image to shrink the
+/// context defeats the point), nothing streamed. Used here and by the seeding
+/// component, which is what "sharing the compaction machinery" means.
+///
+/// Answers the summary and what the step spent. An empty span summarises to
+/// nothing rather than erroring — a sub session branched from a session that
+/// has not started yet is empty, not broken.
+pub(super) async fn summarise_step(
+    tctx: &TurnCtx,
+    history: &[Message],
+    cut: usize,
+    instructions: Option<&str>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<(String, horsie_agentcore::Usage), horsie_agentcore::StepError> {
+    let cut = cut.min(history.len());
+    if cut == 0 {
+        return Ok((String::new(), horsie_agentcore::Usage::without_cache(0, 0)));
+    }
+    let mut window = history[..cut].to_vec();
+    window.push(Message {
+        id: format!("compaction-request:{cut}"),
+        role: Role::User,
+        parts: vec![ContentPart::Text(horsie_models::agent::TextPart {
+            text: horsie_agentcore::summary_prompt(instructions),
+        })],
+        created_at_ms: now_ms(),
+        started_at_ms: None,
+    });
+    let request = horsie_agentcore::StepRequest {
+        provider: tctx.provider.clone(),
+        conversation_id: tctx.conversation_id.clone(),
+        system_prompt: String::new(),
+        specs: Vec::new(),
+        tool_choice: horsie_agentcore::ToolChoice::Auto,
+        max_tokens: None,
+        thinking_effort: None,
+        artifact_source: None,
+    };
+    let response = horsie_agentcore::run_step(&request, &window, &NullSink, cancel).await?;
+    let text = horsie_agentcore::extract_text(&response.message.parts);
+    if text.trim().is_empty() {
+        return Err(horsie_agentcore::StepError::Provider(
+            horsie_agentcore::LlmError::ApiError {
+                status: 502,
+                message: "the summariser returned no text".into(),
+            },
+        ));
+    }
+    Ok((text, response.usage))
+}
+
 /// The compaction run itself, on its own task: decide the cut, fire the
 /// hooks, take the summary, price the result. Answers what it produced and
 /// what the summarising call spent.
@@ -297,6 +366,7 @@ async fn run_compaction(
     tctx: &TurnCtx,
     history: Vec<Message>,
     carried_state: String,
+    cancel: &tokio_util::sync::CancellationToken,
 ) -> (CompactOutcome, Option<horsie_agentcore::Usage>) {
     use horsie_models::agent::{CompactionTrigger, EmptyOutcome};
     let retain_tokens = tctx.budget.map(|b| b.retain_tokens());
@@ -325,22 +395,14 @@ async fn run_compaction(
         tracing::info!(reason, "a PreCompact hook abandoned this compaction");
         return (skipped(false), None);
     }
-    let (summary, usage) = match horsie_agentcore::summarise_span(
-        &tctx.provider,
-        &tctx.conversation_id,
-        &history,
-        cut,
-        job.instructions.as_deref(),
-        None,
-    )
-    .await
-    {
-        Ok(taken) => taken,
-        Err(e) => {
-            tracing::warn!(error = %e, "a compaction failed; the turn continues uncompacted");
-            return (skipped(false), None);
-        }
-    };
+    let (summary, usage) =
+        match summarise_step(tctx, &history, cut, job.instructions.as_deref(), cancel).await {
+            Ok(taken) => taken,
+            Err(e) => {
+                tracing::warn!(error = %e, "a compaction failed; the turn continues uncompacted");
+                return (skipped(false), None);
+            }
+        };
     let retained_from_message_id = history.get(cut).map(|m| m.id.clone());
     let boundary = Message {
         id: format!("compaction:{}", history.len()),

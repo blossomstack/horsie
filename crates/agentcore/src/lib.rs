@@ -10,8 +10,7 @@ mod thinking;
 mod tool;
 
 pub use compaction::{
-    CompactionBudget, approx_history_tokens, boundary_text, choose_cut, summarise_span,
-    summary_prompt,
+    CompactionBudget, approx_history_tokens, boundary_text, choose_cut, summary_prompt,
 };
 pub use error::{LlmError, ToolCallError};
 pub use events::{EventSink, EventSinkError};
