@@ -203,38 +203,24 @@ impl Components {
     }
 }
 
-/// The tool names components claim, and the command that reaches each.
+/// The toolboxes the components vend — the timer toolbox, the task-list
+/// toolbox, whatever a component added later brings along.
 ///
-/// The turn consults this to route a model's tool call: a claimed name goes to
-/// its component as a command (answered later with `ToolReturned`), everything
-/// else goes to the toolbox on a spawned task. Centralized here beside the
-/// registry so "who owns this tool" and "who owns this command" are the same
-/// page.
-pub(crate) fn route_tool_call(call: ComponentToolCall) -> Option<AgentCommand> {
-    match call.name.as_str() {
-        "set_timer" | "list_timers" | "cancel_timer" => {
-            Some(AgentCommand::Timer(TimerCommand::ToolCall(call)))
-        }
-        name if name == crate::agent_loop::components::task_list::domain::TASK_LIST_TOOL => {
-            Some(AgentCommand::TaskList(TaskListCommand::ToolCall(call)))
-        }
-        _ => None,
-    }
-}
-
-/// The specs of every component-claimed tool, joined into the toolbox surface
-/// before the selection filter so the agent's tool selection reaches them
-/// exactly as it reaches every other layer.
-pub(crate) fn component_tool_specs() -> Vec<horsie_agentcore::ToolSpec> {
-    let mut specs = crate::agent_loop::components::timers::domain::timer_tool_specs();
-    specs.push(crate::agent_loop::components::task_list::domain::task_list_tool_spec());
-    specs
-}
-
-/// Whether a tool name is claimed by a component (before any filtering).
-pub(crate) fn is_component_tool(name: &str) -> bool {
-    matches!(name, "set_timer" | "list_timers" | "cancel_timer")
-        || name == crate::agent_loop::components::task_list::domain::TASK_LIST_TOOL
+/// Collected here because the roster is the one place that knows what
+/// components exist; each toolbox itself is its component's own, built by that
+/// component's `toolbox()`. Registered into the composed toolbox at
+/// provisioning time, ahead of the runtime's so a vended tool wins a name
+/// collision — and from there on nothing anywhere knows these tools are
+/// special: composed, filtered, dispatched and answered exactly as remote
+/// tools are.
+pub(crate) fn vended_toolboxes(
+    actor: horsie_actor::ActorRef<AgentCommand>,
+    work: u64,
+) -> Vec<std::sync::Arc<dyn horsie_agentcore::Toolbox>> {
+    vec![
+        timers::toolbox(actor.clone(), work),
+        task_list::toolbox(actor, work),
+    ]
 }
 
 impl Components {

@@ -45,6 +45,20 @@ pub(crate) fn empty_list() -> &'static crate::agent_loop::components::task_list:
     EMPTY.get_or_init(crate::agent_loop::components::task_list::domain::TaskListState::default)
 }
 
+/// The task-list toolbox, vended by this component: the one `task_list`
+/// tool, running on the actor and answered like any remote tool.
+pub(crate) fn toolbox(
+    actor: horsie_actor::ActorRef<AgentCommand>,
+    work: u64,
+) -> std::sync::Arc<dyn horsie_agentcore::Toolbox> {
+    crate::agent_loop::component::ActorToolbox::new(
+        vec![domain::task_list_tool_spec()],
+        |call| AgentCommand::TaskList(TaskListCommand::ToolCall(call)),
+        actor,
+        work,
+    )
+}
+
 /// Execute the `task_list` tool: the rendered list it answers and the event
 /// that records the mutation.
 fn execute_task_list_tool(

@@ -493,14 +493,13 @@ impl Turn {
             return CommandEffect::persist(events);
         }
 
-        // Route the batch. A component-claimed tool becomes a command to its
-        // component; everything else goes to the toolbox on a spawned task.
-        // Both answer the same way — by journaling the result — so nothing
-        // here can tell them apart afterwards.
+        // Dispatch the batch. Every call — a component's own tool and a
+        // remote one alike — goes to the composed toolbox on a spawned task
+        // and answers with `ToolReturned`. This file cannot tell them apart,
+        // which is the point.
         let Some(tctx) = cx.scratch.ctx.clone() else {
             return CommandEffect::persist(events);
         };
-        let inline_names = tctx.inline_names.clone();
         let work = cx.scratch.work;
         let cancel = cx.scratch.cancel.clone();
         let self_ref = cx.actor.self_ref();
@@ -511,29 +510,15 @@ impl Turn {
                 name: name.clone(),
                 input: input.clone(),
             });
-            // Claimed AND permitted: a filtered-out component tool still goes
-            // to the toolbox, whose filter answers "not permitted".
-            let routed = match inline_names.contains(&name) {
-                true => route_tool_call(ComponentToolCall {
-                    work,
-                    tool_call_id: id.clone(),
-                    name: name.clone(),
-                    input: input.clone(),
-                }),
-                false => None,
-            };
-            match routed {
-                Some(cmd) => cx.tell(cmd).await,
-                None => spawn_tool_call(
-                    &tctx.toolbox,
-                    name,
-                    input,
-                    id,
-                    work,
-                    cancel.clone(),
-                    self_ref.clone(),
-                ),
-            }
+            spawn_tool_call(
+                &tctx.toolbox,
+                name,
+                input,
+                id,
+                work,
+                cancel.clone(),
+                self_ref.clone(),
+            );
         }
         self.flight(cx).dispatched = dispatched;
         CommandEffect::persist(events)

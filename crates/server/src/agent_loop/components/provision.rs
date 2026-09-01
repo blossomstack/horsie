@@ -15,40 +15,8 @@ use crate::agent_loop::prelude::*;
 use crate::agent_loop::shared::summarise::{COMPACT_AT_PERCENT, COMPACT_RETAIN_PERCENT};
 use async_trait::async_trait;
 use horsie_actor::CommandEffect;
-use horsie_agentcore::{CompactionBudget, ToolOutcome, ToolSpec, Toolbox};
-use serde_json::Value;
+use horsie_agentcore::{CompactionBudget, Toolbox};
 use std::sync::Arc;
-
-/// Adds the component-claimed tool specs to a composed toolbox so the
-/// selection filter sees the whole surface. Execution never reaches it for
-/// those names — the turn routes them to their components — so its `execute`
-/// for them is an error by construction.
-struct WithComponentSpecs {
-    inner: Arc<dyn Toolbox>,
-}
-
-#[async_trait]
-impl Toolbox for WithComponentSpecs {
-    fn specs(&self) -> Vec<ToolSpec> {
-        let mut specs = self.inner.specs();
-        specs.extend(component_tool_specs());
-        specs
-    }
-
-    async fn execute(
-        &self,
-        name: &str,
-        input: Value,
-        tool_call_id: &str,
-    ) -> Result<ToolOutcome, horsie_agentcore::ToolCallError> {
-        if is_component_tool(name) {
-            return Err(horsie_agentcore::ToolCallError::InvalidInput(format!(
-                "'{name}' is handled by its component"
-            )));
-        }
-        self.inner.execute(name, input, tool_call_id).await
-    }
-}
 
 /// The runtime and context setup every kind of work shares.
 pub(crate) struct Provision;
@@ -58,6 +26,10 @@ impl Provision {
     pub(crate) fn start(&mut self, cx: &mut Cx<'_>) {
         let (work, cancel) = cx.scratch.begin(WorkKind::Provisioning);
         let self_ref = cx.actor.self_ref();
+        // The toolboxes the components vend, provisioned like everything
+        // else. Built here so the generation is baked in: a cancel makes
+        // these toolboxes refuse their own calls.
+        let vended = vended_toolboxes(self_ref.clone(), work);
         let context_provider = cx.runtime.context_provider.clone();
         let configured_prompt = cx.params.system_prompt.clone();
         let run_def_tools = cx.params.tools.clone();
@@ -73,13 +45,16 @@ impl Provision {
                 provided = context_provider.provide() => provided,
             };
             let outcome = provided.map(|contexts| {
-                // The component specs join before the filter so the agent's
-                // selection reaches them exactly as it reaches every other
-                // layer. A plugin's narrowing stacks after: two filters can
-                // only remove, so the narrower wins.
-                let composed: Arc<dyn Toolbox> = Arc::new(WithComponentSpecs {
-                    inner: contexts.toolbox,
-                });
+                // The component toolboxes join before the filter, so the
+                // agent's tool selection reaches them exactly as it reaches
+                // every other layer — and ahead of the runtime's, so a
+                // component tool wins a name collision. A plugin's narrowing
+                // stacks after: two filters can only remove, so the narrower
+                // wins.
+                let mut boxes = vended;
+                boxes.push(contexts.toolbox);
+                let composed: Arc<dyn Toolbox> =
+                    Arc::new(crate::agent_loop::shared::mcp_toolbox::CompositeToolbox::new(boxes));
                 let toolbox =
                     crate::agent_loop::FilteredToolbox::apply(composed, run_def_tools.as_deref());
                 let toolbox = match &contexts.tool_narrowing {
@@ -89,16 +64,10 @@ impl Provision {
                     }
                 };
                 let specs = toolbox.specs();
-                let inline_names = specs
-                    .iter()
-                    .map(|s| s.name.clone())
-                    .filter(|n| is_component_tool(n))
-                    .collect();
                 Box::new(TurnCtx {
                     provider: contexts.provider,
                     toolbox,
                     specs,
-                    inline_names,
                     system_prompt: contexts
                         .system_prompt
                         .or(configured_prompt)

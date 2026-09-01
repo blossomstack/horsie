@@ -19,12 +19,12 @@ pub(crate) use crate::agent_loop::commands::{
     AbandonedStart,
 };
 pub(crate) use crate::agent_loop::component::{
-    Component, ComponentToolCall, Cx, Part, PartState, Scratch, TurnCtx, WorkKind,
+    Component, Cx, Part, PartState, Scratch, TurnCtx, WorkKind,
     answer_tool_call,
 };
 pub(crate) use crate::agent_loop::components::{
     ComponentState, Components, QueueState, TaskListPart, TimerState, TurnState, UsageState,
-    component_tool_specs, is_component_tool, route_tool_call,
+    vended_toolboxes,
 };
 pub(crate) use crate::agent_loop::events::AgentDomainEvent;
 pub(crate) use crate::agent_loop::params::AgentParams;

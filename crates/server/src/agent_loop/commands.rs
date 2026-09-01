@@ -9,7 +9,7 @@
 //! back. The ones that arrive from outside are `Queue::Enqueue`,
 //! `Queue::Answer`, the `Read` group, the `Log` group, `Seed`, and `Core`.
 
-use crate::agent_loop::component::ComponentToolCall;
+use crate::agent_loop::component::RoutedToolCall;
 use crate::agent_loop::components::reads::ReadOutcome;
 use crate::agent_loop::state::{AgentState, AgentStateView, AgentUsageSnapshot};
 use crate::agent_loop::{AgentDomainEvent, TurnCtx};
@@ -127,7 +127,7 @@ pub enum TimerCommand {
     /// Internal: the turn routed one of the timer tools here. The component
     /// executes it and journals both its own events and the call's result,
     /// which is all "answering" a tool call is — nothing is told to the turn.
-    ToolCall(ComponentToolCall),
+    ToolCall(RoutedToolCall),
     /// Internal: a timer's sleep elapsed.
     TimerFired {
         id: crate::agent_loop::components::timers::domain::TimerId,
@@ -138,7 +138,7 @@ pub enum TimerCommand {
 pub enum TaskListCommand {
     /// Internal: the turn routed the `task_list` tool here; answered by
     /// journaling its result exactly like a timer tool.
-    ToolCall(ComponentToolCall),
+    ToolCall(RoutedToolCall),
 }
 
 /// The per-work runtime and context setup.

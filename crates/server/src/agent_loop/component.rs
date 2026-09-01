@@ -136,14 +136,12 @@ impl Scratch {
 /// and published to the shared scratch for whoever needs it.
 pub struct TurnCtx {
     pub provider: std::sync::Arc<dyn horsie_agentcore::LlmProvider>,
-    /// The fully-composed, selection-filtered toolbox remote calls dispatch
-    /// through. Component tools never reach it — the turn routes them to
-    /// their components first.
+    /// The fully-composed, selection-filtered toolbox every call dispatches
+    /// through — the components' own tools included, indistinguishable from
+    /// the rest.
     pub toolbox: std::sync::Arc<dyn horsie_agentcore::Toolbox>,
     /// What the model is shown, already filtered.
     pub specs: Vec<horsie_agentcore::ToolSpec>,
-    /// The component-claimed tool names that survived the filter.
-    pub inline_names: std::collections::HashSet<String>,
     pub system_prompt: String,
     pub budget: Option<horsie_agentcore::CompactionBudget>,
     pub conversation_id: String,
@@ -152,16 +150,94 @@ pub struct TurnCtx {
     pub context_provider: std::sync::Arc<dyn crate::agent_loop::ContextProvider>,
 }
 
-/// One tool call the turn routed to a component instead of the toolbox.
+/// One tool call on its way to the component that owns the tool.
 ///
-/// Carries the work generation so a component never acts for a turn that has
-/// since been cancelled or superseded — the stale call is dropped, and the
+/// Built by a vended [`ActorToolbox`] — the turn never
+/// constructs one and never learns the tool was special. Carries the work
+/// generation baked in at provisioning time, so a component never acts for a
+/// turn that has since been cancelled: the stale call is refused, and the
 /// cancel already repaired its dangling `tool_use`.
-pub struct ComponentToolCall {
+pub struct RoutedToolCall {
     pub work: u64,
     pub tool_call_id: String,
     pub name: String,
     pub input: serde_json::Value,
+    /// Answers the toolbox's `execute`, exactly as any remote tool answers.
+    pub reply: horsie_actor::ReplyTo<Result<serde_json::Value, horsie_agentcore::ToolCallError>>,
+}
+
+/// A toolbox whose tools run on the actor's own mailbox.
+///
+/// The mechanism behind every toolbox a component vends — the timer toolbox,
+/// the task-list toolbox, whatever comes later. `execute` sends the call to
+/// the actor as a command — where the owning component runs it over current
+/// state and journals its own events — and waits for the answer. That makes
+/// such a tool indistinguishable from a remote one at every layer above:
+/// composed, filtered, dispatched, and answered on the same channel. The
+/// extra mailbox round-trip is the price of having exactly one path.
+pub(crate) struct ActorToolbox {
+    specs: Vec<horsie_agentcore::ToolSpec>,
+    /// Wraps the call in the owning component's command group.
+    wrap: fn(RoutedToolCall) -> AgentCommand,
+    actor: horsie_actor::ActorRef<AgentCommand>,
+    /// The generation this toolbox was provisioned under. A cancel bumps the
+    /// generation and marks the contexts stale, so a toolbox that outlives its
+    /// turn carries proof of its own staleness.
+    work: u64,
+}
+
+impl ActorToolbox {
+    pub(crate) fn new(
+        specs: Vec<horsie_agentcore::ToolSpec>,
+        wrap: fn(RoutedToolCall) -> AgentCommand,
+        actor: horsie_actor::ActorRef<AgentCommand>,
+        work: u64,
+    ) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            specs,
+            wrap,
+            actor,
+            work,
+        })
+    }
+}
+
+#[async_trait]
+impl horsie_agentcore::Toolbox for ActorToolbox {
+    fn specs(&self) -> Vec<horsie_agentcore::ToolSpec> {
+        self.specs.clone()
+    }
+
+    async fn execute(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+        tool_call_id: &str,
+    ) -> Result<horsie_agentcore::ToolOutcome, horsie_agentcore::ToolCallError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let call = RoutedToolCall {
+            work: self.work,
+            tool_call_id: tool_call_id.to_string(),
+            name: name.to_string(),
+            input,
+            reply: horsie_actor::ReplyTo::from_sender(tx),
+        };
+        let _ = self.actor.tell((self.wrap)(call)).await;
+        match rx.await {
+            Ok(Ok(value)) => Ok(horsie_agentcore::ToolOutcome::Result(
+                horsie_agentcore::ToolValue {
+                    value,
+                    artifacts: Vec::new(),
+                },
+            )),
+            Ok(Err(e)) => Err(e),
+            // The actor died or refused the generation: either way the turn
+            // this call belongs to is over, and the fence drops the report.
+            Err(_) => Err(horsie_agentcore::ToolCallError::ExecutionFailed(
+                "the agent is no longer running this turn".to_string(),
+            )),
+        }
+    }
 }
 
 /// What every component's state can be asked, by code that does not know which
@@ -243,50 +319,41 @@ pub(crate) type ToolExecutor =
         horsie_actor::ActorRef<AgentCommand>,
     ) -> Result<(serde_json::Value, Vec<AgentDomainEvent>), horsie_agentcore::ToolCallError>;
 
-/// Execute a routed tool call and answer it — the shared shape of every
-/// component-claimed tool.
+/// Execute a routed tool call — the shared shape of every component-owned
+/// tool.
 ///
-/// "Answering" is journaling the result, exactly as a remote tool call is
-/// answered: the log is where an unanswered call is visible, so closing one
-/// there closes it for everybody. Nothing is told to the turn, and the turn
-/// cannot tell the two kinds of call apart.
+/// The component runs the executor over current state, journals *its own*
+/// events, and replies the value to the toolbox that asked. The `ToolComplete`
+/// is not journaled here: the reply flows back through the toolbox to the same
+/// `ToolReturned` path every remote call takes, so the turn records both kinds
+/// identically and cannot tell them apart.
 ///
-/// A call from a cancelled generation is dropped: the cancel already repaired
-/// its dangling `tool_use`, and acting now would leak a side effect.
+/// A call from a cancelled generation is refused without executing: the cancel
+/// already repaired its dangling `tool_use`, and acting now would leak a side
+/// effect. Dropping the reply is the refusal — the toolbox reads a dead
+/// channel as "this turn is over".
 pub(crate) async fn answer_tool_call(
-    call: ComponentToolCall,
+    call: RoutedToolCall,
     cx: &mut Cx<'_>,
     execute: ToolExecutor,
 ) -> CommandEffect<AgentDomainEvent> {
     if !cx.scratch.live(call.work) {
         tracing::warn!(
             tool = call.name,
-            "dropping a routed tool call from a cancelled turn"
+            "refusing a routed tool call from a cancelled turn"
         );
         return CommandEffect::none();
     }
-    let (output, is_error, mut events) =
-        match execute(cx.state, &call.name, &call.input, cx.actor.self_ref()) {
-            // A string result is forwarded verbatim; re-encoding it as JSON
-            // would wrap it in quotes and escape every newline.
-            Ok((value, events)) => (
-                value
-                    .as_str()
-                    .map(str::to_string)
-                    .unwrap_or_else(|| value.to_string()),
-                false,
-                events,
-            ),
-            Err(e) => (e.to_string(), true, Vec::new()),
-        };
-    events.push(AgentDomainEvent::ToolComplete {
-        tool_call_id: call.tool_call_id,
-        output,
-        is_error,
-        artifacts: Vec::new(),
-        at_ms: horsie_models::now_ms(),
-    });
-    CommandEffect::persist(events)
+    match execute(cx.state, &call.name, &call.input, cx.actor.self_ref()) {
+        Ok((value, events)) => {
+            let _ = call.reply.send(Ok(value));
+            CommandEffect::persist(events)
+        }
+        Err(e) => {
+            let _ = call.reply.send(Err(e));
+            CommandEffect::none()
+        }
+    }
 }
 
 /// The shape every component shares. `handle` decides — state in, effect out;
