@@ -7,7 +7,9 @@
 //! The event carries the full resulting list rather than a delta, which is
 //! what lets replay skip re-deriving and re-validating every past mutation.
 
-use super::*;
+pub mod domain;
+
+use crate::agent_loop::prelude::*;
 use async_trait::async_trait;
 use horsie_actor::{ActorRef, CommandEffect};
 use horsie_agentcore::{AgentLogBody, LifecycleEvent, TaskListLifecycle};
@@ -20,10 +22,10 @@ use serde_json::Value;
 /// are the same thing without the domain module having to know it is one.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
-pub struct TaskListPart(crate::agent_loop::task_list::TaskListState);
+pub struct TaskListPart(crate::agent_loop::components::task_list::domain::TaskListState);
 
 impl TaskListPart {
-    pub(super) fn list(&self) -> &crate::agent_loop::task_list::TaskListState {
+    pub(crate) fn list(&self) -> &crate::agent_loop::components::task_list::domain::TaskListState {
         &self.0
     }
 }
@@ -37,10 +39,10 @@ impl PartState for TaskListPart {
 }
 
 /// The empty list a state with no task-list part answers with.
-pub(super) fn empty_list() -> &'static crate::agent_loop::task_list::TaskListState {
-    static EMPTY: std::sync::OnceLock<crate::agent_loop::task_list::TaskListState> =
+pub(crate) fn empty_list() -> &'static crate::agent_loop::components::task_list::domain::TaskListState {
+    static EMPTY: std::sync::OnceLock<crate::agent_loop::components::task_list::domain::TaskListState> =
         std::sync::OnceLock::new();
-    EMPTY.get_or_init(crate::agent_loop::task_list::TaskListState::default)
+    EMPTY.get_or_init(crate::agent_loop::components::task_list::domain::TaskListState::default)
 }
 
 /// Execute the `task_list` tool: the rendered list it answers and the event
@@ -51,7 +53,7 @@ fn execute_task_list_tool(
     input: &Value,
     _self_ref: ActorRef<AgentCommand>,
 ) -> Result<(Value, Vec<AgentDomainEvent>), horsie_agentcore::ToolCallError> {
-    let action = crate::agent_loop::task_list::TaskListAction::from_input(input)?;
+    let action = crate::agent_loop::components::task_list::domain::TaskListAction::from_input(input)?;
     let mut next = folded.task_list().clone();
     match next.apply(action) {
         Ok(()) => {
@@ -69,7 +71,7 @@ fn execute_task_list_tool(
 }
 
 /// The agent's own task list.
-pub(super) struct TaskLists;
+pub(crate) struct TaskLists;
 
 #[async_trait]
 impl Component for TaskLists {
@@ -96,7 +98,7 @@ impl TaskLists {
     // variant. Which one is decided in `component::fold`, so an event added
     // later fails to compile *there* rather than silently reaching the wrong
     // fold here.
-    pub(super) fn apply(state: &mut AgentState, event: AgentDomainEvent) {
+    pub(crate) fn apply(state: &mut AgentState, event: AgentDomainEvent) {
         if let AgentDomainEvent::TaskListChanged { snapshot, at_ms } = event {
             state.push(
                 at_ms,

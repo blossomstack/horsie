@@ -13,7 +13,7 @@
 
 #![allow(dead_code)]
 
-use super::*;
+use crate::agent_loop::prelude::*;
 use crate::agent_loop::AgentRunDef;
 use crate::agent_loop::context::{
     AgentOutcome, AgentOutcomeSink, ContextError, ContextProvider, Contexts,
@@ -24,7 +24,7 @@ use horsie_models::agent::TextPart;
 
 // Shared no-op collaborators for tests that only exercise the actor's own
 // bookkeeping and never start a run.
-pub(super) struct StubContext;
+pub(crate) struct StubContext;
 #[async_trait]
 impl crate::agent_loop::ContextProvider for StubContext {
     async fn provide(
@@ -33,13 +33,13 @@ impl crate::agent_loop::ContextProvider for StubContext {
         Err(crate::agent_loop::ContextError::retryable("no context"))
     }
 }
-pub(super) struct StubParent;
+pub(crate) struct StubParent;
 #[async_trait]
 impl AgentOutcomeSink for StubParent {
     async fn deliver(&self, _: AgentOutcome) {}
 }
 
-pub(super) fn user_msg(text: &str) -> Message {
+pub(crate) fn user_msg(text: &str) -> Message {
     Message {
         created_at_ms: 0,
         started_at_ms: None,
@@ -49,7 +49,7 @@ pub(super) fn user_msg(text: &str) -> Message {
     }
 }
 
-pub(super) fn def_fixture() -> AgentRunDef {
+pub(crate) fn def_fixture() -> AgentRunDef {
     AgentRunDef {
         system_prompt: None,
         max_iterations: None,
@@ -59,7 +59,7 @@ pub(super) fn def_fixture() -> AgentRunDef {
 }
 
 /// Hears everything an agent reports to whoever spawned it.
-pub(super) struct OutcomeChannel(pub(super) tokio::sync::mpsc::UnboundedSender<AgentOutcome>);
+pub(crate) struct OutcomeChannel(pub(crate) tokio::sync::mpsc::UnboundedSender<AgentOutcome>);
 
 #[async_trait]
 impl AgentOutcomeSink for OutcomeChannel {
@@ -68,11 +68,11 @@ impl AgentOutcomeSink for OutcomeChannel {
     }
 }
 
-pub(super) type Outcomes = tokio::sync::mpsc::UnboundedReceiver<AgentOutcome>;
+pub(crate) type Outcomes = tokio::sync::mpsc::UnboundedReceiver<AgentOutcome>;
 
 /// A context that never returns, so a run stays genuinely in flight — or, for
 /// the recovery tests, is never asked at all.
-pub(super) struct HangingContext;
+pub(crate) struct HangingContext;
 
 #[async_trait]
 impl ContextProvider for HangingContext {
@@ -81,7 +81,7 @@ impl ContextProvider for HangingContext {
     }
 }
 
-pub(super) fn hook_record(plugin: &str, call: &str) -> horsie_models::hooks::HookRecord {
+pub(crate) fn hook_record(plugin: &str, call: &str) -> horsie_models::hooks::HookRecord {
     horsie_models::hooks::HookRecord {
         plugin: plugin.to_string(),
         duration_ms: 3,
@@ -103,7 +103,7 @@ pub(super) fn hook_record(plugin: &str, call: &str) -> horsie_models::hooks::Hoo
     }
 }
 
-pub(super) fn with_hook(state: AgentState, plugin: &str, call: &str, seq: usize) -> AgentState {
+pub(crate) fn with_hook(state: AgentState, plugin: &str, call: &str, seq: usize) -> AgentState {
     AgentActor::apply_event(
         state,
         AgentDomainEvent::HookRan {
@@ -117,7 +117,7 @@ pub(super) fn with_hook(state: AgentState, plugin: &str, call: &str, seq: usize)
 /// A [`CompactionPolicy`](horsie_agentcore::CompactionPolicy) for agents that
 /// have no budget, so it is never consulted. Tests that exercise the retry loop
 /// need one to pass and nothing to happen.
-pub(super) struct NeverCompacts;
+pub(crate) struct NeverCompacts;
 
 #[async_trait]
 impl horsie_agentcore::CompactionPolicy for NeverCompacts {

@@ -9,7 +9,9 @@
 //! same place everything else addressed to this agent waits — a timer firing
 //! mid-run is harmless, and no flag has to remember anything.
 
-use super::*;
+pub mod domain;
+
+use crate::agent_loop::prelude::*;
 use async_trait::async_trait;
 use horsie_actor::{ActorRef, CommandEffect};
 use horsie_models::now_ms;
@@ -22,23 +24,23 @@ use serde_json::Value;
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct TimerState {
-    armed: Vec<crate::agent_loop::timers::TimerRecord>,
+    armed: Vec<crate::agent_loop::components::timers::domain::TimerRecord>,
 }
 
 impl TimerState {
-    pub(super) fn records(&self) -> &[crate::agent_loop::timers::TimerRecord] {
+    pub(crate) fn records(&self) -> &[crate::agent_loop::components::timers::domain::TimerRecord] {
         &self.armed
     }
 
-    fn arm(&mut self, record: crate::agent_loop::timers::TimerRecord) {
+    fn arm(&mut self, record: crate::agent_loop::components::timers::domain::TimerRecord) {
         self.armed.push(record);
     }
 
-    fn cancel(&mut self, ids: &[crate::agent_loop::timers::TimerId]) {
+    fn cancel(&mut self, ids: &[crate::agent_loop::components::timers::domain::TimerId]) {
         self.armed.retain(|t| !ids.contains(&t.id));
     }
 
-    fn fired(&mut self, id: &crate::agent_loop::timers::TimerId, next: Option<u64>) {
+    fn fired(&mut self, id: &crate::agent_loop::components::timers::domain::TimerId, next: Option<u64>) {
         match next {
             Some(next) => {
                 if let Some(t) = self.armed.iter_mut().find(|t| t.id == *id) {
@@ -62,9 +64,9 @@ impl PartState for TimerState {
 /// Spawn a one-shot sleep that tells the actor `TimerFired` after `delay`. The
 /// firing is journaled/handled on the mailbox; a stale fire (timer since
 /// cancelled) is ignored there, so an un-cancellable sleep task is harmless.
-pub(super) fn spawn_timer_sleep(
+pub(crate) fn spawn_timer_sleep(
     self_ref: ActorRef<AgentCommand>,
-    id: crate::agent_loop::timers::TimerId,
+    id: crate::agent_loop::components::timers::domain::TimerId,
     delay: std::time::Duration,
 ) {
     tokio::spawn(async move {
@@ -82,7 +84,7 @@ fn execute_timer_tool(
     input: &Value,
     self_ref: ActorRef<AgentCommand>,
 ) -> Result<(Value, Vec<AgentDomainEvent>), horsie_agentcore::ToolCallError> {
-    use crate::agent_loop::timers::{TimerId, TimerKind, TimerRecord};
+    use crate::agent_loop::components::timers::domain::{TimerId, TimerKind, TimerRecord};
     use horsie_agentcore::ToolCallError;
     let invalid = |m: &str| Err(ToolCallError::InvalidInput(m.to_string()));
     match name {
@@ -159,7 +161,7 @@ fn execute_timer_tool(
 }
 
 /// Timers this agent has armed against itself.
-pub(super) struct Timers;
+pub(crate) struct Timers;
 
 #[async_trait]
 impl Component for Timers {
@@ -189,7 +191,7 @@ impl Component for Timers {
         let now = now_ms();
         // Re-arm recurring; remove one-shot.
         let next_fire_at_unix_ms = match record.kind {
-            crate::agent_loop::timers::TimerKind::Recurring => {
+            crate::agent_loop::components::timers::domain::TimerKind::Recurring => {
                 spawn_timer_sleep(
                     cx.actor.self_ref(),
                     id.clone(),
@@ -197,7 +199,7 @@ impl Component for Timers {
                 );
                 Some(now.saturating_add(record.interval_secs.saturating_mul(1000)))
             }
-            crate::agent_loop::timers::TimerKind::OneShot => None,
+            crate::agent_loop::components::timers::domain::TimerKind::OneShot => None,
         };
         // The wake id is derived from the timer and its fire count, never
         // generated: the fold must reproduce the same id on replay.

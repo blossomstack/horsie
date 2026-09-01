@@ -16,7 +16,7 @@
 //! a park, an ask, a submitted result, a contradiction — decided here because
 //! only the turn knows what would wake the agent again.
 
-use super::*;
+use crate::agent_loop::prelude::*;
 use crate::agent_loop::context::{AgentOutcome, AgentOutcomeSink, AskedQuestion};
 use crate::sessions::ask_tool::ASK_USER_TOOL;
 use crate::sessions::workflow::SUBMIT_RESULT_TOOL;
@@ -65,35 +65,35 @@ pub struct TurnState {
 }
 
 impl TurnState {
-    pub(super) fn in_flight(&self) -> bool {
+    pub(crate) fn in_flight(&self) -> bool {
         self.in_flight
     }
 
-    pub(super) fn nudges(&self) -> u32 {
+    pub(crate) fn nudges(&self) -> u32 {
         self.nudges
     }
 
     /// A turn began. Told by the queue, which is what takes the input that
     /// makes the agent owe a call — the flag is this component's, the decision
     /// is not.
-    pub(super) fn began(&mut self) {
+    pub(crate) fn began(&mut self) {
         self.in_flight = true;
     }
 
     /// A turn reached a boundary, however it got there.
-    pub(super) fn ended(&mut self) {
+    pub(crate) fn ended(&mut self) {
         self.in_flight = false;
     }
 
     /// A turn ended the way it should have: the nudge budget is spent on
     /// turns that end with nothing to wake them, and this was not one.
-    pub(super) fn ended_properly(&mut self) {
+    pub(crate) fn ended_properly(&mut self) {
         self.in_flight = false;
         self.nudges = 0;
     }
 
     /// The model was told to try again.
-    pub(super) fn nudged(&mut self) {
+    pub(crate) fn nudged(&mut self) {
         self.in_flight = false;
         self.nudges = self.nudges.saturating_add(1);
     }
@@ -124,7 +124,7 @@ impl PartState for TurnState {
 /// One turn's bookkeeping, all in memory on purpose: a crash mid-turn is an
 /// interrupted turn, and recovery already treats it as one.
 #[derive(Default)]
-pub(super) struct Turn {
+pub(crate) struct Turn {
     /// The turn in flight, if any. Created lazily at the first call of a turn
     /// and dropped when it concludes — the durable `turn_in_flight` is what
     /// says a turn exists, and this is only what the turn has spent so far.
@@ -133,11 +133,11 @@ pub(super) struct Turn {
 
 /// Result of a turn, interpreted by [`Turn::conclude`].
 pub struct RunReport {
-    pub(super) outcome: RunOutcome,
+    pub(crate) outcome: RunOutcome,
 }
 
 #[derive(Debug)]
-pub(super) enum RunOutcome {
+pub(crate) enum RunOutcome {
     /// Agent ended its turn with plain text. Whether that is a park or a
     /// mistake is decided here, where what would wake the agent is known.
     Completed { text: String },
@@ -149,7 +149,7 @@ pub(super) enum RunOutcome {
 
 /// One turn's in-flight bookkeeping — what the old background loop held in
 /// locals.
-pub(super) struct TurnFlight {
+pub(crate) struct TurnFlight {
     tool_choice: horsie_agentcore::ToolChoice,
     /// Completed provider calls this turn.
     iteration: u32,
@@ -247,7 +247,7 @@ impl Turn {
     /// Called by the boundary, which has already established that the agent
     /// owes a call, that nothing else is running, and that the contexts are
     /// fresh. Everything it reads about the conversation it reads from state.
-    pub(super) async fn run_step(&mut self, cx: &mut Cx<'_>) -> CommandEffect<AgentDomainEvent> {
+    pub(crate) async fn run_step(&mut self, cx: &mut Cx<'_>) -> CommandEffect<AgentDomainEvent> {
         let max_iterations = cx.params.max_iterations.unwrap_or(MAX_ITERATIONS);
         if self.flight(cx).iteration >= max_iterations {
             let state = cx.state.clone();
@@ -271,7 +271,7 @@ impl Turn {
     /// Reads the deltas, which are the only copy: a streamed message becomes
     /// durable when the provider finishes it, and a cancelled call never
     /// reaches that point.
-    pub(super) fn aborted_message(cx: &Cx<'_>) -> Option<Message> {
+    pub(crate) fn aborted_message(cx: &Cx<'_>) -> Option<Message> {
         let text = cx.scratch.deltas.concat();
         (!text.trim().is_empty()).then(|| Message::assistant_text(new_message_id(), text, now_ms()))
     }
@@ -514,7 +514,7 @@ impl Turn {
             // Claimed AND permitted: a filtered-out component tool still goes
             // to the toolbox, whose filter answers "not permitted".
             let routed = match inline_names.contains(&name) {
-                true => component::route_tool_call(ComponentToolCall {
+                true => route_tool_call(ComponentToolCall {
                     work,
                     tool_call_id: id.clone(),
                     name: name.clone(),
@@ -653,7 +653,7 @@ impl Turn {
     /// The turn was cancelled: bank what it spent, repair what it left
     /// dangling, and report it. Called by the boundary, which has already
     /// stopped everything that was running.
-    pub(super) async fn cancelled(&mut self, cx: &mut Cx<'_>) -> CommandEffect<AgentDomainEvent> {
+    pub(crate) async fn cancelled(&mut self, cx: &mut Cx<'_>) -> CommandEffect<AgentDomainEvent> {
         let events = vec![self.run_aborted()];
         let folded = Components::apply_all(cx.state, &events);
         self.finish(
@@ -901,10 +901,10 @@ fn spawn_tool_call(
 /// step is failed. Two: the first nudge is a plain message, the second forces
 /// `submit_result` in `tool_choice`, and a model that defeats both is not going
 /// to be talked round by a third.
-pub(super) const MAX_RESULT_NUDGES: u32 = 2;
+pub(crate) const MAX_RESULT_NUDGES: u32 = 2;
 
 #[derive(Debug)]
-pub(super) enum Conclusion {
+pub(crate) enum Conclusion {
     Output(Value),
     /// One or more questions, all parked on together.
     Ask(Vec<AskedQuestion>),
@@ -917,7 +917,7 @@ impl Turn {
     /// completion — and deliver the outcome to the parent. The turn's events
     /// were already persisted step by step, so this only records the terminal
     /// transition and lowers the gate.
-    pub(super) async fn conclude(
+    pub(crate) async fn conclude(
         &mut self,
         report: RunReport,
         state: &AgentState,
@@ -956,7 +956,7 @@ impl Turn {
                         return CommandEffect::none();
                     }
                     if !state.timers().is_empty()
-                        || crate::agent_loop::carried_state::has_outstanding_children(state)
+                        || crate::agent_loop::shared::carried_state::has_outstanding_children(state)
                     {
                         parent.deliver(AgentOutcome::Parked { agent }).await;
                         let parked = AgentDomainEvent::Parked { at_ms: now_ms() };
@@ -1105,7 +1105,7 @@ impl Turn {
     /// A match on names, and nothing else. Each of these tools does exactly one
     /// thing, so there is no payload shape to disambiguate — which is the whole
     /// reason they are separate tools rather than one with a `kind` field.
-    pub(super) fn interpret(calls: Vec<StoppedCall>) -> Conclusion {
+    pub(crate) fn interpret(calls: Vec<StoppedCall>) -> Conclusion {
         if calls.is_empty() {
             return Conclusion::Output(Value::Null);
         }
@@ -1170,7 +1170,7 @@ impl Turn {
     /// All three facts are read off the shared state: the queue and the timers
     /// are in it, and the log carries every subagent lifecycle record the
     /// session wrote onto it. Nothing here asks another component anything.
-    pub(super) async fn ended_without_result(
+    pub(crate) async fn ended_without_result(
         &mut self,
         state: &AgentState,
         cx: &mut Cx<'_>,
@@ -1183,7 +1183,7 @@ impl Turn {
             return CommandEffect::none();
         }
         if !state.timers().is_empty()
-            || crate::agent_loop::carried_state::has_outstanding_children(state)
+            || crate::agent_loop::shared::carried_state::has_outstanding_children(state)
         {
             parent.deliver(AgentOutcome::Parked { agent }).await;
             let parked = AgentDomainEvent::Parked { at_ms: now_ms() };
@@ -1240,7 +1240,7 @@ impl Turn {
     /// `tool_result` for the session to stay valid, and a call left
     /// dangling is indistinguishable later from a question still waiting on the
     /// user.
-    pub(super) fn correct_contradiction(
+    pub(crate) fn correct_contradiction(
         &mut self,
         calls: Vec<StoppedCall>,
         state: &AgentState,

@@ -1,5 +1,5 @@
-use crate::agent_loop::agent_actor::UsageTotal;
-use crate::agent_loop::mcp_toolbox::CompositeToolbox;
+use crate::agent_loop::state::UsageTotal;
+use crate::agent_loop::shared::mcp_toolbox::CompositeToolbox;
 use async_trait::async_trait;
 use horsie_agentcore::{LlmProvider, ToolCallError, ToolOutcome, ToolSpec, Toolbox, ToolboxImpl};
 use horsie_runtime_host::{RuntimeClient, add_runtime_tools};
@@ -551,7 +551,7 @@ impl Toolbox for AgentToolbox {
             // Shared plugin library: addressed by the reserved `horsie_shared`
             // name, resolved against the shared skill set (not a job
             // workspace).
-            if requested_ws == Some(crate::agent_loop::workspace::SHARED_WORKSPACE) {
+            if requested_ws == Some(crate::agent_loop::shared::workspace::SHARED_WORKSPACE) {
                 if !self.use_plugins {
                     return Err(ToolCallError::InvalidInput(
                         "the shared plugin library 'horsie_shared' is not enabled for this agent"
@@ -559,7 +559,7 @@ impl Toolbox for AgentToolbox {
                     ));
                 }
                 let (_, shared) =
-                    crate::agent_loop::workspace::scan(&self.runtime_client, None).await;
+                    crate::agent_loop::shared::workspace::scan(&self.runtime_client, None).await;
                 return match shared.skills.get(requested) {
                     Some(skill) => Ok(ToolOutcome::result(Value::String(skill_body(skill)))),
                     None => Err(ToolCallError::InvalidInput(format!(
@@ -570,7 +570,7 @@ impl Toolbox for AgentToolbox {
             }
             let ws_name = self.resolve_workspace(requested_ws)?;
             let (ws, _) =
-                crate::agent_loop::workspace::scan(&self.runtime_client, Some(ws_name.clone()))
+                crate::agent_loop::shared::workspace::scan(&self.runtime_client, Some(ws_name.clone()))
                     .await;
             let Some(info) = ws.find(&ws_name) else {
                 return Err(ToolCallError::InvalidInput(format!(
@@ -591,7 +591,7 @@ impl Toolbox for AgentToolbox {
                 .and_then(Value::as_str)
                 .map(str::to_string);
             // Shared-only view.
-            if filter.as_deref() == Some(crate::agent_loop::workspace::SHARED_WORKSPACE) {
+            if filter.as_deref() == Some(crate::agent_loop::shared::workspace::SHARED_WORKSPACE) {
                 if !self.use_plugins {
                     return Err(ToolCallError::InvalidInput(
                         "the shared plugin library 'horsie_shared' is not enabled for this agent"
@@ -599,22 +599,22 @@ impl Toolbox for AgentToolbox {
                     ));
                 }
                 let (_, shared) =
-                    crate::agent_loop::workspace::scan(&self.runtime_client, None).await;
+                    crate::agent_loop::shared::workspace::scan(&self.runtime_client, None).await;
                 return Ok(ToolOutcome::result(Value::String(
-                    crate::agent_loop::workspace::shared_inspect(
+                    crate::agent_loop::shared::workspace::shared_inspect(
                         &shared.skills,
                         shared.root.as_deref(),
                     ),
                 )));
             }
             let (ws, shared) =
-                crate::agent_loop::workspace::scan(&self.runtime_client, filter.clone()).await;
-            let mut out = crate::agent_loop::workspace::inspect_result(&ws);
+                crate::agent_loop::shared::workspace::scan(&self.runtime_client, filter.clone()).await;
+            let mut out = crate::agent_loop::shared::workspace::inspect_result(&ws);
             // Append the shared library when listing everything for an
             // opted-in agent.
             if self.use_plugins && filter.is_none() {
                 out.push_str("\n\n");
-                out.push_str(&crate::agent_loop::workspace::shared_inspect(
+                out.push_str(&crate::agent_loop::shared::workspace::shared_inspect(
                     &shared.skills,
                     shared.root.as_deref(),
                 ));
@@ -630,7 +630,7 @@ impl Toolbox for AgentToolbox {
 /// absolute because that is the only addressing those tools take — and because
 /// a shared skill's directory is not under any workspace, so nothing else
 /// would resolve it.
-fn skill_body(skill: &crate::agent_loop::workspace::Skill) -> String {
+fn skill_body(skill: &crate::agent_loop::shared::workspace::Skill) -> String {
     match &skill.dir {
         Some(dir) => format!(
             "{}\n\n[resources] This skill's files are in {}/. \

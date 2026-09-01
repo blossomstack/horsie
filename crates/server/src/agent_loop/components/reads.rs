@@ -10,7 +10,7 @@
 //! separating them would let a client hold a delta that belongs after an entry
 //! it has not seen.
 
-use super::*;
+use crate::agent_loop::prelude::*;
 use horsie_actor::CommandEffect;
 use horsie_agentcore::AgentLogEntry;
 use serde::{Deserialize, Serialize};
@@ -38,7 +38,7 @@ pub struct ReadOutcome {
     /// starts from the beginning and the caller must discard what it holds.
     pub reset_deltas: bool,
     /// Where the caller now is.
-    pub cursor: crate::agent_loop::agent_log::Cursor,
+    pub cursor: crate::agent_loop::shared::agent_log::Cursor,
 }
 
 /// What a cursorless replay covered.
@@ -50,7 +50,7 @@ pub struct ReplayWindow {
 
 impl ReadOutcome {
     /// Nothing new — the reader is exactly where the agent is.
-    pub(super) fn nothing(cursor: crate::agent_loop::agent_log::Cursor) -> Self {
+    pub(crate) fn nothing(cursor: crate::agent_loop::shared::agent_log::Cursor) -> Self {
         Self {
             window: None,
             entries: Vec::new(),
@@ -86,7 +86,7 @@ impl AgentState {
     #[must_use]
     pub fn read_from(
         &self,
-        after: Option<crate::agent_loop::agent_log::Cursor>,
+        after: Option<crate::agent_loop::shared::agent_log::Cursor>,
         deltas: &[String],
     ) -> ReadOutcome {
         let tail = self.tail_seq();
@@ -94,7 +94,7 @@ impl AgentState {
             // No position at all: the newest window, capped. A long-running
             // session must not resend its whole history on every open, and the
             // caller is told when the cap bit so it can page back for the rest.
-            let (entries, truncated) = crate::agent_loop::agent_log::replay_window(self.log());
+            let (entries, truncated) = crate::agent_loop::shared::agent_log::replay_window(self.log());
             return ReadOutcome {
                 window: Some(ReplayWindow {
                     has_more_before: truncated,
@@ -103,20 +103,20 @@ impl AgentState {
                 entries: entries.to_vec(),
                 deltas: deltas.to_vec(),
                 reset_deltas: false,
-                cursor: crate::agent_loop::agent_log::Cursor {
+                cursor: crate::agent_loop::shared::agent_log::Cursor {
                     entry_seq: tail.unwrap_or(0),
                     delta_seq: deltas.len(),
                 },
             };
         };
 
-        let entries = crate::agent_loop::agent_log::since(self.log(), cursor.entry_seq).to_vec();
+        let entries = crate::agent_loop::shared::agent_log::since(self.log(), cursor.entry_seq).to_vec();
         if !entries.is_empty() {
             // Behind the tail. The deltas belong after the entries this reader
             // is only now receiving, so they wait for the next step.
             return ReadOutcome {
                 window: None,
-                cursor: crate::agent_loop::agent_log::Cursor {
+                cursor: crate::agent_loop::shared::agent_log::Cursor {
                     entry_seq: entries.last().map_or(cursor.entry_seq, |e| e.seq),
                     delta_seq: 0,
                 },
@@ -132,7 +132,7 @@ impl AgentState {
                 entries: Vec::new(),
                 deltas: deltas.to_vec(),
                 reset_deltas: true,
-                cursor: crate::agent_loop::agent_log::Cursor {
+                cursor: crate::agent_loop::shared::agent_log::Cursor {
                     entry_seq: cursor.entry_seq,
                     delta_seq: deltas.len(),
                 },
@@ -148,7 +148,7 @@ impl AgentState {
             entries: Vec::new(),
             deltas: deltas[cursor.delta_seq..].to_vec(),
             reset_deltas: false,
-            cursor: crate::agent_loop::agent_log::Cursor {
+            cursor: crate::agent_loop::shared::agent_log::Cursor {
                 entry_seq: cursor.entry_seq,
                 delta_seq: deltas.len(),
             },
@@ -157,7 +157,7 @@ impl AgentState {
 }
 
 /// Questions answered from state, which wake nothing.
-pub(super) struct Reads;
+pub(crate) struct Reads;
 
 #[async_trait::async_trait]
 impl Component for Reads {
@@ -180,7 +180,7 @@ impl Component for Reads {
                 filter,
                 reply,
             } => {
-                let _ = reply.send(crate::agent_loop::agent_log::page(
+                let _ = reply.send(crate::agent_loop::shared::agent_log::page(
                     state.log(), anchor, max, &filter,
                 ));
                 CommandEffect::none()
@@ -191,13 +191,13 @@ impl Component for Reads {
                 filter,
                 reply,
             } => {
-                let _ = reply.send(crate::agent_loop::agent_log::search(
+                let _ = reply.send(crate::agent_loop::shared::agent_log::search(
                     state.log(), &needle, &filter, max,
                 ));
                 CommandEffect::none()
             }
             ReadCommand::SeqOfId { id, reply } => {
-                let _ = reply.send(crate::agent_loop::agent_log::seq_of_id(state.log(), &id));
+                let _ = reply.send(crate::agent_loop::shared::agent_log::seq_of_id(state.log(), &id));
                 CommandEffect::none()
             }
             ReadCommand::GetUsage { reply } => {

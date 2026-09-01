@@ -22,7 +22,7 @@
 //! reach the model on the next call rather than after the turn: every tool
 //! call is answered by the time this runs, so the queue may join in.
 
-use super::*;
+use crate::agent_loop::prelude::*;
 use horsie_actor::{CommandEffect, ReplyTo};
 
 /// Why the next provider call cannot happen yet.
@@ -31,7 +31,7 @@ use horsie_actor::{CommandEffect, ReplyTo};
 /// they are asked in cannot matter — which is what makes this a poll rather
 /// than another ordered decision.
 #[derive(Debug)]
-pub(super) enum Blocked {
+pub(crate) enum Blocked {
     /// Tool calls the model made are still being executed. Naming them makes
     /// a stuck turn diagnosable from a log line.
     ToolCalls(Vec<String>),
@@ -41,7 +41,7 @@ pub(super) enum Blocked {
 
 impl Components {
     /// Decide what happens next, and start it.
-    pub(super) async fn advance(&mut self, cx: &mut Cx<'_>) -> CommandEffect<AgentDomainEvent> {
+    pub(crate) async fn advance(&mut self, cx: &mut Cx<'_>) -> CommandEffect<AgentDomainEvent> {
         // 1. One thing at a time. Whatever is running reports back, and the
         //    handler that takes the report advances again.
         if cx.scratch.running.is_some() {
@@ -157,7 +157,7 @@ impl Components {
     /// own mailbox on it, and the deliveries a concluded turn makes `tell`
     /// into that same mailbox. The generation fence is what makes answering
     /// early honest — a bumped generation cannot be written against.
-    pub(super) async fn cancel(
+    pub(crate) async fn cancel(
         &mut self,
         ack: Option<ReplyTo<()>>,
         cx: &mut Cx<'_>,

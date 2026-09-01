@@ -1,78 +1,17 @@
-//! One agent: its session, the turn it is running, and the log both leave
-//! behind.
+//! The actor: one agent's shell.
 //!
-//! An agent is event-sourced, so a restarted process recovers an in-flight
-//! session from the journal and continues. Everything durable about it is
-//! [`AgentState`], everything it can be told is [`AgentCommand`], and every
-//! change is an [`AgentDomainEvent`] that was journaled before it was believed.
-//!
-//! The actor itself is a router and nothing more. Each command group belongs
-//! to one **component** — an instantiated struct the actor holds — and the
-//! actor's whole job is to hand the command over, persist whatever the
-//! component decided, and keep the plumbing every component relies on (the
-//! observer, the revision counter, the snapshot cadence). The components are
-//! decoupled from the actor and from each other: what they share is the state,
-//! the command/event vocabulary, and the transient scratch — see
-//! [`component`] for the contract.
-//!
-//! What happens next is decided in exactly one place — [`boundary`] — which
-//! is the only code that knows what components exist. Components report about
-//! themselves and never about each other.
-//!
-//! One component, one file: [`provision`] the runtime and context setup every
-//! kind of work shares, [`queue`] the promises this agent has accepted and how
-//! they become input, [`turn`] one provider call and what an ending means,
-//! [`compaction`] folding old history behind a summary boundary, [`timers`]
-//! and [`task_list`] the tools whose state is the agent's own, [`seed`]
-//! branching and the sub-session summary, [`reads`] the questions that wake
-//! nothing, and [`log`] what others write into its transcript.
+//! It routes every command to [`Components`], persists whatever they decided,
+//! folds it, and keeps the plumbing they all rely on — the observer, the
+//! revision counter, the snapshot cadence. It decides nothing itself, and it
+//! does not know what components exist.
 //!
 //! Two things deliberately do not happen on this mailbox. No provider call and
 //! no toolbox build: those run on a spawned task, so a thirty-second MCP
 //! connect cannot block a cancel. And no decision about whether this agent
 //! exists: residency belongs to whoever spawned it.
 
-mod boundary;
-mod compaction;
-mod component;
-mod log;
-mod provision;
-mod queue;
-mod reads;
-mod repair;
-mod seed;
-mod state;
-mod task_list;
-#[cfg(test)]
-pub(super) mod testing;
-mod timers;
-mod turn;
-mod types;
-mod usage;
-
-pub use reads::{ReadOutcome, ReplayWindow};
-pub use state::{AgentState, UsageTotal, hook_entry, hook_entry_id};
-pub use types::*;
-
-use compaction::{COMPACT_AT_PERCENT, COMPACT_RETAIN_PERCENT, Compaction};
-use usage::UsageState;
-use boundary::Blocked;
-use component::{
-    Component, ComponentState, Components, Cx, Part, PartState, Scratch, WorkKind,
-    answer_tool_call, component_tool_specs, is_component_tool,
-};
-use log::LogWrites;
-use provision::Provision;
-use queue::{Queue, QueueState};
-use reads::Reads;
-use repair::{missing_tool_results, parked_call_ids, repair_unanswered_tool_calls};
-use seed::Seeding;
-use state::new_message_id;
-use task_list::{TaskListPart, TaskLists};
-use timers::{TimerState, Timers};
-use turn::{Turn, TurnState};
-
 use crate::agent_loop::context::AgentRuntimeContext;
+use crate::agent_loop::prelude::*;
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, CommandEffect, EventSourcedActor, PersistenceId};
 use std::sync::Arc;

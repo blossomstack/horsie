@@ -19,7 +19,7 @@
 //! and an agent that is unsure can run `pwd` — where a lost task list is
 //! neither.
 
-use super::agent_actor::AgentState;
+use crate::agent_loop::AgentState;
 use horsie_agentcore::{AgentLogBody, LifecycleEvent};
 use std::collections::BTreeMap;
 
@@ -168,7 +168,7 @@ pub(crate) fn precompact_refusal(records: &[horsie_models::hooks::HookRecord]) -
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::agent_loop::timers::{TimerKind, TimerRecord};
+    use crate::agent_loop::components::timers::domain::{TimerKind, TimerRecord};
     use horsie_agentcore::{AgentLogEntry, SubAgentLifecycle};
 
     /// Whether a report is still owed decides what a turn ending with plain
@@ -217,7 +217,7 @@ mod tests {
     fn with_tasks(state: &mut AgentState, tasks: &[&str]) {
         state
             .task_list
-            .apply(crate::agent_loop::task_list::TaskListAction::Create {
+            .apply(crate::agent_loop::components::task_list::domain::TaskListAction::Create {
                 tasks: tasks.iter().map(|t| (*t).to_string()).collect(),
             })
             .expect("the fixture's task list is valid");
@@ -231,7 +231,7 @@ mod tests {
         let mut state = AgentState::default();
         with_tasks(&mut state, &["migrate the journal", "delete the importer"]);
         state.timers.push(TimerRecord {
-            id: crate::agent_loop::timers::TimerId("timer-7".into()),
+            id: crate::agent_loop::components::timers::domain::TimerId("timer-7".into()),
             label: "nightly".into(),
             message: "re-run the sweep".into(),
             kind: TimerKind::Recurring,

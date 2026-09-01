@@ -6,7 +6,7 @@
 //! of them can reach these fields — they call [`UsageState::bank`], which is
 //! the one rule for how a cost is added, stated once.
 
-use super::*;
+use crate::agent_loop::prelude::*;
 use horsie_agentcore::Usage;
 
 /// The running bill, and the size of the prompt behind it.
@@ -27,26 +27,26 @@ pub struct UsageState {
 }
 
 impl UsageState {
-    pub(super) fn total(&self) -> UsageTotal {
+    pub(crate) fn total(&self) -> UsageTotal {
         self.total
     }
 
-    pub(super) fn last_turn(&self) -> Option<&Usage> {
+    pub(crate) fn last_turn(&self) -> Option<&Usage> {
         self.last_turn.as_ref()
     }
 
-    pub(super) fn context_tokens(&self) -> u32 {
+    pub(crate) fn context_tokens(&self) -> u32 {
         self.context_tokens
     }
 
     /// Add what a call cost. Everything spent goes through here, whoever spent
     /// it.
-    pub(super) fn bank(&mut self, usage: &Usage) {
+    pub(crate) fn bank(&mut self, usage: &Usage) {
         self.total.add(usage);
     }
 
     /// Record the end of a turn: its own cost, and where it left the context.
-    pub(super) fn turn_ended(&mut self, usage: Usage, context_tokens: u32, keep: bool) {
+    pub(crate) fn turn_ended(&mut self, usage: Usage, context_tokens: u32, keep: bool) {
         self.total.add(&usage);
         self.context_tokens = context_tokens;
         // A turn that never finished has no "last turn" figure to show: the
@@ -58,7 +58,7 @@ impl UsageState {
     }
 
     /// What the newest provider call was charged for its prompt.
-    pub(super) fn context_is(&mut self, tokens: u32) {
+    pub(crate) fn context_is(&mut self, tokens: u32) {
         self.context_tokens = tokens;
     }
 }

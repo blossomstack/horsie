@@ -12,7 +12,9 @@
 //! so a provider retry can never double-persist it. Nothing is started from
 //! this file.
 
-use super::*;
+pub mod inbox;
+
+use crate::agent_loop::prelude::*;
 use crate::agent_loop::context::AgentOutcome;
 use async_trait::async_trait;
 use horsie_actor::CommandEffect;
@@ -47,15 +49,15 @@ pub struct QueueState {
 }
 
 impl QueueState {
-    pub(super) fn inbox(&self) -> &[crate::agent_loop::Incoming] {
+    pub(crate) fn inbox(&self) -> &[crate::agent_loop::Incoming] {
         &self.inbox
     }
 
-    pub(super) fn asks(&self) -> &[crate::agent_loop::AskedQuestion] {
+    pub(crate) fn asks(&self) -> &[crate::agent_loop::AskedQuestion] {
         &self.asks
     }
 
-    pub(super) fn parked(&self) -> bool {
+    pub(crate) fn parked(&self) -> bool {
         self.parked
     }
 
@@ -106,7 +108,7 @@ impl PartState for QueueState {
 /// The component itself: what this agent has accepted, and how it becomes the
 /// next input.
 #[derive(Default)]
-pub(super) struct Queue {
+pub(crate) struct Queue {
     /// Whether this agent load has fired its start hook. Deliberately **not**
     /// journaled — a rehydrated agent fires again, which is precisely what
     /// `source: "resume"` means.
@@ -121,7 +123,7 @@ impl Queue {
     /// hooks: a crash in the hook window replays with the queue still owed,
     /// which redelivers the message — the same at-least-once the session's
     /// tell-then-persist has always had, and the direction to err in.
-    pub(super) async fn take(
+    pub(crate) async fn take(
         &mut self,
         turn: crate::agent_loop::Turn,
         cx: &mut Cx<'_>,

@@ -12,7 +12,8 @@
 //! announced separately, so a record that says nothing about the runtime cannot
 //! start a turn — which is what keeps recovery quiet.
 
-use super::*;
+use crate::agent_loop::prelude::*;
+use crate::agent_loop::state::hook_entry;
 use async_trait::async_trait;
 use horsie_actor::CommandEffect;
 use horsie_agentcore::{AgentLogBody, LifecycleEvent};
@@ -22,7 +23,7 @@ use horsie_models::now_ms;
 ///
 /// Exhaustive on purpose: a variant added later has to state whether it bears
 /// on whether this agent may run, rather than silently answering "no".
-pub(super) fn runtime_readiness(event: &LifecycleEvent) -> Option<bool> {
+pub(crate) fn runtime_readiness(event: &LifecycleEvent) -> Option<bool> {
     match event {
         LifecycleEvent::Runtime(runtime) => Some(match runtime.status {
             horsie_agentcore::RuntimeStatus::Ready(_) => true,
@@ -51,7 +52,7 @@ pub(super) fn runtime_readiness(event: &LifecycleEvent) -> Option<bool> {
 }
 
 /// Things written into this agent's log by somebody else.
-pub(super) struct LogWrites;
+pub(crate) struct LogWrites;
 
 #[async_trait]
 impl Component for LogWrites {

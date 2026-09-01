@@ -10,12 +10,12 @@
 //! The one call that must *not* be repaired is the ask an agent is parked on:
 //! its answer is still coming.
 
-use super::*;
+use crate::agent_loop::prelude::*;
 use horsie_agentcore::{ContentPart, Message, Role};
 use horsie_models::now_ms;
 
 /// What a synthetic result says stands in for a tool call that never finished.
-pub(super) const INTERRUPTED_RESULT: &str = "interrupted, no result was recorded";
+pub(crate) const INTERRUPTED_RESULT: &str = "interrupted, no result was recorded";
 
 /// The synthetic results a history is missing, in call order — the repair as
 /// *messages to journal*, where [`repair_unanswered_tool_calls`] returns the
@@ -31,7 +31,7 @@ pub(super) const INTERRUPTED_RESULT: &str = "interrupted, no result was recorded
 /// The exemption `missing_tool_results` needs, taken from state rather than
 /// from tool names: these are the calls an answer will arrive against, so they
 /// are exactly the dangling calls that are not wreckage.
-pub(super) fn parked_call_ids(state: &AgentState) -> Vec<String> {
+pub(crate) fn parked_call_ids(state: &AgentState) -> Vec<String> {
     state
         .asks()
         .iter()
@@ -50,7 +50,7 @@ pub(super) fn parked_call_ids(state: &AgentState) -> Vec<String> {
 /// Not journaling the repair is safe because [`repair_unanswered_tool_calls`]
 /// still patches the history put on the wire, so an abandoned park can never
 /// reach a provider dangling.
-pub(super) fn missing_tool_results(messages: &[Message], parked_on: &[String]) -> Vec<Message> {
+pub(crate) fn missing_tool_results(messages: &[Message], parked_on: &[String]) -> Vec<Message> {
     let answered: std::collections::HashSet<&str> = messages
         .iter()
         .flat_map(|m| m.parts.iter())
@@ -106,11 +106,11 @@ pub(super) fn missing_tool_results(messages: &[Message], parked_on: &[String]) -
 /// becomes unanswerable, this should now find nothing. It stays as the guard on
 /// the one thing that must never reach a provider, and costs one pass over an
 /// in-memory history.
-pub(super) fn repair_unanswered_tool_calls(messages: Vec<Message>) -> Vec<Message> {
+pub(crate) fn repair_unanswered_tool_calls(messages: Vec<Message>) -> Vec<Message> {
     repair_dangling(messages, &std::collections::HashSet::new())
 }
 
-pub(super) fn repair_dangling(
+pub(crate) fn repair_dangling(
     messages: Vec<Message>,
     answering: &std::collections::HashSet<String>,
 ) -> Vec<Message> {
@@ -178,7 +178,7 @@ pub(super) fn repair_dangling(
     out
 }
 
-pub(super) fn synthetic_results(ids: Vec<String>) -> impl Iterator<Item = Message> {
+pub(crate) fn synthetic_results(ids: Vec<String>) -> impl Iterator<Item = Message> {
     ids.into_iter()
         .map(|id| Message::tool_result(id, INTERRUPTED_RESULT, true, Vec::new(), now_ms()))
 }
@@ -191,7 +191,7 @@ pub(super) fn synthetic_results(ids: Vec<String>) -> impl Iterator<Item = Messag
     clippy::wildcard_enum_match_arm
 )]
 mod tests {
-    use super::*;
+    use crate::agent_loop::prelude::*;
     use crate::agent_loop::agent_actor::testing::*;
     use horsie_agentcore::{ContentPart, Message, Role};
     use horsie_models::agent::{TextPart, ToolCallPart};

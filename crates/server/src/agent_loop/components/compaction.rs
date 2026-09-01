@@ -11,7 +11,7 @@
 //! is not log order. Resolving the two is the fold's job because the fold is
 //! the only thing holding the log.
 
-use super::*;
+use crate::agent_loop::prelude::*;
 use horsie_actor::CommandEffect;
 use horsie_agentcore::{AgentLogBody, CompactionEntry, ContentPart, Message, Role};
 use horsie_models::now_ms;
@@ -46,22 +46,6 @@ pub fn boundary_message(entry: &CompactionEntry, at_ms: u64) -> Message {
     }
 }
 
-/// The share of a model's context window at which an agent compacts.
-///
-/// A server constant rather than a session setting: the right value is a
-/// property of the model, not of the session, so it stays retunable centrally
-/// instead of frozen into everyone's saved presets. The headroom above it is
-/// also what absorbs this check's one-iteration lag — `context_tokens` is the
-/// last provider call's prompt size and does not count tool results appended
-/// since.
-pub(super) const COMPACT_AT_PERCENT: u32 = 80;
-
-/// Roughly how much of the window a compaction leaves as raw recent messages.
-///
-/// Not zero, because a summary alone loses the file path or error the agent was
-/// part-way through, and those live in the last few messages.
-pub(super) const COMPACT_RETAIN_PERCENT: u32 = 20;
-
 impl AgentState {
     /// What the model sees: the transcript, with every hook entry translated
     /// into the message it injects — most translate to nothing.
@@ -69,7 +53,7 @@ impl AgentState {
     /// The only way to obtain a `Vec<Message>` from state. `self.history`
     /// cannot be handed to a provider because the element types differ, so
     /// every kind of entry must state what, if anything, it shows the model;
-    /// [`crate::agent_loop::hook_translation::translate`] is where that is
+    /// [`crate::agent_loop::shared::hook_translation::translate`] is where that is
     /// decided, in one exhaustive match, and any future non-model entry
     /// inherits the obligation.
     pub fn prompt_messages(&self) -> Vec<Message> {
@@ -88,7 +72,7 @@ impl AgentState {
                     .filter(|e| e.seq >= from_seq)
                     .filter_map(|e| match &e.body {
                         AgentLogBody::Llm(m) => Some(m.clone()),
-                        AgentLogBody::Hook(h) => crate::agent_loop::hook_translation::translate(h),
+                        AgentLogBody::Hook(h) => crate::agent_loop::shared::hook_translation::translate(h),
                         // Every lifecycle variant, present and future. This
                         // arm is the reason `Lifecycle` is one union rather
                         // than nine flattened ones: provider isolation cannot
@@ -133,7 +117,7 @@ impl AgentState {
     /// failure is to show the model the summary alone rather than to guess a
     /// seq and silently resurrect or drop messages around it.
     #[must_use]
-    pub(super) fn resolve_boundary(&self, retained_from_message_id: Option<&str>) -> (u64, u64) {
+    pub(crate) fn resolve_boundary(&self, retained_from_message_id: Option<&str>) -> (u64, u64) {
         let retain_nothing = (self.tail_seq().unwrap_or(0), self.next_seq());
         let Some(id) = retained_from_message_id else {
             return retain_nothing;
@@ -183,14 +167,14 @@ impl AgentState {
 /// boundary, at a moment where every tool call is answered so nothing can be
 /// cut across, and invisible to everything else: the next provider call simply
 /// reads a shorter history.
-pub(super) struct Compaction;
+pub(crate) struct Compaction;
 
 impl Compaction {
     /// Whether the context has grown past the trigger — read off the budget
     /// the contexts publish. A fresh agent has no budget yet and never
     /// compacts before its first call, which is right: there is nothing to
     /// fold.
-    pub(super) fn due(&self, cx: &Cx<'_>) -> bool {
+    pub(crate) fn due(&self, cx: &Cx<'_>) -> bool {
         cx.scratch.ctx.as_ref().is_some_and(|c| {
             c.budget
                 .is_some_and(|b| cx.state.context_tokens() >= b.trigger_tokens())
@@ -198,7 +182,7 @@ impl Compaction {
     }
 
     /// Take the summary on a spawned task.
-    pub(super) fn start(&mut self, job: CompactJob, cx: &mut Cx<'_>) {
+    pub(crate) fn start(&mut self, job: CompactJob, cx: &mut Cx<'_>) {
         let Some(tctx) = cx.scratch.ctx.clone() else {
             return;
         };
@@ -207,7 +191,7 @@ impl Compaction {
         // task-list change earlier in the same turn is already folded, so a
         // compaction between two calls carries it verbatim.
         let history = repair_unanswered_tool_calls(cx.state.prompt_messages());
-        let carried_state = crate::agent_loop::carried_state::render_carried_state(cx.state);
+        let carried_state = crate::agent_loop::shared::carried_state::render_carried_state(cx.state);
         let self_ref = cx.actor.self_ref();
         tokio::spawn(async move {
             let (outcome, usage) = tokio::select! {
@@ -297,75 +281,6 @@ impl Component for Compaction {
     }
 }
 
-/// Swallows everything a summarise step streams. A summary is not a turn,
-/// and its deltas must never reach a transcript — a viewer would watch the
-/// summary being typed as though the agent had started answering.
-struct NullSink;
-
-#[async_trait::async_trait]
-impl horsie_agentcore::EventSink for NullSink {
-    async fn emit(
-        &self,
-        _event: horsie_agentcore::AgentEvent,
-    ) -> Result<(), horsie_agentcore::EventSinkError> {
-        Ok(())
-    }
-}
-
-/// The shared summarise utility: the same [`horsie_agentcore::run_step`] the
-/// turn drives, configured bare — no tools, no system prompt (workspace and
-/// tool guidance are instructions for doing the work, and this step is not
-/// doing the work), no artifacts (re-uploading every image to shrink the
-/// context defeats the point), nothing streamed. Used here and by the seeding
-/// component, which is what "sharing the compaction machinery" means.
-///
-/// Answers the summary and what the step spent. An empty span summarises to
-/// nothing rather than erroring — a sub session branched from a session that
-/// has not started yet is empty, not broken.
-pub(super) async fn summarise_step(
-    tctx: &TurnCtx,
-    history: &[Message],
-    cut: usize,
-    instructions: Option<&str>,
-    cancel: &tokio_util::sync::CancellationToken,
-) -> Result<(String, horsie_agentcore::Usage), horsie_agentcore::StepError> {
-    let cut = cut.min(history.len());
-    if cut == 0 {
-        return Ok((String::new(), horsie_agentcore::Usage::without_cache(0, 0)));
-    }
-    let mut window = history[..cut].to_vec();
-    window.push(Message {
-        id: format!("compaction-request:{cut}"),
-        role: Role::User,
-        parts: vec![ContentPart::Text(horsie_models::agent::TextPart {
-            text: horsie_agentcore::summary_prompt(instructions),
-        })],
-        created_at_ms: now_ms(),
-        started_at_ms: None,
-    });
-    let request = horsie_agentcore::StepRequest {
-        provider: tctx.provider.clone(),
-        conversation_id: tctx.conversation_id.clone(),
-        system_prompt: String::new(),
-        specs: Vec::new(),
-        tool_choice: horsie_agentcore::ToolChoice::Auto,
-        max_tokens: None,
-        thinking_effort: None,
-        artifact_source: None,
-    };
-    let response = horsie_agentcore::run_step(&request, &window, &NullSink, cancel).await?;
-    let text = horsie_agentcore::extract_text(&response.message.parts);
-    if text.trim().is_empty() {
-        return Err(horsie_agentcore::StepError::Provider(
-            horsie_agentcore::LlmError::ApiError {
-                status: 502,
-                message: "the summariser returned no text".into(),
-            },
-        ));
-    }
-    Ok((text, response.usage))
-}
-
 /// The compaction run itself, on its own task: decide the cut, fire the
 /// hooks, take the summary, price the result. Answers what it produced and
 /// what the summarising call spent.
@@ -399,12 +314,12 @@ async fn run_compaction(
             },
         ))
         .await;
-    if let Some(reason) = crate::agent_loop::carried_state::precompact_refusal(&records) {
+    if let Some(reason) = crate::agent_loop::shared::carried_state::precompact_refusal(&records) {
         tracing::info!(reason, "a PreCompact hook abandoned this compaction");
         return (skipped(false), None);
     }
     let (summary, usage) =
-        match summarise_step(tctx, &history, cut, job.instructions.as_deref(), cancel).await {
+        match crate::agent_loop::shared::summarise::summarise_step(tctx, &history, cut, job.instructions.as_deref(), cancel).await {
             Ok(taken) => taken,
             Err(e) => {
                 tracing::warn!(error = %e, "a compaction failed; the turn continues uncompacted");
@@ -459,7 +374,7 @@ impl Compaction {
     // variant. Which one is decided in `AgentActor::apply_event`, so an event
     // added later fails to compile *there* — where it has to be classified —
     // rather than silently reaching the wrong fold here.
-    pub(super) fn apply(state: &mut AgentState, event: AgentDomainEvent) {
+    pub(crate) fn apply(state: &mut AgentState, event: AgentDomainEvent) {
         if let AgentDomainEvent::Compacted {
             summary,
             carried_state,
@@ -511,7 +426,7 @@ impl Compaction {
     clippy::wildcard_enum_match_arm
 )]
 mod tests {
-    use super::*;
+    use crate::agent_loop::prelude::*;
     use crate::agent_loop::agent_actor::testing::*;
     use horsie_agentcore::{AgentLogBody, ContentPart, LifecycleEvent, Message};
     // --- Compaction boundaries ---------------------------------------------

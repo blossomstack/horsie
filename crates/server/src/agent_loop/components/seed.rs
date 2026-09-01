@@ -11,13 +11,13 @@
 //! and answers it before it has a history; enqueued after, a crash in between
 //! leaves a seeded sub session with nothing to do.
 
-use super::*;
+use crate::agent_loop::prelude::*;
 use horsie_actor::{CommandEffect, ReplyTo};
 use horsie_agentcore::AgentLogBody;
 use horsie_models::now_ms;
 
 /// Being a sub session, and being branched from.
-pub(super) struct Seeding;
+pub(crate) struct Seeding;
 
 #[async_trait::async_trait]
 impl Component for Seeding {
@@ -122,7 +122,7 @@ impl Seeding {
     /// Take the summary the queued sub sessions are waiting on: a bare
     /// summarise run over the whole history at the branch point, sharing the
     /// compaction component's machinery.
-    pub(super) fn take_summary(
+    pub(crate) fn take_summary(
         &mut self,
         consumed: Vec<String>,
         sub_sessions: Vec<uuid::Uuid>,
@@ -140,7 +140,7 @@ impl Seeding {
             let result = tokio::select! {
                 biased;
                 () = cancel.cancelled() => return,
-                result = compaction::summarise_step(&tctx, &history, history.len(), None, &cancel)
+                result = crate::agent_loop::shared::summarise::summarise_step(&tctx, &history, history.len(), None, &cancel)
                     => result,
             };
             let (result, usage) = match result {
@@ -168,7 +168,7 @@ impl Seeding {
     // later fails to compile *there* rather than silently reaching the wrong
     // fold here.
     #[allow(clippy::wildcard_enum_match_arm)]
-    pub(super) fn apply(state: &mut AgentState, event: AgentDomainEvent) {
+    pub(crate) fn apply(state: &mut AgentState, event: AgentDomainEvent) {
         if let AgentDomainEvent::SeedSummaryTaken { usage, .. } = &event {
             // The summarising call's cost, banked where every other cost is.
             // Nothing else about this agent changed.

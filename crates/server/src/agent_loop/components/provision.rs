@@ -11,7 +11,8 @@
 //! Nobody asks for this. The boundary starts it when the contexts it needs are
 //! stale, and the work that follows never learns it happened.
 
-use super::*;
+use crate::agent_loop::prelude::*;
+use crate::agent_loop::shared::summarise::{COMPACT_AT_PERCENT, COMPACT_RETAIN_PERCENT};
 use async_trait::async_trait;
 use horsie_actor::CommandEffect;
 use horsie_agentcore::{CompactionBudget, ToolOutcome, ToolSpec, Toolbox};
@@ -50,11 +51,11 @@ impl Toolbox for WithComponentSpecs {
 }
 
 /// The runtime and context setup every kind of work shares.
-pub(super) struct Provision;
+pub(crate) struct Provision;
 
 impl Provision {
     /// Build this agent's contexts on a spawned task.
-    pub(super) fn start(&mut self, cx: &mut Cx<'_>) {
+    pub(crate) fn start(&mut self, cx: &mut Cx<'_>) {
         let (work, cancel) = cx.scratch.begin(WorkKind::Provisioning);
         let self_ref = cx.actor.self_ref();
         let context_provider = cx.runtime.context_provider.clone();

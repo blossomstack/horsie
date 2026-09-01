@@ -19,7 +19,7 @@
 //! than failing the load, so removing a component cannot make an old snapshot
 //! unreadable.
 
-use super::*;
+use crate::agent_loop::prelude::*;
 use horsie_agentcore::{AgentLogBody, AgentLogEntry, Usage};
 use serde::{Deserialize, Serialize};
 
@@ -30,7 +30,7 @@ pub struct AgentState {
     /// Everything the user sees, whether or not the model saw it. Shared: a
     /// timer, a hook, a tool result and a task-list change all land here, in
     /// one order.
-    pub(super) transcript: Transcript,
+    pub(crate) transcript: Transcript,
     /// One entry per component that has any durable state of its own.
     #[serde(deserialize_with = "known_parts")]
     parts: Vec<ComponentState>,
@@ -40,7 +40,7 @@ impl Default for AgentState {
     fn default() -> Self {
         Self {
             transcript: Transcript::default(),
-            parts: component::default_parts(),
+            parts: crate::agent_loop::components::default_parts(),
         }
     }
 }
@@ -110,7 +110,7 @@ impl Transcript {
     ///
     /// The single place a `seq` is handed out, so the fold cannot produce a gap
     /// or a duplicate by accident.
-    pub(super) fn push(&mut self, at_ms: u64, body: AgentLogBody) {
+    pub(crate) fn push(&mut self, at_ms: u64, body: AgentLogBody) {
         self.log.push(AgentLogEntry {
             seq: self.next_seq,
             at_ms,
@@ -135,7 +135,7 @@ impl AgentState {
     /// Typed by the caller: `state.part::<QueueState>()`. No downcast, and no
     /// way to name a part that does not exist.
     #[must_use]
-    pub(super) fn part<T: Part>(&self) -> Option<&T> {
+    pub(crate) fn part<T: Part>(&self) -> Option<&T> {
         T::get(&self.parts)
     }
 
@@ -143,7 +143,7 @@ impl AgentState {
     /// for. `None` is unreachable — the part is inserted just above — and the
     /// callers treat it as "nothing to do" rather than panicking, because a
     /// fold must never take the process down.
-    pub(super) fn part_mut<T: Part>(&mut self) -> Option<&mut T> {
+    pub(crate) fn part_mut<T: Part>(&mut self) -> Option<&mut T> {
         T::get_mut(&mut self.parts)
     }
 
@@ -178,7 +178,7 @@ pub struct UsageTotal {
 }
 
 impl UsageTotal {
-    pub(super) fn add(&mut self, usage: &Usage) {
+    pub(crate) fn add(&mut self, usage: &Usage) {
         self.input_tokens = self
             .input_tokens
             .saturating_add(u64::from(usage.input_tokens));
@@ -208,7 +208,7 @@ impl UsageTotal {
 
 /// Sums an accumulating `u64` cache total with a per-turn `u32` delta. Stays
 /// `None` only when neither side has ever reported cache data.
-pub(super) fn add_optional(total: Option<u64>, delta: Option<u32>) -> Option<u64> {
+pub(crate) fn add_optional(total: Option<u64>, delta: Option<u32>) -> Option<u64> {
     match (total, delta) {
         (None, None) => None,
         (total, delta) => Some(
@@ -221,7 +221,7 @@ pub(super) fn add_optional(total: Option<u64>, delta: Option<u32>) -> Option<u64
 
 /// Sums two agents' `u64` cache totals. Stays `None` only when neither agent
 /// has ever reported cache data.
-pub(super) fn combine_optional(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+pub(crate) fn combine_optional(a: Option<u64>, b: Option<u64>) -> Option<u64> {
     match (a, b) {
         (None, None) => None,
         (a, b) => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
@@ -260,7 +260,7 @@ pub fn hook_entry_id(seq: usize) -> String {
     format!("hook:{seq}")
 }
 
-pub(super) fn new_message_id() -> String {
+pub(crate) fn new_message_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
@@ -279,7 +279,7 @@ impl AgentState {
     /// Every part's reason the agent must not act yet, in registry order.
     ///
     /// The parts are asked; nothing here knows which of them has an opinion.
-    pub(super) fn vetoes(&self) -> impl Iterator<Item = Blocked> + '_ {
+    pub(crate) fn vetoes(&self) -> impl Iterator<Item = Blocked> + '_ {
         self.parts.iter().filter_map(|part| part.blocks(self))
     }
 
@@ -301,7 +301,7 @@ impl AgentState {
         self.transcript.tail_seq()
     }
 
-    pub(super) fn push(&mut self, at_ms: u64, body: AgentLogBody) {
+    pub(crate) fn push(&mut self, at_ms: u64, body: AgentLogBody) {
         self.transcript.push(at_ms, body);
     }
 
@@ -436,16 +436,16 @@ impl AgentState {
 
     /// Active timers, durable so they re-arm on recovery.
     #[must_use]
-    pub fn timers(&self) -> &[crate::agent_loop::timers::TimerRecord] {
+    pub fn timers(&self) -> &[crate::agent_loop::components::timers::domain::TimerRecord] {
         self.part::<TimerState>().map_or(&[], TimerState::records)
     }
 
     /// The agent's own task list.
     #[must_use]
-    pub fn task_list(&self) -> &crate::agent_loop::task_list::TaskListState {
+    pub fn task_list(&self) -> &crate::agent_loop::components::task_list::domain::TaskListState {
         match self.part::<TaskListPart>() {
             Some(part) => part.list(),
-            None => task_list::empty_list(),
+            None => crate::agent_loop::components::task_list::empty_list(),
         }
     }
 
@@ -472,6 +472,30 @@ impl AgentState {
 }
 
 
+/// One agent's own usage + context-size snapshot, with no message/task
+/// payload — cheaper than [`AgentHistoryPage`] when only the numbers are
+/// needed. Backs the session-level usage aggregation.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentUsageSnapshot {
+    pub usage_total: UsageTotal,
+    pub last_turn_usage: Option<Usage>,
+    pub context_tokens: u32,
+}
+
+/// One agent's current values: the task list and its usage/context numbers.
+/// Everything here is a value the client re-reads, never a log it accumulates —
+/// which is why none of it rides on a history page.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentStateView {
+    pub tasks: Vec<crate::agent_loop::components::task_list::domain::TaskRecord>,
+    pub usage_total: UsageTotal,
+    pub last_turn_usage: Option<Usage>,
+    pub context_tokens: u32,
+    /// The log position these values reflect, so a consumer holding a fold can
+    /// tell whether this read is ahead of it or behind.
+    pub as_of_seq: u64,
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -480,7 +504,30 @@ impl AgentState {
     clippy::wildcard_enum_match_arm
 )]
 mod tests {
-    use super::*;
+    use crate::agent_loop::prelude::*;
+    use crate::agent_loop::agent_actor::testing::*;
+    #[test]
+    fn from_def_defaults_to_non_interactive() {
+        assert!(!AgentParams::from_def(&def_fixture()).interactive);
+    }
+
+    /// Only a step owes a result. For everyone else a turn ending with plain
+    /// text *is* the answer, and nudging one would be nonsense.
+    #[test]
+    fn from_def_owes_no_result() {
+        assert!(!AgentParams::from_def(&def_fixture()).requires_result);
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod tests {
+    use crate::agent_loop::prelude::*;
     use crate::agent_loop::agent_actor::testing::*;
     use horsie_agentcore::{ContentPart, LifecycleEvent, Message, Role};
     use horsie_models::agent::{
@@ -699,7 +746,7 @@ mod tests {
         );
         assert_eq!(state.next_seq, 3);
 
-        let tail = crate::agent_loop::agent_log::page(
+        let tail = crate::agent_loop::shared::agent_log::page(
             &state.log,
             crate::agent_loop::Anchor::Tail,
             2,
@@ -711,10 +758,10 @@ mod tests {
         );
 
         // The cursor resolves against a hook entry exactly like a message.
-        let forward = crate::agent_loop::agent_log::since(&state.log, 1);
+        let forward = crate::agent_loop::shared::agent_log::since(&state.log, 1);
         assert_eq!(forward.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![2]);
 
-        let back = crate::agent_loop::agent_log::page(
+        let back = crate::agent_loop::shared::agent_log::page(
             &state.log,
             crate::agent_loop::Anchor::Before(1),
             10,
