@@ -32,6 +32,10 @@ pub(super) struct Queue {
     /// journaled — a rehydrated agent fires again, which is precisely what
     /// `source: "resume"` means.
     start_hook_fired: bool,
+    /// A drained turn is waiting behind standalone work — a `/compact` or a
+    /// seed summary taken first, or an auto-compaction due before the turn
+    /// begins. Its input events are already journaled; `WorkDone` starts it.
+    pending_after_work: bool,
 }
 
 impl Queue {
@@ -249,16 +253,97 @@ impl Queue {
             });
         }
         // Commit: raise the gate before telling, so nothing drains a second
-        // turn into the gap, and let the turn component pick the spec up once
-        // these events are durable and folded.
+        // turn into the gap. A summarisation is *standalone work*, not a turn
+        // — the turn component never hears of it. A message drained alongside
+        // (or behind an auto-compaction that is due) waits for `WorkDone`;
+        // its input events are already journaled, so starting it later needs
+        // nothing but the signal.
         cx.scratch.turn_live = true;
-        cx.tell(AgentCommand::Run(RunCommand::StartTurn {
-            summarise,
-            summarise_only,
-        }))
-        .await;
+        match summarise {
+            Some(summarise) => {
+                self.pending_after_work = !summarise_only;
+                let work = match summarise {
+                    crate::agent_loop::Summarise::Compact(instructions) => Work::Compact {
+                        manual: true,
+                        instructions,
+                        tokens_before: folded.context_tokens,
+                    },
+                    crate::agent_loop::Summarise::SubSession(sub_sessions) => {
+                        Work::Summary { sub_sessions }
+                    }
+                };
+                self.commission(work, cx).await;
+            }
+            None if compaction_due(cx) => {
+                self.pending_after_work = true;
+                self.commission(
+                    Work::Compact {
+                        manual: false,
+                        instructions: None,
+                        tokens_before: folded.context_tokens,
+                    },
+                    cx,
+                )
+                .await;
+            }
+            None => cx.tell(AgentCommand::Run(RunCommand::StartTurn)).await,
+        }
         events
     }
+
+    /// Commission standalone work: allocate its slot, arm its cancel token,
+    /// and ask provisioning to run it once the contexts are published — or
+    /// release the slot if they never come.
+    async fn commission(&mut self, work_kind: Work, cx: &mut Cx<'_>) {
+        let work = cx.scratch.next_work_id;
+        cx.scratch.next_work_id += 1;
+        cx.scratch.live_turn = Some(work);
+        cx.scratch.turn_cancel = Some(tokio_util::sync::CancellationToken::new());
+        let then = match work_kind {
+            Work::Compact {
+                manual,
+                instructions,
+                tokens_before,
+            } => AgentCommand::Compaction(CompactionCommand::Compact(Box::new(CompactJob {
+                work,
+                manual,
+                instructions,
+                tokens_before,
+            }))),
+            Work::Summary { sub_sessions } => {
+                AgentCommand::Seed(SeedCommand::TakeSummary { work, sub_sessions })
+            }
+        };
+        cx.tell(AgentCommand::Provision(ProvisionCommand::Provide {
+            work,
+            then: Box::new(then),
+            or: Box::new(AgentCommand::Queue(QueueCommand::WorkDone { work })),
+        }))
+        .await;
+    }
+}
+
+/// The standalone work the queue can commission.
+enum Work {
+    Compact {
+        manual: bool,
+        instructions: Option<String>,
+        tokens_before: u32,
+    },
+    Summary {
+        sub_sessions: Vec<uuid::Uuid>,
+    },
+}
+
+/// Whether the context has grown past the compaction trigger — read off the
+/// last published budget, so the check costs nothing before provisioning. A
+/// fresh agent has no published budget yet and never compacts before its
+/// first turn, which is right: there is nothing to fold.
+fn compaction_due(cx: &Cx<'_>) -> bool {
+    cx.scratch.turn_ctx.as_ref().is_some_and(|c| {
+        c.budget
+            .is_some_and(|b| cx.state.context_tokens >= b.trigger_tokens())
+    })
 }
 
 #[async_trait]
@@ -313,6 +398,41 @@ impl Component for Queue {
                 self.preparing = false;
                 let state = cx.state.clone();
                 CommandEffect::persist(self.start_prepared(*prepared, &state, cx).await)
+            }
+            QueueCommand::WorkDone { work } => {
+                if cx.scratch.live_turn != Some(work) {
+                    return CommandEffect::none();
+                }
+                cx.scratch.live_turn = None;
+                cx.scratch.turn_cancel = None;
+                if std::mem::take(&mut self.pending_after_work) {
+                    // The gate stays up: the message drained with this work
+                    // starts its turn now, on a state the work's events are
+                    // already folded into — which is how a compaction is
+                    // transparent to the turn that follows it.
+                    cx.tell(AgentCommand::Run(RunCommand::StartTurn)).await;
+                    return CommandEffect::none();
+                }
+                cx.scratch.turn_live = false;
+                // The work consumed queue items and was this promise's whole
+                // answer; the owner hears the same pair a turn's ending sends.
+                cx.runtime
+                    .parent
+                    .deliver(AgentOutcome::UsageRecorded {
+                        agent: cx.runtime.journal_id,
+                        usage_total: cx.state.usage_total,
+                        context_tokens: cx.state.context_tokens,
+                    })
+                    .await;
+                cx.runtime
+                    .parent
+                    .deliver(AgentOutcome::Concluded {
+                        agent: cx.runtime.journal_id,
+                        output: serde_json::Value::String(String::new()),
+                    })
+                    .await;
+                cx.drain().await;
+                CommandEffect::none()
             }
         }
     }

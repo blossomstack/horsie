@@ -126,19 +126,21 @@ pub enum QueueCommand {
     /// Internal: a turn's pre-start hooks finished. Journal their records, then
     /// start the turn — or abandon it. Boxed to keep the command enum small.
     StartPrepared(Box<PreparedStart>),
+    /// Internal: standalone work the queue commissioned — a `/compact`, a seed
+    /// summary — released its slot. If a message was drained alongside, its
+    /// turn starts now; otherwise the promise is answered and the queue
+    /// re-drains.
+    WorkDone { work: u64 },
 }
 
 /// The turn in flight: starting and stopping it, and what its spawned steps
 /// report back.
 pub enum RunCommand {
     /// Internal: the queue committed a turn. Told *after* the turn's input
-    /// events are persisted, so the turn component reads them folded. The
-    /// consumed items, answers and input are already in state; this carries
-    /// only what is not: the summarisation riding on the turn.
-    StartTurn {
-        summarise: Option<crate::agent_loop::Summarise>,
-        summarise_only: bool,
-    },
+    /// events are persisted, so the turn component reads them folded — the
+    /// consumed items, answers and input are all in state, which is why this
+    /// carries nothing.
+    StartTurn,
     /// Cancel an in-flight run. `ack`, if given, fires once the turn is over —
     /// immediately when none is in flight. The actor answers it in the handler
     /// itself: the generation fence guarantees a cancelled turn's straggler
@@ -166,12 +168,6 @@ pub enum RunCommand {
         turn: u64,
         error: horsie_agentcore::LlmError,
     },
-    /// Internal: work the turn was paused on — a compaction, a seed summary,
-    /// anything a component does on a turn's behalf — is over. The turn banks
-    /// what it spent, reads the folded state, and takes its next step. One
-    /// signal for every such pause: the turn asks by name, but never needs to
-    /// know who answered.
-    Resume { turn: u64, usage: Option<Usage> },
     /// Internal: one dispatched tool call answered (or timed out inside its
     /// own toolbox). Carried per call rather than per batch so a fast tool's
     /// result is durable while a slow one still runs.
@@ -218,21 +214,28 @@ pub enum TaskListCommand {
     ToolCall(ComponentToolCall),
 }
 
-/// The per-turn runtime and context setup.
+/// The per-work runtime and context setup.
 pub enum ProvisionCommand {
-    /// The turn asked for its contexts: rehydrate the runtime, reconnect MCP,
-    /// scan the workspace, compose and filter the toolbox. Everything else
-    /// the setup needs — the cancel token above all — is read from the shared
-    /// scratch.
-    Provide { turn: u64 },
+    /// Someone asked for contexts: rehydrate the runtime, reconnect MCP, scan
+    /// the workspace, compose and filter the toolbox. The cancel token is
+    /// read from the shared scratch; `then` is told once the contexts are
+    /// published, `or` on failure — so provisioning serves a turn and a
+    /// standalone work identically, without knowing which asked.
+    Provide {
+        work: u64,
+        then: Box<AgentCommand>,
+        or: Box<AgentCommand>,
+    },
     /// Internal: the spawned setup finished.
     Provided(Box<ProvidedOutcome>),
 }
 
 /// What the spawned setup produced.
 pub struct ProvidedOutcome {
-    pub turn: u64,
+    pub work: u64,
     pub outcome: Result<Box<TurnCtx>, crate::agent_loop::ContextError>,
+    pub then: Box<AgentCommand>,
+    pub or: Box<AgentCommand>,
 }
 
 /// Folding old history behind a summary boundary.
@@ -244,23 +247,24 @@ pub enum CompactionCommand {
     Landed(Box<CompactLanding>),
 }
 
-/// What a compaction run needs and only the turn knows. Everything shared —
-/// the provider, the budget, the hooks, the cancel token — is read from the
-/// scratch's [`TurnCtx`], so nobody carries another component's context.
+/// What a compaction run needs and only its requester knows. Everything
+/// shared — the provider, the budget, the hooks, the cancel token — is read
+/// from the scratch's [`TurnCtx`], so nobody carries another component's
+/// context.
 pub struct CompactJob {
-    pub turn: u64,
+    pub work: u64,
     pub manual: bool,
     pub instructions: Option<String>,
     /// The last provider call's prompt size — what the boundary records as
-    /// `tokens_before`. The turn's in-memory figure, which state does not
-    /// carry mid-turn.
+    /// `tokens_before`.
     pub tokens_before: u32,
 }
 
 /// What the spawned compaction run produced.
 pub struct CompactLanding {
-    pub turn: u64,
-    /// What the summarising call spent, when one was made.
+    pub work: u64,
+    /// What the summarising call spent, when one was made — journaled on the
+    /// boundary event, never routed through anyone.
     pub usage: Option<Usage>,
     pub outcome: CompactOutcome,
 }
@@ -424,22 +428,23 @@ pub enum SeedCommand {
         message: crate::agent_loop::Incoming,
         reply: ReplyTo<Result<(), String>>,
     },
-    /// Take the summary the sub sessions queued into this turn are waiting
-    /// on — a bare summarise run over the branch point's history, sharing the
-    /// compaction component's summarise machinery. The provider and cancel
-    /// token are read from the shared scratch.
+    /// Take the summary queued sub sessions are waiting on — standalone work
+    /// commissioned by the queue: a bare summarise run over the branch
+    /// point's history, sharing the compaction component's machinery. The
+    /// provider and cancel token are read from the shared scratch.
     TakeSummary {
-        turn: u64,
+        work: u64,
         /// Every sub session seeded from this one summary. They share a
         /// branch point, so they are entitled to share the provider call.
         sub_sessions: Vec<uuid::Uuid>,
     },
     /// Internal: the spawned summary run finished.
     SummaryTaken {
-        turn: u64,
+        work: u64,
         sub_sessions: Vec<uuid::Uuid>,
         result: Result<String, String>,
-        /// What the summarising call spent, when one was made.
+        /// What the summarising call spent — journaled by this component,
+        /// never routed through anyone.
         usage: Option<Usage>,
     },
 }
@@ -632,6 +637,10 @@ pub enum AgentDomainEvent {
         instructions: Option<String>,
         tokens_before: u32,
         tokens_after: u32,
+        /// What the summarising call spent, aggregated into `usage_total` by
+        /// the fold. Optional and defaulted: older boundaries carry none.
+        #[serde(default)]
+        usage: Option<Usage>,
         at_ms: u64,
     },
     /// Something was accepted into this agent's queue.
@@ -658,6 +667,14 @@ pub enum AgentDomainEvent {
     /// there is never a moment when only some of them are pending.
     AskRecorded {
         asks: Vec<crate::agent_loop::AskedQuestion>,
+        at_ms: u64,
+    },
+    /// A summary was taken for sub sessions branching off this agent. Nothing
+    /// about this agent's history changed; what the summarising call spent is
+    /// aggregated into `usage_total` by the fold.
+    SeedSummaryTaken {
+        #[serde(default)]
+        usage: Option<Usage>,
         at_ms: u64,
     },
 }

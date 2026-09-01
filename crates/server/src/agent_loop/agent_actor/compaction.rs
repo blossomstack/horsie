@@ -202,12 +202,11 @@ impl Component for Compaction {
                     (cx.scratch.turn_ctx.clone(), cx.scratch.turn_cancel.clone())
                 else {
                     tracing::warn!(
-                        turn = job.turn,
-                        "a compaction was asked for with no turn contexts"
+                        work = job.work,
+                        "a compaction was asked for with no contexts"
                     );
-                    cx.tell(AgentCommand::Run(RunCommand::Resume {
-                        turn: job.turn,
-                        usage: None,
+                    cx.tell(AgentCommand::Queue(QueueCommand::WorkDone {
+                        work: job.work,
                     }))
                     .await;
                     return CommandEffect::none();
@@ -228,7 +227,7 @@ impl Component for Compaction {
                     let _ = self_ref
                         .tell(AgentCommand::Compaction(CompactionCommand::Landed(
                             Box::new(CompactLanding {
-                                turn: job.turn,
+                                work: job.work,
                                 usage,
                                 outcome,
                             }),
@@ -239,15 +238,15 @@ impl Component for Compaction {
             }
             CompactionCommand::Landed(landing) => {
                 let CompactLanding {
-                    turn,
+                    work,
                     usage,
                     outcome,
                 } = *landing;
-                // A cancelled or superseded turn's compaction must not land: a
+                // A cancelled or superseded work's compaction must not land: a
                 // boundary is a rewrite of what the model is shown, and nobody
                 // is showing it anything any more.
-                if cx.scratch.live_turn != Some(turn) {
-                    tracing::warn!(turn, "dropping a compaction landing from a dead turn");
+                if cx.scratch.live_turn != Some(work) {
+                    tracing::warn!(work, "dropping a compaction landing from dead work");
                     return CommandEffect::none();
                 }
                 let events = match outcome {
@@ -259,6 +258,7 @@ impl Component for Compaction {
                         instructions: data.instructions,
                         tokens_before: data.tokens_before,
                         tokens_after: data.tokens_after,
+                        usage,
                         at_ms: now_ms(),
                     }],
                     CompactOutcome::Skipped {
@@ -276,9 +276,11 @@ impl Component for Compaction {
                     }],
                     CompactOutcome::Skipped { notice: false, .. } => Vec::new(),
                 };
-                // Told before the persist returns; handled after it — the turn
-                // resumes on a state the boundary is already folded into.
-                cx.tell(AgentCommand::Run(RunCommand::Resume { turn, usage }))
+                // Told before the persist returns; handled after it — the
+                // queue releases the slot on a state the boundary is already
+                // folded into, so whatever runs next reads the compacted
+                // context. Compaction is invisible to the turn by design.
+                cx.tell(AgentCommand::Queue(QueueCommand::WorkDone { work }))
                     .await;
                 CommandEffect::persist(events)
             }
@@ -457,9 +459,15 @@ impl Compaction {
             instructions,
             tokens_before,
             tokens_after,
+            usage,
             at_ms,
         } = event
         {
+            // The summarising call's cost, aggregated where every other cost
+            // is: nothing routes usage through another component.
+            if let Some(usage) = &usage {
+                state.usage_total.add(usage);
+            }
             let (covers_through_seq, retained_from_seq) =
                 state.resolve_boundary(retained_from_message_id.as_deref());
             let entry = CompactionEntry {

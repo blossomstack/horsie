@@ -1,12 +1,13 @@
 //! The provision component: the per-turn runtime and context setup.
 //!
 //! Rehydrating a suspended runtime, reconnecting MCP, scanning the workspace
-//! and composing the toolbox all cross a process boundary, so the work runs on
-//! a spawned task — the most hang-prone stretch of a turn, and the reason the
-//! job carries the turn's cancel token. The finished [`TurnCtx`] goes back to
-//! the turn as [`RunCommand::ContextReady`]; a failure is delivered to the
-//! parent here (this component knows *why*) and the turn only hears
-//! [`RunCommand::ContextFailed`].
+//! and composing the toolbox all cross a process boundary, so the work runs
+//! on a spawned task — the most hang-prone stretch of any work, and the
+//! reason it selects on the shared cancel token. The finished [`TurnCtx`] is
+//! published to the scratch, and the `then` continuation the requester named
+//! is told; on failure the parent is told *why* here (this component knows)
+//! and the `or` continuation fires. Provisioning serves a turn and the
+//! queue's standalone work identically, without knowing which asked.
 
 use super::*;
 use async_trait::async_trait;
@@ -59,7 +60,7 @@ impl Component for Provision {
         cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
         match cmd {
-            ProvisionCommand::Provide { turn } => {
+            ProvisionCommand::Provide { work, then, or } => {
                 let Some(cancel) = cx.scratch.turn_cancel.clone() else {
                     return CommandEffect::none();
                 };
@@ -126,30 +127,40 @@ impl Component for Provision {
                     });
                     let _ = self_ref
                         .tell(AgentCommand::Provision(ProvisionCommand::Provided(
-                            Box::new(ProvidedOutcome { turn, outcome }),
+                            Box::new(ProvidedOutcome {
+                                work,
+                                outcome,
+                                then,
+                                or,
+                            }),
                         )))
                         .await;
                 });
                 CommandEffect::none()
             }
             ProvisionCommand::Provided(outcome) => {
-                let ProvidedOutcome { turn, outcome } = *outcome;
-                if cx.scratch.live_turn != Some(turn) {
+                let ProvidedOutcome {
+                    work,
+                    outcome,
+                    then,
+                    or,
+                } = *outcome;
+                if cx.scratch.live_turn != Some(work) {
                     return CommandEffect::none();
                 }
                 match outcome {
                     Ok(ctx) => {
                         // Published where every component that acts for this
-                        // turn reads it; the turn only hears "ready".
+                        // work reads it; the requester only hears "ready".
                         cx.scratch.turn_ctx = Some(std::sync::Arc::new(*ctx));
-                        cx.tell(AgentCommand::Run(RunCommand::ContextReady { turn }))
-                            .await;
+                        cx.tell(*then).await;
                     }
                     Err(error) => {
                         // Reported from here, where the *why* is known —
                         // `terminal` above all, which tells the session its
                         // sandbox is gone for good rather than merely
-                        // unreachable. The turn only hears that it is over.
+                        // unreachable. The requester only hears that it is
+                        // over.
                         cx.runtime
                             .parent
                             .deliver(crate::agent_loop::context::AgentOutcome::Failed {
@@ -159,8 +170,7 @@ impl Component for Provision {
                                 terminal: error.terminal,
                             })
                             .await;
-                        cx.tell(AgentCommand::Run(RunCommand::ContextFailed { turn }))
-                            .await;
+                        cx.tell(*or).await;
                     }
                 }
                 CommandEffect::none()

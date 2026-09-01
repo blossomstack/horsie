@@ -131,22 +131,22 @@ impl Component for Seeding {
                 // replays it.
                 .and_snapshot()
             }
-            SeedCommand::TakeSummary { turn, sub_sessions } => {
+            SeedCommand::TakeSummary { work, sub_sessions } => {
                 let (Some(tctx), Some(cancel)) =
                     (cx.scratch.turn_ctx.clone(), cx.scratch.turn_cancel.clone())
                 else {
-                    tracing::warn!(turn, "a summary was asked for with no turn contexts");
+                    tracing::warn!(work, "a summary was asked for with no contexts");
                     cx.tell(AgentCommand::Seed(SeedCommand::SummaryTaken {
-                        turn,
+                        work,
                         sub_sessions,
-                        result: Err("no turn contexts to summarise with".to_string()),
+                        result: Err("no contexts to summarise with".to_string()),
                         usage: None,
                     }))
                     .await;
                     return CommandEffect::none();
                 };
                 // The summary must describe the history at the branch point,
-                // read here before the turn can say anything to the model.
+                // read before anything can append behind it.
                 let history = repair_unanswered_tool_calls(state.prompt_messages());
                 let self_ref = cx.actor.self_ref();
                 tokio::spawn(async move {
@@ -172,7 +172,7 @@ impl Component for Seeding {
                     };
                     let _ = self_ref
                         .tell(AgentCommand::Seed(SeedCommand::SummaryTaken {
-                            turn,
+                            work,
                             sub_sessions,
                             result,
                             usage,
@@ -182,12 +182,12 @@ impl Component for Seeding {
                 CommandEffect::none()
             }
             SeedCommand::SummaryTaken {
-                turn,
+                work,
                 sub_sessions,
                 result,
                 usage,
             } => {
-                // Delivered whatever became of the turn since: the sub
+                // Delivered whatever became of the work since: the sub
                 // sessions waiting are a different session's business, and the
                 // summary was taken at the branch point they are entitled to.
                 cx.runtime
@@ -198,9 +198,14 @@ impl Component for Seeding {
                         result,
                     })
                     .await;
-                cx.tell(AgentCommand::Run(RunCommand::Resume { turn, usage }))
+                // Release the queue's slot; the summarising call's cost is
+                // journaled here, by its owner, and aggregated by the fold.
+                cx.tell(AgentCommand::Queue(QueueCommand::WorkDone { work }))
                     .await;
-                CommandEffect::none()
+                CommandEffect::persist(vec![AgentDomainEvent::SeedSummaryTaken {
+                    usage,
+                    at_ms: now_ms(),
+                }])
             }
         }
     }
@@ -212,7 +217,16 @@ impl Seeding {
     // variant. Which one is decided in `component::fold`, so an event added
     // later fails to compile *there* rather than silently reaching the wrong
     // fold here.
+    #[allow(clippy::wildcard_enum_match_arm)]
     pub(super) fn apply(state: &mut AgentState, event: AgentDomainEvent) {
+        if let AgentDomainEvent::SeedSummaryTaken { usage, .. } = &event {
+            // The summarising call's cost, aggregated where every other cost
+            // is. Nothing else about this agent changed.
+            if let Some(usage) = usage {
+                state.usage_total.add(usage);
+            }
+            return;
+        }
         if let AgentDomainEvent::Seeded {
             state: seeded,
             seed,

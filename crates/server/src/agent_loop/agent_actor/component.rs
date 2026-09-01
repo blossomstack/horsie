@@ -44,11 +44,18 @@ pub(super) struct Scratch {
     /// The live turn's cancel token, written by the turn component so every
     /// component's spawned run dies with the turn it serves.
     pub turn_cancel: Option<tokio_util::sync::CancellationToken>,
-    /// The live turn's contexts, published by the provision component once
+    /// The live work's contexts, published by the provision component once
     /// the setup lands: the provider, the composed toolbox, the budget, the
     /// hooks. Read by the turn for its calls, by compaction and seeding for
     /// their runs — which is why it is scratch and not any component's field.
+    ///
+    /// Deliberately *not* cleared when work ends: the last published budget
+    /// is what lets the queue ask "is a compaction due?" before the next turn
+    /// without provisioning first. Every new work republishes it fresh.
     pub turn_ctx: Option<std::sync::Arc<TurnCtx>>,
+    /// The next work id — one allocator for turns and standalone work alike,
+    /// so a stale report can never collide with a live one.
+    pub next_work_id: u64,
     /// What the next turn should tell the provider about tool use. Taken when
     /// a turn starts, so it applies to exactly one turn. Set only when
     /// re-running a turn that ended without the result it owed.
@@ -67,6 +74,7 @@ impl Scratch {
             live_turn: None,
             turn_cancel: None,
             turn_ctx: None,
+            next_work_id: 0,
             pending_tool_choice: None,
             deltas: Vec::new(),
         }
@@ -290,7 +298,9 @@ impl Components {
     /// chooses to run.
     pub fn apply(mut state: AgentState, event: AgentDomainEvent) -> AgentState {
         match event {
-            e @ AgentDomainEvent::Seeded { .. } => Seeding::apply(&mut state, e),
+            e @ (AgentDomainEvent::Seeded { .. } | AgentDomainEvent::SeedSummaryTaken { .. }) => {
+                Seeding::apply(&mut state, e)
+            }
             e @ (AgentDomainEvent::InputMessage { .. }
             | AgentDomainEvent::Received { .. }
             | AgentDomainEvent::TurnBegan { .. }

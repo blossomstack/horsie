@@ -4,11 +4,11 @@
 //! journaled the turn's input. This component asks the provision component for
 //! the turn's contexts, then loops: dispatch one provider call, read what came
 //! back — a message that ends the turn, or tool calls to route — and dispatch
-//! the next. Everything else a turn can involve lives in the component that
-//! owns it and answers by command: contexts (`ContextReady`), a compaction
-//! (`CompactFinished`), a sub-session summary (`SummaryDone`), every tool
-//! result (`ToolReturned`). All of it is fenced by the turn's generation, so a
-//! cancelled turn's stragglers are dropped.
+//! the next. Contexts arrive by command (`ContextReady`); every tool result
+//! arrives by command (`ToolReturned`); all of it is fenced by the turn's
+//! generation, so a cancelled turn's stragglers are dropped. Compactions and
+//! summaries are the queue's standalone work and never touch this file: a
+//! turn that follows one simply reads the compacted context.
 //!
 //! The second half of this file is the conclusion: what an ending *means* —
 //! a park, an ask, a submitted result, a contradiction — decided here because
@@ -16,7 +16,6 @@
 
 use super::*;
 use crate::agent_loop::context::{AgentOutcome, AgentOutcomeSink, AskedQuestion};
-use crate::agent_loop::inbox::Summarise;
 use crate::agent_loop::queued_turn;
 use crate::sessions::ask_tool::ASK_USER_TOOL;
 use crate::sessions::workflow::SUBMIT_RESULT_TOOL;
@@ -46,9 +45,6 @@ const NUDGE_THRESHOLD: usize = 3;
 pub(super) struct Turn {
     /// The turn in flight, if any.
     flight: Option<TurnFlight>,
-    /// Id of the next turn. Monotonic for this actor's loaded lifetime, which
-    /// is all the fence needs — a report can only be stale within it.
-    next_turn_id: u64,
     /// Callers waiting to hear that the in-flight turn has terminated (see
     /// [`RunCommand::Cancel`]). Drained the moment a turn concludes.
     pub(super) cancel_acks: Vec<ReplyTo<()>>,
@@ -95,17 +91,10 @@ pub(super) struct TurnFlight {
     pub(super) id: u64,
     pub(super) cancel: CancellationToken,
     tool_choice: horsie_agentcore::ToolChoice,
-    summarise: Option<Summarise>,
-    summarise_only: bool,
     /// Completed provider calls this turn.
     iteration: u32,
     /// Consecutive failed attempts at the *current* call.
     attempt: u32,
-    /// A compaction has been requested and no provider call has answered
-    /// since. What keeps the budget check from asking again before the next
-    /// response refreshes `context_tokens` — the in-memory figure goes stale
-    /// the moment a boundary lands.
-    compact_requested: bool,
     fingerprints: VecDeque<String>,
     /// Banked the moment each call answers, so no later failure loses it.
     usage: Usage,
@@ -150,8 +139,7 @@ fn sum_optional(a: Option<u32>, b: Option<u32>) -> Option<u32> {
     }
 }
 
-/// Bank one call's cost into the turn's running total — the provider calls,
-/// and the summarising calls other components make on this turn's behalf.
+/// Bank one call's cost into the turn's running total.
 fn bank_usage(total: &mut Usage, spent: &Usage) {
     total.input_tokens += spent.input_tokens;
     total.output_tokens += spent.output_tokens;
@@ -167,31 +155,23 @@ impl Turn {
     /// Nothing here journals — the turn's input was journaled by whoever told
     /// `StartTurn`, and the first call dispatches only after `ContextReady`
     /// reports back, so it reads a state those events are already folded into.
-    pub(super) async fn start(
-        &mut self,
-        cx: &mut Cx<'_>,
-        summarise: Option<Summarise>,
-        summarise_only: bool,
-    ) {
+    pub(super) async fn start(&mut self, cx: &mut Cx<'_>) {
         cx.scratch.turn_live = true;
         let cancel = CancellationToken::new();
-        let id = self.next_turn_id;
-        self.next_turn_id += 1;
+        let id = cx.scratch.next_work_id;
+        cx.scratch.next_work_id += 1;
         cx.scratch.live_turn = Some(id);
         cx.scratch.turn_cancel = Some(cancel.clone());
         self.flight = Some(TurnFlight {
             id,
-            cancel: cancel.clone(),
+            cancel,
             tool_choice: cx
                 .scratch
                 .pending_tool_choice
                 .take()
                 .unwrap_or(horsie_agentcore::ToolChoice::Auto),
-            summarise,
-            summarise_only,
             iteration: 0,
             attempt: 0,
-            compact_requested: false,
             fingerprints: VecDeque::new(),
             usage: Usage::without_cache(0, 0),
             context_tokens: cx.state.context_tokens,
@@ -199,7 +179,9 @@ impl Turn {
             stopped: Vec::new(),
         });
         cx.tell(AgentCommand::Provision(ProvisionCommand::Provide {
-            turn: id,
+            work: id,
+            then: Box::new(AgentCommand::Run(RunCommand::ContextReady { turn: id })),
+            or: Box::new(AgentCommand::Run(RunCommand::ContextFailed { turn: id })),
         }))
         .await;
     }
@@ -211,7 +193,8 @@ impl Turn {
         cx.scratch.turn_live = false;
         cx.scratch.live_turn = None;
         cx.scratch.turn_cancel = None;
-        cx.scratch.turn_ctx = None;
+        // `turn_ctx` deliberately survives: the queue's compaction-due check
+        // reads the last published budget before the next work provisions.
     }
 
     /// The turn in flight's id, for conclude's superseded-report guard.
@@ -284,31 +267,8 @@ impl Turn {
         .await
     }
 
-    /// Conclude the turn with the empty completion a summarise-only turn ends
-    /// with: nothing was said to the model, and nothing is owed.
-    async fn finish_empty(
-        &mut self,
-        run_id: u64,
-        state: &AgentState,
-        cx: &mut Cx<'_>,
-    ) -> CommandEffect<AgentDomainEvent> {
-        self.finish(
-            Vec::new(),
-            RunReport {
-                run_id,
-                outcome: RunOutcome::Completed {
-                    text: String::new(),
-                },
-            },
-            state,
-            cx,
-        )
-        .await
-    }
-
-    /// Dispatch the turn's next model-facing step: hand over to the compaction
-    /// component when the budget says so, otherwise spawn the next provider
-    /// call — or fail the turn when its iteration budget is spent.
+    /// Dispatch the turn's next provider call — or fail the turn when its
+    /// iteration budget is spent.
     async fn dispatch_model_step(
         &mut self,
         events: Vec<AgentDomainEvent>,
@@ -331,38 +291,8 @@ impl Turn {
                 )
                 .await;
         }
-        let due = !flight.compact_requested
-            && cx.scratch.turn_ctx.as_ref().is_some_and(|c| {
-                c.budget
-                    .is_some_and(|b| flight.context_tokens >= b.trigger_tokens())
-            });
-        match due {
-            true => {
-                if let Some(job) = self.compact_job(None) {
-                    if let Some(flight) = self.flight.as_mut() {
-                        flight.compact_requested = true;
-                    }
-                    cx.tell(AgentCommand::Compaction(CompactionCommand::Compact(
-                        Box::new(job),
-                    )))
-                    .await;
-                }
-            }
-            false => self.spawn_llm(folded, cx, delay),
-        }
+        self.spawn_llm(folded, cx, delay);
         CommandEffect::persist(events)
-    }
-
-    /// The facts a compaction run needs and only this turn knows. `manual`
-    /// carries `/compact`'s instructions; `None` is the budget check firing.
-    fn compact_job(&self, manual: Option<Option<String>>) -> Option<CompactJob> {
-        let flight = self.flight.as_ref()?;
-        Some(CompactJob {
-            turn: flight.id,
-            manual: manual.is_some(),
-            instructions: manual.flatten(),
-            tokens_before: flight.context_tokens,
-        })
     }
 
     /// Spawn one provider call over the folded state's prompt.
@@ -415,38 +345,13 @@ impl Turn {
     }
 
     /// The provision component published this turn's contexts: dispatch the
-    /// turn's first real step.
+    /// first provider call. A turn is only ever a regular agent run —
+    /// summaries and compactions are the queue's standalone work, invisible
+    /// here; a boundary landed before this turn simply *is* the context the
+    /// first call reads.
     async fn handle_context_ready(&mut self, cx: &mut Cx<'_>) -> CommandEffect<AgentDomainEvent> {
-        let Some(flight) = self.flight.as_mut() else {
-            return CommandEffect::none();
-        };
-        let turn = flight.id;
-        match flight.summarise.clone() {
-            Some(Summarise::SubSession(sub_sessions)) => {
-                cx.tell(AgentCommand::Seed(SeedCommand::TakeSummary {
-                    turn,
-                    sub_sessions,
-                }))
-                .await;
-                CommandEffect::none()
-            }
-            Some(Summarise::Compact(instructions)) => {
-                if let Some(job) = self.compact_job(Some(instructions)) {
-                    if let Some(flight) = self.flight.as_mut() {
-                        flight.compact_requested = true;
-                    }
-                    cx.tell(AgentCommand::Compaction(CompactionCommand::Compact(
-                        Box::new(job),
-                    )))
-                    .await;
-                }
-                CommandEffect::none()
-            }
-            None => {
-                let state = cx.state.clone();
-                self.dispatch_model_step(Vec::new(), &state, cx, None).await
-            }
-        }
+        let state = cx.state.clone();
+        self.dispatch_model_step(Vec::new(), &state, cx, None).await
     }
 
     /// One provider call answered: journal it, then read what it asks for.
@@ -460,7 +365,6 @@ impl Turn {
         };
         flight.iteration += 1;
         flight.attempt = 0;
-        flight.compact_requested = false;
         // Banked the moment the call answers, before anything downstream can
         // fail: every later exit reports this call's cost.
         bank_usage(&mut flight.usage, &response.usage);
@@ -713,10 +617,7 @@ impl Component for Turn {
         cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
         match cmd {
-            RunCommand::StartTurn {
-                summarise,
-                summarise_only,
-            } => {
+            RunCommand::StartTurn => {
                 // The queue gates on `turn_live`, so a second start reaching
                 // here is a bug — refuse it rather than orphan the first
                 // turn's cancel token.
@@ -724,7 +625,7 @@ impl Component for Turn {
                     tracing::warn!("refusing to start a turn while one is in flight");
                     return CommandEffect::none();
                 }
-                self.start(cx, summarise, summarise_only).await;
+                self.start(cx).await;
                 CommandEffect::none()
             }
             RunCommand::ContextReady { turn } => {
@@ -761,25 +662,6 @@ impl Component for Turn {
                 }
                 self.handle_llm_failed(error, cx).await
             }
-            RunCommand::Resume { turn, usage } => {
-                let Some(flight) = self.fenced(turn) else {
-                    return CommandEffect::none();
-                };
-                // Whoever paused this turn spent on its behalf; the cost is
-                // the turn's cost.
-                if let Some(usage) = &usage {
-                    bank_usage(&mut flight.usage, usage);
-                }
-                let (run_id, summarise_only) = (flight.id, flight.summarise_only);
-                // A turn that was only ever its summarisation is over; any
-                // other turn takes its next step against the folded state.
-                if summarise_only {
-                    let state = cx.state.clone();
-                    return self.finish_empty(run_id, &state, cx).await;
-                }
-                let state = cx.state.clone();
-                self.dispatch_model_step(Vec::new(), &state, cx, None).await
-            }
             RunCommand::Cancel { ack } => {
                 match (&self.flight, ack) {
                     (Some(flight), ack) => {
@@ -808,13 +690,23 @@ impl Component for Turn {
                         )
                         .await
                     }
-                    // Nothing in flight (idle, or paused on a pending ask): the
-                    // caller's guarantee already holds.
-                    (None, Some(ack)) => {
-                        let _ = ack.send(());
+                    // No turn in flight — but the queue may be holding a
+                    // standalone work slot (a `/compact`, a seed summary):
+                    // cancel its token and release, so the ack's promise —
+                    // nothing more will run — holds for that work too.
+                    (None, ack) => {
+                        if let (Some(work), Some(token)) =
+                            (cx.scratch.live_turn, cx.scratch.turn_cancel.clone())
+                        {
+                            token.cancel();
+                            cx.tell(AgentCommand::Queue(QueueCommand::WorkDone { work }))
+                                .await;
+                        }
+                        if let Some(ack) = ack {
+                            let _ = ack.send(());
+                        }
                         CommandEffect::none()
                     }
-                    (None, None) => CommandEffect::none(),
                 }
             }
             RunCommand::PersistProgress { events, ack } => {
@@ -943,7 +835,7 @@ impl Component for Turn {
             ack: ReplyTo::from_sender(ack),
         }))
         .await;
-        self.start(cx, None, false).await;
+        self.start(cx).await;
     }
 }
 
