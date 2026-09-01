@@ -110,6 +110,7 @@ impl Cx<'_> {
 /// later: construction is centralized in [`Components::new`], so a spec-driven
 /// variant changes this file and nothing above it.
 pub(super) struct Components {
+    provision: Provision,
     timers: Timers,
     turn: Turn,
     queue: Queue,
@@ -117,11 +118,13 @@ pub(super) struct Components {
     log: LogWrites,
     seed: Seeding,
     task_lists: TaskLists,
+    compaction: Compaction,
 }
 
 impl Components {
     pub fn new() -> Self {
         Self {
+            provision: Provision,
             timers: Timers,
             turn: Turn::default(),
             queue: Queue::default(),
@@ -129,6 +132,7 @@ impl Components {
             log: LogWrites,
             seed: Seeding,
             task_lists: TaskLists,
+            compaction: Compaction,
         }
     }
 
@@ -150,6 +154,8 @@ impl Components {
             AgentCommand::Log(c) => self.log.handle(c, cx).await,
             AgentCommand::Seed(c) => self.seed.handle(c, cx).await,
             AgentCommand::TaskList(c) => self.task_lists.handle(c, cx).await,
+            AgentCommand::Provision(c) => self.provision.handle(c, cx).await,
+            AgentCommand::Compaction(c) => self.compaction.handle(c, cx).await,
             AgentCommand::Core(_) => return None,
         })
     }

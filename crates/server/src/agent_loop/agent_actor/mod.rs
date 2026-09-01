@@ -31,6 +31,7 @@ mod compaction;
 mod component;
 mod conclude;
 mod log;
+mod provision;
 mod queue;
 mod reads;
 mod repair;
@@ -48,12 +49,15 @@ pub use state::{AgentState, UsageTotal, hook_entry, hook_entry_id};
 pub use types::*;
 
 use compaction::{COMPACT_AT_PERCENT, COMPACT_RETAIN_PERCENT, Compaction};
-use component::{Component, Components, Cx, Scratch, answer_tool_call};
+use component::{
+    Component, Components, Cx, Scratch, answer_tool_call, component_tool_specs, is_component_tool,
+};
 use log::LogWrites;
+use provision::Provision;
 use queue::Queue;
 use reads::Reads;
 use repair::{missing_tool_results, parked_call_ids, repair_unanswered_tool_calls};
-use run::{RunOutcome, RunReport, SeedSummary, StepReport, Turn};
+use run::{RunOutcome, RunReport, Turn};
 use seed::Seeding;
 use state::new_message_id;
 use task_list::TaskLists;

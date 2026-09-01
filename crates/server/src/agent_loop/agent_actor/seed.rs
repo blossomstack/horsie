@@ -131,6 +131,64 @@ impl Component for Seeding {
                 // replays it.
                 .and_snapshot()
             }
+            SeedCommand::TakeSummary(job) => {
+                let SummaryJob {
+                    turn,
+                    sub_sessions,
+                    provider,
+                    conversation_id,
+                    cancel,
+                } = *job;
+                // The summary must describe the history at the branch point,
+                // read here before the turn can say anything to the model.
+                let history = repair_unanswered_tool_calls(state.prompt_messages());
+                let self_ref = cx.actor.self_ref();
+                tokio::spawn(async move {
+                    let result = tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => return,
+                        result = horsie_agentcore::summarise_span(
+                            &provider,
+                            &conversation_id,
+                            &history,
+                            history.len(),
+                            None,
+                            None,
+                        ) => result.map_err(|e| e.to_string()),
+                    };
+                    if let Err(e) = &result {
+                        tracing::warn!(error = %e, "summarising a session for a sub session failed");
+                    }
+                    let _ = self_ref
+                        .tell(AgentCommand::Seed(SeedCommand::SummaryTaken {
+                            turn,
+                            sub_sessions,
+                            result,
+                        }))
+                        .await;
+                });
+                CommandEffect::none()
+            }
+            SeedCommand::SummaryTaken {
+                turn,
+                sub_sessions,
+                result,
+            } => {
+                // Delivered whatever became of the turn since: the sub
+                // sessions waiting are a different session's business, and the
+                // summary was taken at the branch point they are entitled to.
+                cx.runtime
+                    .parent
+                    .deliver(crate::agent_loop::context::AgentOutcome::SeedSummary {
+                        agent: cx.runtime.journal_id,
+                        sub_sessions,
+                        result,
+                    })
+                    .await;
+                cx.tell(AgentCommand::Run(RunCommand::SummaryDone { turn }))
+                    .await;
+                CommandEffect::none()
+            }
         }
     }
 }

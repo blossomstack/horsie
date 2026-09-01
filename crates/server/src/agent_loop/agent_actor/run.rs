@@ -1,15 +1,15 @@
-//! The turn component: the actor-owned loop.
-//!
-//! There is no background run loop any more. This component drives each step
-//! of a turn: it dispatches one provider call, reads what came back, routes
-//! the tool calls, and dispatches the next call — journaling each step as an
-//! ordinary command effect. Everything that does I/O — the per-turn setup, the
-//! provider call, a remote tool call, a summarisation — happens on a spawned
-//! task, never on the mailbox, and reports back as a command carrying the
-//! turn's generation so a cancelled turn's stragglers are dropped.
+//! The turn component: a regular agent run, and nothing else.
 //!
 //! A turn arrives as [`RunCommand::StartTurn`], told by the queue after it
-//! journaled the turn's input — the two components never call each other.
+//! journaled the turn's input. This component asks the provision component for
+//! the turn's contexts, then loops: dispatch one provider call, read what came
+//! back — a message that ends the turn, or tool calls to route — and dispatch
+//! the next. Everything else a turn can involve lives in the component that
+//! owns it and answers by command: contexts (`ContextReady`), a compaction
+//! (`CompactFinished`), a sub-session summary (`SummaryDone`), every tool
+//! result (`ToolReturned`). All of it is fenced by the turn's generation, so a
+//! cancelled turn's stragglers are dropped.
+//!
 //! What an ending *means* is [`super::conclude`]'s half of this component.
 
 use super::*;
@@ -17,9 +17,9 @@ use crate::agent_loop::inbox::Summarise;
 use async_trait::async_trait;
 use horsie_actor::{ActorRef, CommandEffect, ReplyTo};
 use horsie_agentcore::{
-    AgentEvent, AgentInput, AgentLogBody, CompactionBudget, EventSink, EventSinkError, LlmError,
-    Message, StepError, StepRequest, StoppedCall, ToolOutcome, ToolSpec, Toolbox, Usage,
-    extract_text, extract_tool_calls, tool_fingerprint,
+    AgentEvent, AgentInput, AgentLogBody, EventSink, EventSinkError, LlmError, Message, StepError,
+    StepRequest, StoppedCall, ToolOutcome, Toolbox, Usage, extract_text, extract_tool_calls,
+    tool_fingerprint,
 };
 use horsie_models::now_ms;
 use serde_json::Value;
@@ -27,7 +27,6 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
 /// Defaults the old loop carried in its config; still server policy.
 const MAX_ITERATIONS: u32 = 100;
@@ -54,19 +53,6 @@ pub struct RunReport {
     /// Which turn this is the report of, against the generation fence.
     pub(super) run_id: u64,
     pub(super) outcome: RunOutcome,
-    /// A summary this run was asked to take for sub sessions waiting on it.
-    /// Delivered directly by the `Summarised` handler now, so always `None`
-    /// here — kept on the struct because conclude owns the delivery seam.
-    pub(super) seed_summary: Option<SeedSummary>,
-}
-
-/// What a run produced for the sub sessions waiting on it.
-#[derive(Debug, Clone)]
-pub struct SeedSummary {
-    /// Every sub session seeded from this one summary. They share a branch
-    /// point, so they are entitled to share the provider call.
-    pub sub_sessions: Vec<Uuid>,
-    pub result: Result<String, String>,
 }
 
 #[derive(Debug)]
@@ -88,25 +74,6 @@ pub(super) enum RunOutcome {
     /// The failure was already delivered to the parent; only the turn needs
     /// clearing.
     AlreadyReported,
-}
-
-/// Everything one turn's steps share, built once by the setup task.
-pub(super) struct TurnCtx {
-    pub provider: Arc<dyn horsie_agentcore::LlmProvider>,
-    /// The fully-composed, selection-filtered toolbox remote calls dispatch
-    /// through. Inline tools (timers, `task_list`) never reach it — this
-    /// component claims them by name first.
-    pub toolbox: Arc<dyn Toolbox>,
-    /// What the model is shown, already filtered.
-    pub specs: Vec<ToolSpec>,
-    /// The inline tool names that survived the filter, claimed on the mailbox.
-    pub inline_names: std::collections::HashSet<String>,
-    pub system_prompt: String,
-    pub budget: Option<CompactionBudget>,
-    pub conversation_id: String,
-    pub thinking_effort: Option<horsie_agentcore::ThinkingEffort>,
-    /// For the compaction hooks a compact step fires.
-    pub context_provider: Arc<dyn crate::agent_loop::ContextProvider>,
 }
 
 /// A dispatched remote call the turn is still waiting on.
@@ -138,91 +105,9 @@ pub(super) struct TurnFlight {
     stopped: Vec<StoppedCall>,
 }
 
-/// What one spawned step reported back.
-pub struct StepReport {
-    pub(super) turn: u64,
-    pub(super) outcome: StepOutcome,
-}
-
-pub(super) enum StepOutcome {
-    /// The per-turn setup finished: runtime rehydrated, MCP connected,
-    /// workspace scanned, toolbox composed.
-    Prepared(Box<TurnCtx>),
-    /// The setup could not produce this turn's contexts.
-    ProvideFailed(crate::agent_loop::ContextError),
-    /// The summary sub sessions were waiting on was taken (or failed).
-    Summarised {
-        sub_sessions: Vec<Uuid>,
-        result: Result<String, String>,
-    },
-    /// A compaction happened; the boundary is journaled here.
-    Compacted(Box<CompactedData>),
-    /// A compaction found nothing to fold, was refused by a hook, or failed.
-    /// `notice` says whether to tell the user (a typed `/compact` deserves an
-    /// answer; the auto check declining is routine).
-    CompactSkipped { notice: bool },
-    /// One provider call finished.
-    Responded(Box<horsie_agentcore::StepResponse>),
-    /// One provider call failed.
-    LlmFailed(LlmError),
-}
-
-/// What a compact step produced, ready to journal as
-/// [`AgentDomainEvent::Compacted`].
-pub(super) struct CompactedData {
-    summary: String,
-    carried_state: String,
-    retained_from_message_id: Option<String>,
-    trigger: horsie_agentcore::CompactionTrigger,
-    instructions: Option<String>,
-    tokens_before: u32,
-    tokens_after: u32,
-}
-
-/// Sums two optional per-turn cache-token counts. Stays `None` only when
-/// *neither* side reported anything — a turn/provider that's silent about
-/// cache data shouldn't zero out a total another turn already contributed to.
-fn sum_optional(a: Option<u32>, b: Option<u32>) -> Option<u32> {
-    match (a, b) {
-        (None, None) => None,
-        (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
-    }
-}
-
-/// Adds the timer and `task_list` specs to a composed toolbox so the
-/// selection filter sees the whole surface. Execution never reaches it for
-/// those names — the turn claims them on the mailbox — so its `execute` for
-/// them is an error by construction.
-struct WithInlineSpecs {
-    inner: Arc<dyn Toolbox>,
-}
-
-#[async_trait]
-impl Toolbox for WithInlineSpecs {
-    fn specs(&self) -> Vec<ToolSpec> {
-        let mut specs = self.inner.specs();
-        specs.extend(component::component_tool_specs());
-        specs
-    }
-
-    async fn execute(
-        &self,
-        name: &str,
-        input: Value,
-        tool_call_id: &str,
-    ) -> Result<ToolOutcome, horsie_agentcore::ToolCallError> {
-        if component::is_component_tool(name) {
-            return Err(horsie_agentcore::ToolCallError::InvalidInput(format!(
-                "'{name}' is handled by its component"
-            )));
-        }
-        self.inner.execute(name, input, tool_call_id).await
-    }
-}
-
 /// Forwards streamed text chunks to the mailbox, tagged with the turn so a
 /// cancelled turn's stragglers are dropped. Everything else a provider emits
-/// is ignored: coarse events are journaled from the step's response, not from
+/// is ignored: coarse events are journaled from the call's response, not from
 /// the stream.
 struct DeltaSink {
     actor: ActorRef<AgentCommand>,
@@ -245,13 +130,24 @@ impl EventSink for DeltaSink {
     }
 }
 
+/// Sums two optional per-turn cache-token counts. Stays `None` only when
+/// *neither* side reported anything — a turn/provider that's silent about
+/// cache data shouldn't zero out a total another turn already contributed to.
+fn sum_optional(a: Option<u32>, b: Option<u32>) -> Option<u32> {
+    match (a, b) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
+    }
+}
+
 impl Turn {
-    /// Begin a turn: record the flight and spawn the per-turn setup.
+    /// Begin a turn: record the flight and ask the provision component for
+    /// this turn's contexts.
     ///
     /// Nothing here journals — the turn's input was journaled by whoever told
-    /// `StartTurn`, and the first step dispatches only after `Prepared`
+    /// `StartTurn`, and the first call dispatches only after `ContextReady`
     /// reports back, so it reads a state those events are already folded into.
-    pub(super) fn start(
+    pub(super) async fn start(
         &mut self,
         cx: &mut Cx<'_>,
         summarise: Option<Summarise>,
@@ -281,78 +177,10 @@ impl Turn {
             pending_calls: Vec::new(),
             stopped: Vec::new(),
         });
-
-        let self_ref = cx.actor.self_ref();
-        let context_provider = cx.runtime.context_provider.clone();
-        let configured_prompt = cx.params.system_prompt.clone();
-        let run_def_tools = cx.params.tools.clone();
-        let thinking_effort = cx.params.thinking_effort;
-        let conversation_id = cx.runtime.journal_id.to_string();
-
-        tokio::spawn(async move {
-            // Provide this turn's contexts off the mailbox: rehydrate the
-            // runtime, reconnect MCP, scan the workspace. Cancellable, because
-            // this is the *most* likely place to hang — it awaits an MCP
-            // connect and a workspace scan across a process boundary.
-            let provided = tokio::select! {
-                biased;
-                () = cancel.cancelled() => return,
-                provided = context_provider.provide() => provided,
-            };
-            let outcome = match provided {
-                Err(error) => StepOutcome::ProvideFailed(error),
-                Ok(contexts) => {
-                    // The inline specs join before the filter so the agent's
-                    // selection reaches them exactly as it reaches every other
-                    // layer. A plugin's narrowing stacks after: two filters
-                    // can only remove, so the narrower wins.
-                    let composed: Arc<dyn Toolbox> = Arc::new(WithInlineSpecs {
-                        inner: contexts.toolbox,
-                    });
-                    let toolbox = crate::agent_loop::FilteredToolbox::apply(
-                        composed,
-                        run_def_tools.as_deref(),
-                    );
-                    let toolbox = match &contexts.tool_narrowing {
-                        None => toolbox,
-                        Some(narrowed) => {
-                            crate::agent_loop::FilteredToolbox::apply(toolbox, Some(narrowed))
-                        }
-                    };
-                    let specs = toolbox.specs();
-                    let inline_names = specs
-                        .iter()
-                        .map(|s| s.name.clone())
-                        .filter(|n| component::is_component_tool(n))
-                        .collect();
-                    StepOutcome::Prepared(Box::new(TurnCtx {
-                        provider: contexts.provider,
-                        toolbox,
-                        specs,
-                        inline_names,
-                        system_prompt: contexts
-                            .system_prompt
-                            .or(configured_prompt)
-                            .unwrap_or_default(),
-                        budget: contexts
-                            .context_window
-                            .map(|context_window| CompactionBudget {
-                                context_window,
-                                trigger_at_percent: COMPACT_AT_PERCENT,
-                                retain_percent: COMPACT_RETAIN_PERCENT,
-                            }),
-                        conversation_id,
-                        thinking_effort,
-                        context_provider,
-                    }))
-                }
-            };
-            let _ = self_ref
-                .tell(AgentCommand::Run(RunCommand::StepDone(Box::new(
-                    StepReport { turn: id, outcome },
-                ))))
-                .await;
-        });
+        cx.tell(AgentCommand::Provision(ProvisionCommand::Provide(
+            Box::new(ProvideJob { turn: id, cancel }),
+        )))
+        .await;
     }
 
     /// The turn is over, however it ended: clear the flight and lower the
@@ -426,7 +254,6 @@ impl Turn {
             RunReport {
                 run_id,
                 outcome: RunOutcome::Failed { error, recoverable },
-                seed_summary: None,
             },
             &folded,
             cx,
@@ -434,9 +261,31 @@ impl Turn {
         .await
     }
 
-    /// Dispatch the turn's next model-facing step: a compaction when one is
-    /// due, otherwise the next provider call — or fail the turn when its
-    /// iteration budget is spent.
+    /// Conclude the turn with the empty completion a summarise-only turn ends
+    /// with: nothing was said to the model, and nothing is owed.
+    async fn finish_empty(
+        &mut self,
+        run_id: u64,
+        state: &AgentState,
+        cx: &mut Cx<'_>,
+    ) -> CommandEffect<AgentDomainEvent> {
+        self.finish(
+            Vec::new(),
+            RunReport {
+                run_id,
+                outcome: RunOutcome::Completed {
+                    text: String::new(),
+                },
+            },
+            state,
+            cx,
+        )
+        .await
+    }
+
+    /// Dispatch the turn's next model-facing step: hand over to the compaction
+    /// component when the budget says so, otherwise spawn the next provider
+    /// call — or fail the turn when its iteration budget is spent.
     async fn dispatch_model_step(
         &mut self,
         events: Vec<AgentDomainEvent>,
@@ -464,10 +313,35 @@ impl Turn {
                 .is_some_and(|b| flight.context_tokens >= b.trigger_tokens())
         });
         match due {
-            true => self.spawn_compact(folded, None, cx),
+            true => {
+                if let Some(job) = self.compact_job(None) {
+                    cx.tell(AgentCommand::Compaction(CompactionCommand::Compact(
+                        Box::new(job),
+                    )))
+                    .await;
+                }
+            }
             false => self.spawn_llm(folded, cx, delay),
         }
         CommandEffect::persist(events)
+    }
+
+    /// The job a compaction run needs, from this turn's contexts. `manual`
+    /// carries `/compact`'s instructions; `None` is the budget check firing.
+    fn compact_job(&self, manual: Option<Option<String>>) -> Option<CompactJob> {
+        let flight = self.flight.as_ref()?;
+        let tctx = flight.ctxs.as_ref()?;
+        Some(CompactJob {
+            turn: flight.id,
+            manual: manual.is_some(),
+            instructions: manual.flatten(),
+            tokens_before: flight.context_tokens,
+            budget: tctx.budget,
+            provider: tctx.provider.clone(),
+            conversation_id: tctx.conversation_id.clone(),
+            context_provider: tctx.context_provider.clone(),
+            cancel: flight.cancel.clone(),
+        })
     }
 
     /// Spawn one provider call over the folded state's prompt.
@@ -505,285 +379,60 @@ impl Turn {
                 actor: self_ref.clone(),
                 turn,
             };
-            let outcome = match horsie_agentcore::run_step(&req, &history, &sink, &cancel).await {
-                Ok(response) => StepOutcome::Responded(Box::new(response)),
+            let cmd = match horsie_agentcore::run_step(&req, &history, &sink, &cancel).await {
+                Ok(response) => RunCommand::LlmResponded {
+                    turn,
+                    response: Box::new(response),
+                },
                 // The Cancel handler already concluded the turn; reporting
                 // would be answered by the fence anyway.
                 Err(StepError::Cancelled) => return,
-                Err(StepError::Provider(e)) => StepOutcome::LlmFailed(e),
+                Err(StepError::Provider(error)) => RunCommand::LlmFailed { turn, error },
             };
-            let _ = self_ref
-                .tell(AgentCommand::Run(RunCommand::StepDone(Box::new(
-                    StepReport { turn, outcome },
-                ))))
-                .await;
+            let _ = self_ref.tell(AgentCommand::Run(cmd)).await;
         });
     }
 
-    /// Spawn a compaction step. `manual` carries `/compact`'s instructions;
-    /// `None` is the automatic budget check firing.
-    fn spawn_compact(&self, folded: &AgentState, manual: Option<Option<String>>, cx: &Cx<'_>) {
-        let Some(flight) = &self.flight else { return };
-        let Some(tctx) = flight.ctxs.clone() else {
-            return;
-        };
-        let is_manual = manual.is_some();
-        let instructions = manual.flatten();
-        let carried_state = crate::agent_loop::carried_state::render_carried_state(folded);
-        let retain = tctx.budget.map_or(0, |b| b.retain_tokens());
-        let tokens_before = flight.context_tokens;
-        let history = repair_unanswered_tool_calls(folded.prompt_messages());
-        let turn = flight.id;
-        let cancel = flight.cancel.clone();
-        let self_ref = cx.actor.self_ref();
-        tokio::spawn(async move {
-            let outcome = tokio::select! {
-                biased;
-                () = cancel.cancelled() => return,
-                outcome = compact_step(
-                    &tctx, history, retain, tokens_before, carried_state,
-                    instructions, is_manual,
-                ) => outcome,
-            };
-            let _ = self_ref
-                .tell(AgentCommand::Run(RunCommand::StepDone(Box::new(
-                    StepReport { turn, outcome },
-                ))))
-                .await;
-        });
-    }
-
-    /// Spawn the summarisation sub sessions are waiting on.
-    fn spawn_summarise(&self, folded: &AgentState, sub_sessions: Vec<Uuid>, cx: &Cx<'_>) {
-        let Some(flight) = &self.flight else { return };
-        let Some(tctx) = flight.ctxs.clone() else {
-            return;
-        };
-        let history = repair_unanswered_tool_calls(folded.prompt_messages());
-        let turn = flight.id;
-        let cancel = flight.cancel.clone();
-        let self_ref = cx.actor.self_ref();
-        tokio::spawn(async move {
-            let result = tokio::select! {
-                biased;
-                () = cancel.cancelled() => return,
-                result = horsie_agentcore::summarise_span(
-                    &tctx.provider,
-                    &tctx.conversation_id,
-                    &history,
-                    history.len(),
-                    None,
-                    None,
-                ) => result.map_err(|e| e.to_string()),
-            };
-            if let Err(e) = &result {
-                tracing::warn!(error = %e, "summarising a session for a sub session failed");
-            }
-            let _ = self_ref
-                .tell(AgentCommand::Run(RunCommand::StepDone(Box::new(
-                    StepReport {
-                        turn,
-                        outcome: StepOutcome::Summarised {
-                            sub_sessions,
-                            result,
-                        },
-                    },
-                ))))
-                .await;
-        });
-    }
-
-    /// One spawned step reported back: fold it into the turn and decide what
-    /// happens next.
-    async fn handle_step(
+    /// The provision component produced this turn's contexts: dispatch the
+    /// turn's first real step.
+    async fn handle_context_ready(
         &mut self,
-        report: StepReport,
+        ctx_box: Box<TurnCtx>,
         cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
-        // The generation fence: a report from a superseded turn says nothing
-        // about the one in flight now.
-        if self.fenced(report.turn).is_none() {
-            tracing::warn!(
-                turn = report.turn,
-                "dropping the report of a superseded step"
-            );
+        let Some(flight) = self.flight.as_mut() else {
             return CommandEffect::none();
-        }
-        match report.outcome {
-            StepOutcome::Prepared(tctx) => {
-                let Some(flight) = self.flight.as_mut() else {
-                    return CommandEffect::none();
-                };
-                flight.ctxs = Some(Arc::new(*tctx));
-                match flight.summarise.clone() {
-                    Some(Summarise::SubSession(subs)) => {
-                        self.spawn_summarise(cx.state, subs, cx);
-                        CommandEffect::none()
-                    }
-                    Some(Summarise::Compact(instructions)) => {
-                        self.spawn_compact(cx.state, Some(instructions), cx);
-                        CommandEffect::none()
-                    }
-                    None => {
-                        let state = cx.state.clone();
-                        self.dispatch_model_step(Vec::new(), &state, cx, None).await
-                    }
-                }
-            }
-            StepOutcome::ProvideFailed(error) => {
-                // Reported exactly as the old path did — `terminal` above all,
-                // which tells the session its sandbox is gone for good.
-                let Some(run_id) = self.flight_id() else {
-                    return CommandEffect::none();
-                };
-                cx.runtime
-                    .parent
-                    .deliver(crate::agent_loop::context::AgentOutcome::Failed {
-                        agent: cx.runtime.journal_id,
-                        error: error.message,
-                        recoverable: true,
-                        terminal: error.terminal,
-                    })
-                    .await;
-                let state = cx.state.clone();
-                self.conclude(
-                    RunReport {
-                        run_id,
-                        outcome: RunOutcome::AlreadyReported,
-                        seed_summary: None,
-                    },
-                    &state,
-                    cx,
-                )
-                .await
-            }
-            StepOutcome::Summarised {
-                sub_sessions,
-                result,
-            } => {
-                // Delivered before the turn's own outcome, and unconditionally:
-                // the sub sessions waiting are a different session's business.
-                cx.runtime
-                    .parent
-                    .deliver(crate::agent_loop::context::AgentOutcome::SeedSummary {
-                        agent: cx.runtime.journal_id,
+        };
+        let tctx = Arc::new(*ctx_box);
+        flight.ctxs = Some(tctx.clone());
+        let (turn, cancel) = (flight.id, flight.cancel.clone());
+        match flight.summarise.clone() {
+            Some(Summarise::SubSession(sub_sessions)) => {
+                cx.tell(AgentCommand::Seed(SeedCommand::TakeSummary(Box::new(
+                    SummaryJob {
+                        turn,
                         sub_sessions,
-                        result,
-                    })
+                        provider: tctx.provider.clone(),
+                        conversation_id: tctx.conversation_id.clone(),
+                        cancel,
+                    },
+                ))))
+                .await;
+                CommandEffect::none()
+            }
+            Some(Summarise::Compact(instructions)) => {
+                if let Some(job) = self.compact_job(Some(instructions)) {
+                    cx.tell(AgentCommand::Compaction(CompactionCommand::Compact(
+                        Box::new(job),
+                    )))
                     .await;
-                let Some(flight) = self.flight.as_ref() else {
-                    return CommandEffect::none();
-                };
-                let (run_id, summarise_only) = (flight.id, flight.summarise_only);
+                }
+                CommandEffect::none()
+            }
+            None => {
                 let state = cx.state.clone();
-                match summarise_only {
-                    true => {
-                        self.finish(
-                            Vec::new(),
-                            RunReport {
-                                run_id,
-                                outcome: RunOutcome::Completed {
-                                    text: String::new(),
-                                },
-                                seed_summary: None,
-                            },
-                            &state,
-                            cx,
-                        )
-                        .await
-                    }
-                    false => self.dispatch_model_step(Vec::new(), &state, cx, None).await,
-                }
+                self.dispatch_model_step(Vec::new(), &state, cx, None).await
             }
-            StepOutcome::Compacted(data) => {
-                let events = vec![AgentDomainEvent::Compacted {
-                    summary: data.summary,
-                    carried_state: data.carried_state,
-                    retained_from_message_id: data.retained_from_message_id,
-                    trigger: data.trigger,
-                    instructions: data.instructions,
-                    tokens_before: data.tokens_before,
-                    tokens_after: data.tokens_after,
-                    at_ms: now_ms(),
-                }];
-                let folded = Components::apply_all(cx.state, &events);
-                let Some(flight) = self.flight.as_mut() else {
-                    return CommandEffect::none();
-                };
-                // What the next auto-compaction check reads; the fold updated
-                // the durable copy the same way.
-                flight.context_tokens = data.tokens_after;
-                let (run_id, summarise_only) = (flight.id, flight.summarise_only);
-                match summarise_only {
-                    true => {
-                        self.finish(
-                            events,
-                            RunReport {
-                                run_id,
-                                outcome: RunOutcome::Completed {
-                                    text: String::new(),
-                                },
-                                seed_summary: None,
-                            },
-                            &folded,
-                            cx,
-                        )
-                        .await
-                    }
-                    false => {
-                        // Straight to the call, not back through the budget
-                        // check: a compaction that left the prompt over the
-                        // trigger must not loop.
-                        self.spawn_llm(&folded, cx, None);
-                        CommandEffect::persist(events)
-                    }
-                }
-            }
-            StepOutcome::CompactSkipped { notice } => {
-                let Some(flight) = self.flight.as_ref() else {
-                    return CommandEffect::none();
-                };
-                let mut events = Vec::new();
-                if notice {
-                    events.push(AgentDomainEvent::LifecycleRecorded {
-                        event: horsie_agentcore::LifecycleEvent::CompactionSkipped(
-                            horsie_models::agent::CompactionSkippedLifecycle {
-                                context_tokens: flight.context_tokens,
-                                retain_tokens: flight
-                                    .ctxs
-                                    .as_ref()
-                                    .and_then(|c| c.budget.map(|b| b.retain_tokens())),
-                            },
-                        ),
-                        at_ms: now_ms(),
-                    });
-                }
-                let folded = Components::apply_all(cx.state, &events);
-                let (run_id, summarise_only) = (flight.id, flight.summarise_only);
-                match summarise_only {
-                    true => {
-                        self.finish(
-                            events,
-                            RunReport {
-                                run_id,
-                                outcome: RunOutcome::Completed {
-                                    text: String::new(),
-                                },
-                                seed_summary: None,
-                            },
-                            &folded,
-                            cx,
-                        )
-                        .await
-                    }
-                    false => {
-                        self.spawn_llm(&folded, cx, None);
-                        CommandEffect::persist(events)
-                    }
-                }
-            }
-            StepOutcome::Responded(response) => self.handle_responded(*response, cx).await,
-            StepOutcome::LlmFailed(error) => self.handle_llm_failed(error, cx).await,
         }
     }
 
@@ -851,7 +500,6 @@ impl Turn {
                         outcome: RunOutcome::Completed {
                             text: extract_text(&response.message.parts),
                         },
-                        seed_summary: None,
                     },
                     &folded,
                     cx,
@@ -884,8 +532,8 @@ impl Turn {
         }
         if window >= NUDGE_THRESHOLD && all_same {
             // Answer every call with a nudge instead of executing it, and let
-            // the model try again. Journaled now — the fold is the only source
-            // of history — where the old loop kept them in run-task locals.
+            // the model try again. Journaled — the fold is the only source of
+            // history — where the old loop kept them in run-task locals.
             for (tool_call_id, _, _) in &tool_calls {
                 let message = Message::tool_result(
                     tool_call_id.clone(),
@@ -1046,7 +694,6 @@ impl Turn {
             RunReport {
                 run_id,
                 outcome: RunOutcome::Stopped { calls: stopped },
-                seed_summary: None,
             },
             &folded,
             cx,
@@ -1076,8 +723,73 @@ impl Component for Turn {
                     tracing::warn!("refusing to start a turn while one is in flight");
                     return CommandEffect::none();
                 }
-                self.start(cx, summarise, summarise_only);
+                self.start(cx, summarise, summarise_only).await;
                 CommandEffect::none()
+            }
+            RunCommand::ContextReady { turn, ctx } => {
+                if self.fenced(turn).is_none() {
+                    return CommandEffect::none();
+                }
+                self.handle_context_ready(ctx, cx).await
+            }
+            RunCommand::ContextFailed { turn } => {
+                if self.fenced(turn).is_none() {
+                    return CommandEffect::none();
+                }
+                let state = cx.state.clone();
+                self.conclude(
+                    RunReport {
+                        run_id: turn,
+                        outcome: RunOutcome::AlreadyReported,
+                    },
+                    &state,
+                    cx,
+                )
+                .await
+            }
+            RunCommand::LlmResponded { turn, response } => {
+                if self.fenced(turn).is_none() {
+                    tracing::warn!(turn, "dropping a superseded provider response");
+                    return CommandEffect::none();
+                }
+                self.handle_responded(*response, cx).await
+            }
+            RunCommand::LlmFailed { turn, error } => {
+                if self.fenced(turn).is_none() {
+                    return CommandEffect::none();
+                }
+                self.handle_llm_failed(error, cx).await
+            }
+            RunCommand::CompactFinished { turn } => {
+                let Some(flight) = self.fenced(turn) else {
+                    return CommandEffect::none();
+                };
+                // Whatever the compaction did is folded by now — a landed
+                // boundary already moved the durable `context_tokens`, and the
+                // next provider response refreshes the in-memory figure.
+                // Straight to the call, not back through the budget check: a
+                // compaction that left the prompt over the trigger must not
+                // loop.
+                let (run_id, summarise_only) = (flight.id, flight.summarise_only);
+                if summarise_only {
+                    let state = cx.state.clone();
+                    return self.finish_empty(run_id, &state, cx).await;
+                }
+                let state = cx.state.clone();
+                self.spawn_llm(&state, cx, None);
+                CommandEffect::none()
+            }
+            RunCommand::SummaryDone { turn } => {
+                let Some(flight) = self.fenced(turn) else {
+                    return CommandEffect::none();
+                };
+                let (run_id, summarise_only) = (flight.id, flight.summarise_only);
+                if summarise_only {
+                    let state = cx.state.clone();
+                    return self.finish_empty(run_id, &state, cx).await;
+                }
+                let state = cx.state.clone();
+                self.dispatch_model_step(Vec::new(), &state, cx, None).await
             }
             RunCommand::Cancel { ack } => {
                 match (&self.flight, ack) {
@@ -1101,7 +813,6 @@ impl Component for Turn {
                             RunReport {
                                 run_id,
                                 outcome: RunOutcome::Cancelled,
-                                seed_summary: None,
                             },
                             &folded,
                             cx,
@@ -1120,7 +831,6 @@ impl Component for Turn {
             RunCommand::PersistProgress { events, ack } => {
                 CommandEffect::persist(events).and_ack(ack)
             }
-            RunCommand::StepDone(report) => self.handle_step(*report, cx).await,
             RunCommand::ToolReturned {
                 turn,
                 tool_call_id,
@@ -1142,10 +852,9 @@ impl Component for Turn {
     }
 
     /// What a run wrote, and what it cost.
-    // The fallthrough is unreachable by construction: `component::fold` routes
-    // every variant to exactly one component, so an event added later fails to
-    // compile *there* — where it should be classified — rather than silently
-    // reaching the wrong fold here.
+    // The fallthrough is unreachable by construction: `Components::apply`
+    // routes every variant to exactly one component, so an event added later
+    // fails to compile *there* rather than silently reaching the wrong fold.
     #[allow(clippy::wildcard_enum_match_arm)]
     fn apply(state: &mut AgentState, event: AgentDomainEvent) {
         match event {
@@ -1236,7 +945,7 @@ impl Component for Turn {
             return;
         }
         // The continuation is journaled — the fold is the only source of
-        // history now, so an input the model must see has to be in it.
+        // history, so an input the model must see has to be in it.
         let message = AgentInput::user_message(new_message_id(), "continue the interrupted task")
             .to_message(now_ms());
         let (ack, _) = tokio::sync::oneshot::channel();
@@ -1245,96 +954,8 @@ impl Component for Turn {
             ack: ReplyTo::from_sender(ack),
         }))
         .await;
-        self.start(cx, None, false);
+        self.start(cx, None, false).await;
     }
-}
-
-/// The body of a compact step, on its own task.
-async fn compact_step(
-    tctx: &TurnCtx,
-    history: Vec<Message>,
-    retain_tokens: u32,
-    tokens_before: u32,
-    carried_state: String,
-    instructions: Option<String>,
-    manual: bool,
-) -> StepOutcome {
-    use horsie_models::agent::{CompactionTrigger, EmptyOutcome};
-    let cut = horsie_agentcore::choose_cut(&history, retain_tokens);
-    if cut == 0 {
-        // Nothing would be folded away. A typed `/compact` deserves to hear
-        // that; the automatic check declining is routine and stays silent.
-        return StepOutcome::CompactSkipped { notice: manual };
-    }
-    let trigger_name = if manual { "manual" } else { "auto" };
-    let records = tctx
-        .context_provider
-        .compaction_hooks(horsie_models::runtime::ServerHookEvent::PreCompact(
-            horsie_models::runtime::PreCompactInput {
-                trigger: trigger_name.to_string(),
-                instructions: instructions.clone(),
-            },
-        ))
-        .await;
-    if let Some(reason) = crate::agent_loop::carried_state::precompact_refusal(&records) {
-        tracing::info!(reason, "a PreCompact hook abandoned this compaction");
-        return StepOutcome::CompactSkipped { notice: false };
-    }
-    let summary = match horsie_agentcore::summarise_span(
-        &tctx.provider,
-        &tctx.conversation_id,
-        &history,
-        cut,
-        instructions.as_deref(),
-        None,
-    )
-    .await
-    {
-        Ok(summary) => summary,
-        Err(e) => {
-            tracing::warn!(error = %e, "a compaction failed; the turn continues uncompacted");
-            return StepOutcome::CompactSkipped { notice: false };
-        }
-    };
-    let retained_from_message_id = history.get(cut).map(|m| m.id.clone());
-    let boundary = Message {
-        id: format!("compaction:{}", history.len()),
-        role: horsie_models::agent::Role::User,
-        parts: vec![horsie_models::agent::ContentPart::Text(
-            horsie_models::agent::TextPart {
-                text: horsie_agentcore::boundary_text(&summary, &carried_state),
-            },
-        )],
-        created_at_ms: now_ms(),
-        started_at_ms: None,
-    };
-    let mut rewritten = vec![boundary];
-    rewritten.extend_from_slice(&history[cut..]);
-    let tokens_after = horsie_agentcore::approx_history_tokens(&rewritten);
-    // Fire-and-forget: the boundary is about to exist, and nothing a
-    // `PostCompact` hook says could change it.
-    let _ = tctx
-        .context_provider
-        .compaction_hooks(horsie_models::runtime::ServerHookEvent::PostCompact(
-            horsie_models::runtime::PostCompactInput {
-                trigger: trigger_name.to_string(),
-                tokens_before,
-                tokens_after,
-            },
-        ))
-        .await;
-    StepOutcome::Compacted(Box::new(CompactedData {
-        summary,
-        carried_state,
-        retained_from_message_id,
-        trigger: match manual {
-            true => CompactionTrigger::Manual(EmptyOutcome {}),
-            false => CompactionTrigger::Auto(EmptyOutcome {}),
-        },
-        instructions,
-        tokens_before,
-        tokens_after,
-    }))
 }
 
 /// Dispatch one remote tool call on its own task. Whether the toolbox guards

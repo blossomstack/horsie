@@ -12,7 +12,9 @@
 //! the only thing holding the log.
 
 use super::*;
+use horsie_actor::CommandEffect;
 use horsie_agentcore::{AgentLogBody, CompactionEntry, ContentPart, Message, Role};
+use horsie_models::now_ms;
 /// The one message a compaction boundary shows the model.
 ///
 /// Two labelled sections rather than one blob, because they have different
@@ -174,9 +176,185 @@ impl AgentState {
     }
 }
 
-/// Where the prompt starts. Apply-only: nothing asks a compaction for
-/// anything, it is a consequence of a run.
+/// Folding old history behind a summary boundary.
+///
+/// The summarising call is a *special* run on purpose: no tools, no system
+/// prompt, one request, text only — see
+/// [`horsie_agentcore::summarise_span`]. This component owns the whole flow:
+/// the request arrives as a job from the turn (which holds the per-turn
+/// contexts), the run happens on a spawned task, and the landing journals the
+/// boundary — or the skip notice — before telling the turn to resume.
 pub(super) struct Compaction;
+
+#[async_trait::async_trait]
+impl Component for Compaction {
+    type Command = CompactionCommand;
+
+    async fn handle(
+        &mut self,
+        cmd: CompactionCommand,
+        cx: &mut Cx<'_>,
+    ) -> CommandEffect<AgentDomainEvent> {
+        match cmd {
+            CompactionCommand::Compact(job) => {
+                let job = *job;
+                // The history and the carried state are read here, at handling
+                // time: a task-list change earlier in the same turn is already
+                // folded, so a mid-turn compaction carries it verbatim.
+                let history = repair_unanswered_tool_calls(cx.state.prompt_messages());
+                let carried_state =
+                    crate::agent_loop::carried_state::render_carried_state(cx.state);
+                let self_ref = cx.actor.self_ref();
+                tokio::spawn(async move {
+                    let outcome = tokio::select! {
+                        biased;
+                        () = job.cancel.cancelled() => return,
+                        outcome = run_compaction(&job, history, carried_state) => outcome,
+                    };
+                    let _ = self_ref
+                        .tell(AgentCommand::Compaction(CompactionCommand::Landed(
+                            Box::new(CompactLanding {
+                                turn: job.turn,
+                                outcome,
+                            }),
+                        )))
+                        .await;
+                });
+                CommandEffect::none()
+            }
+            CompactionCommand::Landed(landing) => {
+                let CompactLanding { turn, outcome } = *landing;
+                // A cancelled or superseded turn's compaction must not land: a
+                // boundary is a rewrite of what the model is shown, and nobody
+                // is showing it anything any more.
+                if cx.scratch.live_turn != Some(turn) {
+                    tracing::warn!(turn, "dropping a compaction landing from a dead turn");
+                    return CommandEffect::none();
+                }
+                let events = match outcome {
+                    CompactOutcome::Compacted(data) => vec![AgentDomainEvent::Compacted {
+                        summary: data.summary,
+                        carried_state: data.carried_state,
+                        retained_from_message_id: data.retained_from_message_id,
+                        trigger: data.trigger,
+                        instructions: data.instructions,
+                        tokens_before: data.tokens_before,
+                        tokens_after: data.tokens_after,
+                        at_ms: now_ms(),
+                    }],
+                    CompactOutcome::Skipped {
+                        notice: true,
+                        context_tokens,
+                        retain_tokens,
+                    } => vec![AgentDomainEvent::LifecycleRecorded {
+                        event: horsie_agentcore::LifecycleEvent::CompactionSkipped(
+                            horsie_models::agent::CompactionSkippedLifecycle {
+                                context_tokens,
+                                retain_tokens,
+                            },
+                        ),
+                        at_ms: now_ms(),
+                    }],
+                    CompactOutcome::Skipped { notice: false, .. } => Vec::new(),
+                };
+                // Told before the persist returns; handled after it — the turn
+                // resumes on a state the boundary is already folded into.
+                cx.tell(AgentCommand::Run(RunCommand::CompactFinished { turn }))
+                    .await;
+                CommandEffect::persist(events)
+            }
+        }
+    }
+}
+
+/// The compaction run itself, on its own task: decide the cut, fire the
+/// hooks, take the summary, price the result.
+async fn run_compaction(
+    job: &CompactJob,
+    history: Vec<Message>,
+    carried_state: String,
+) -> CompactOutcome {
+    use horsie_models::agent::{CompactionTrigger, EmptyOutcome};
+    let retain_tokens = job.budget.map(|b| b.retain_tokens());
+    let skipped = |notice: bool| CompactOutcome::Skipped {
+        notice,
+        context_tokens: job.tokens_before,
+        retain_tokens,
+    };
+    let cut = horsie_agentcore::choose_cut(&history, retain_tokens.unwrap_or(0));
+    if cut == 0 {
+        // Nothing would be folded away. A typed `/compact` deserves to hear
+        // that; the automatic check declining is routine and stays silent.
+        return skipped(job.manual);
+    }
+    let trigger_name = if job.manual { "manual" } else { "auto" };
+    let records = job
+        .context_provider
+        .compaction_hooks(horsie_models::runtime::ServerHookEvent::PreCompact(
+            horsie_models::runtime::PreCompactInput {
+                trigger: trigger_name.to_string(),
+                instructions: job.instructions.clone(),
+            },
+        ))
+        .await;
+    if let Some(reason) = crate::agent_loop::carried_state::precompact_refusal(&records) {
+        tracing::info!(reason, "a PreCompact hook abandoned this compaction");
+        return skipped(false);
+    }
+    let summary = match horsie_agentcore::summarise_span(
+        &job.provider,
+        &job.conversation_id,
+        &history,
+        cut,
+        job.instructions.as_deref(),
+        None,
+    )
+    .await
+    {
+        Ok(summary) => summary,
+        Err(e) => {
+            tracing::warn!(error = %e, "a compaction failed; the turn continues uncompacted");
+            return skipped(false);
+        }
+    };
+    let retained_from_message_id = history.get(cut).map(|m| m.id.clone());
+    let boundary = Message {
+        id: format!("compaction:{}", history.len()),
+        role: Role::User,
+        parts: vec![ContentPart::Text(horsie_models::agent::TextPart {
+            text: horsie_agentcore::boundary_text(&summary, &carried_state),
+        })],
+        created_at_ms: now_ms(),
+        started_at_ms: None,
+    };
+    let mut rewritten = vec![boundary];
+    rewritten.extend_from_slice(&history[cut..]);
+    let tokens_after = horsie_agentcore::approx_history_tokens(&rewritten);
+    // Fire-and-forget: the boundary is about to exist, and nothing a
+    // `PostCompact` hook says could change it.
+    let _ = job
+        .context_provider
+        .compaction_hooks(horsie_models::runtime::ServerHookEvent::PostCompact(
+            horsie_models::runtime::PostCompactInput {
+                trigger: trigger_name.to_string(),
+                tokens_before: job.tokens_before,
+                tokens_after,
+            },
+        ))
+        .await;
+    CompactOutcome::Compacted(Box::new(CompactedData {
+        summary,
+        carried_state,
+        retained_from_message_id,
+        trigger: match job.manual {
+            true => CompactionTrigger::Manual(EmptyOutcome {}),
+            false => CompactionTrigger::Auto(EmptyOutcome {}),
+        },
+        instructions: job.instructions.clone(),
+        tokens_before: job.tokens_before,
+        tokens_after,
+    }))
+}
 
 impl Compaction {
     /// Where the prompt now starts, and the context size that leaves behind.

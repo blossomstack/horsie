@@ -79,24 +79,6 @@ impl Turn {
         let agent = cx.runtime.journal_id;
         let parent = cx.runtime.parent.clone();
 
-        // Before the turn's own outcome, and unconditionally: the sub sessions
-        // waiting on this are a different session's business, and whether this
-        // turn then went on to succeed, fail or be cancelled says nothing
-        // about whether their summary was taken.
-        if let Some(SeedSummary {
-            sub_sessions,
-            result,
-        }) = report.seed_summary
-        {
-            parent
-                .deliver(AgentOutcome::SeedSummary {
-                    agent,
-                    sub_sessions,
-                    result,
-                })
-                .await;
-        }
-
         match report.outcome {
             RunOutcome::Completed { text } => {
                 parent

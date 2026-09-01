@@ -83,6 +83,10 @@ pub enum AgentCommand {
     Timer(TimerCommand),
     /// The agent's own task list.
     TaskList(TaskListCommand),
+    /// The per-turn runtime and context setup.
+    Provision(ProvisionCommand),
+    /// Folding old history behind a summary boundary.
+    Compaction(CompactionCommand),
     /// Questions answered from state, which wake nothing.
     Read(ReadCommand),
     /// Things written into this agent's log by somebody else.
@@ -146,10 +150,27 @@ pub enum RunCommand {
         events: Vec<AgentDomainEvent>,
         ack: ReplyTo<Result<(), horsie_actor::JournalError>>,
     },
-    /// Internal: one spawned step of the turn finished — the per-turn setup,
-    /// a summarisation, a compaction, or a provider call. Boxed to keep the
-    /// command enum small.
-    StepDone(Box<StepReport>),
+    /// Internal: the provision component produced this turn's contexts.
+    ContextReady { turn: u64, ctx: Box<TurnCtx> },
+    /// Internal: the provision component could not, and has already told the
+    /// parent why; the turn only needs clearing.
+    ContextFailed { turn: u64 },
+    /// Internal: one provider call finished — the assembled assistant message.
+    LlmResponded {
+        turn: u64,
+        response: Box<horsie_agentcore::StepResponse>,
+    },
+    /// Internal: one provider call failed.
+    LlmFailed {
+        turn: u64,
+        error: horsie_agentcore::LlmError,
+    },
+    /// Internal: the compaction this turn asked for is over — landed or
+    /// skipped, the turn resumes either way and reads the folded state.
+    CompactFinished { turn: u64 },
+    /// Internal: the summary sub sessions were waiting on has been taken and
+    /// delivered; the turn resumes.
+    SummaryDone { turn: u64 },
     /// Internal: one dispatched tool call answered (or timed out inside its
     /// own toolbox). Carried per call rather than per batch so a fast tool's
     /// result is durable while a slow one still runs.
@@ -194,6 +215,116 @@ pub enum TaskListCommand {
     /// Internal: the turn routed the `task_list` tool here; answered with
     /// [`RunCommand::ToolReturned`] exactly like a timer tool.
     ToolCall(ComponentToolCall),
+}
+
+/// The per-turn runtime and context setup.
+pub enum ProvisionCommand {
+    /// The turn asked for its contexts: rehydrate the runtime, reconnect MCP,
+    /// scan the workspace, compose and filter the toolbox.
+    Provide(Box<ProvideJob>),
+    /// Internal: the spawned setup finished.
+    Provided(Box<ProvidedOutcome>),
+}
+
+/// What a provision run needs beyond the shared context.
+pub struct ProvideJob {
+    pub turn: u64,
+    /// The turn's cancel token, so a stop reaches the most hang-prone work.
+    pub cancel: tokio_util::sync::CancellationToken,
+}
+
+/// What the spawned setup produced.
+pub struct ProvidedOutcome {
+    pub turn: u64,
+    pub outcome: Result<Box<TurnCtx>, crate::agent_loop::ContextError>,
+}
+
+/// Folding old history behind a summary boundary.
+pub enum CompactionCommand {
+    /// A compaction was asked for — by the turn's budget check (`manual:
+    /// false`) or by a queued `/compact` (`manual: true`).
+    Compact(Box<CompactJob>),
+    /// Internal: the spawned compaction run finished.
+    Landed(Box<CompactLanding>),
+}
+
+/// Everything a compaction run needs beyond the shared state — handed over by
+/// the turn, which holds the per-turn contexts.
+pub struct CompactJob {
+    pub turn: u64,
+    pub manual: bool,
+    pub instructions: Option<String>,
+    /// The last provider call's prompt size — what the boundary records as
+    /// `tokens_before`. The turn's in-memory figure, which state does not
+    /// carry mid-turn.
+    pub tokens_before: u32,
+    pub budget: Option<horsie_agentcore::CompactionBudget>,
+    pub provider: std::sync::Arc<dyn horsie_agentcore::LlmProvider>,
+    pub conversation_id: String,
+    /// For the Pre/PostCompact hooks the run fires.
+    pub context_provider: std::sync::Arc<dyn crate::agent_loop::ContextProvider>,
+    pub cancel: tokio_util::sync::CancellationToken,
+}
+
+/// What the spawned compaction run produced.
+pub struct CompactLanding {
+    pub turn: u64,
+    pub outcome: CompactOutcome,
+}
+
+pub enum CompactOutcome {
+    /// A boundary to journal.
+    Compacted(Box<CompactedData>),
+    /// Nothing was folded — nothing to fold, a hook refused, or the summarise
+    /// failed. `notice` says whether to tell the user (a typed `/compact`
+    /// deserves an answer; the automatic check declining is routine).
+    Skipped {
+        notice: bool,
+        context_tokens: u32,
+        retain_tokens: Option<u32>,
+    },
+}
+
+/// What a compaction run produced, ready to journal as
+/// [`AgentDomainEvent::Compacted`].
+pub struct CompactedData {
+    pub summary: String,
+    pub carried_state: String,
+    pub retained_from_message_id: Option<String>,
+    pub trigger: horsie_agentcore::CompactionTrigger,
+    pub instructions: Option<String>,
+    pub tokens_before: u32,
+    pub tokens_after: u32,
+}
+
+/// Everything a sub-session summary run needs beyond the shared state.
+pub struct SummaryJob {
+    pub turn: u64,
+    /// Every sub session seeded from this one summary. They share a branch
+    /// point, so they are entitled to share the provider call.
+    pub sub_sessions: Vec<uuid::Uuid>,
+    pub provider: std::sync::Arc<dyn horsie_agentcore::LlmProvider>,
+    pub conversation_id: String,
+    pub cancel: tokio_util::sync::CancellationToken,
+}
+
+/// Everything one turn's steps share, built once by the provision component.
+pub struct TurnCtx {
+    pub provider: std::sync::Arc<dyn horsie_agentcore::LlmProvider>,
+    /// The fully-composed, selection-filtered toolbox remote calls dispatch
+    /// through. Component tools never reach it — the turn routes them to
+    /// their components first.
+    pub toolbox: std::sync::Arc<dyn horsie_agentcore::Toolbox>,
+    /// What the model is shown, already filtered.
+    pub specs: Vec<horsie_agentcore::ToolSpec>,
+    /// The component-claimed tool names that survived the filter.
+    pub inline_names: std::collections::HashSet<String>,
+    pub system_prompt: String,
+    pub budget: Option<horsie_agentcore::CompactionBudget>,
+    pub conversation_id: String,
+    pub thinking_effort: Option<horsie_agentcore::ThinkingEffort>,
+    /// For the compaction hooks a compact run fires.
+    pub context_provider: std::sync::Arc<dyn crate::agent_loop::ContextProvider>,
 }
 
 /// One tool call the turn routed to a component instead of the toolbox.
@@ -309,6 +440,16 @@ pub enum SeedCommand {
         seed: Option<Box<Message>>,
         message: crate::agent_loop::Incoming,
         reply: ReplyTo<Result<(), String>>,
+    },
+    /// Take the summary the sub sessions queued into this turn are waiting
+    /// on — a bare summarise run over the branch point's history, sharing the
+    /// compaction component's summarise machinery.
+    TakeSummary(Box<SummaryJob>),
+    /// Internal: the spawned summary run finished.
+    SummaryTaken {
+        turn: u64,
+        sub_sessions: Vec<uuid::Uuid>,
+        result: Result<String, String>,
     },
 }
 
