@@ -72,6 +72,13 @@ pub(crate) struct Scratch {
     /// per turn: a rehydrated runtime, a reconnected MCP server or a changed
     /// prompt all arrive this way.
     pub ctx_stale: bool,
+    /// The tool calls the actor has dispatched and not yet heard back from.
+    /// In-memory only: a crash mid-batch recovers by repairing the journal,
+    /// never by re-running a side effect.
+    pub calls: Vec<DispatchedCall>,
+    /// Calls that ended the run (`ask_user`, `submit_result`), collected as
+    /// the batch settles; the turn interprets them once nothing is in flight.
+    pub stopped: Vec<horsie_agentcore::StoppedCall>,
     /// What the next provider call should say about tool use. Taken when a
     /// turn starts, so it applies to exactly one turn. Set only when re-running
     /// a turn that ended without the result it owed.
@@ -91,6 +98,8 @@ impl Scratch {
             cancel: CancellationToken::new(),
             ctx: None,
             ctx_stale: true,
+            calls: Vec::new(),
+            stopped: Vec::new(),
             pending_tool_choice: None,
             deltas: Vec::new(),
         }
@@ -126,6 +135,10 @@ impl Scratch {
         self.cancel = CancellationToken::new();
         self.work = self.work.wrapping_add(1);
         self.running = None;
+        // The batch died with its turn: the dying tasks' reports are fenced
+        // out, and the conclusion repairs whatever dangles.
+        self.calls.clear();
+        self.stopped.clear();
         // Whatever the cancel interrupted may have been holding a runtime that
         // is going away; the next work builds its own.
         self.ctx_stale = true;
@@ -164,6 +177,14 @@ pub struct RoutedToolCall {
     pub input: serde_json::Value,
     /// Answers the toolbox's `execute`, exactly as any remote tool answers.
     pub reply: horsie_actor::ReplyTo<Result<serde_json::Value, horsie_agentcore::ToolCallError>>,
+}
+
+/// One tool call the actor has dispatched, kept until it answers — the name
+/// and input a stopper is reported with.
+pub(crate) struct DispatchedCall {
+    pub id: String,
+    pub name: String,
+    pub input: serde_json::Value,
 }
 
 /// A toolbox whose tools run on the actor's own mailbox.
@@ -385,4 +406,17 @@ pub(crate) trait Component {
     /// Nothing here persists; anything that needs to journal arrives as an
     /// ordinary command.
     async fn on_load(&mut self, _cx: &mut Cx<'_>) {}
+
+    /// The toolbox this component vends, if it has tools to offer.
+    ///
+    /// The actor collects these at provisioning time and composes them ahead
+    /// of the runtime's — the one place the whole tool surface is assembled.
+    /// Most components vend nothing.
+    fn toolbox(
+        &self,
+        _actor: horsie_actor::ActorRef<AgentCommand>,
+        _work: u64,
+    ) -> Option<std::sync::Arc<dyn horsie_agentcore::Toolbox>> {
+        None
+    }
 }

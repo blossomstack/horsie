@@ -89,14 +89,6 @@ pub enum RunCommand {
         work: u64,
         error: horsie_agentcore::LlmError,
     },
-    /// Internal: one dispatched tool call answered (or timed out inside its
-    /// own toolbox). Carried per call rather than per batch so a fast tool's
-    /// result is durable while a slow one still runs.
-    ToolReturned {
-        work: u64,
-        tool_call_id: String,
-        outcome: ToolReturn,
-    },
     /// Internal: one chunk of the message a step is streaming. Unjournaled;
     /// carries the work generation so a cancelled step's stragglers are
     /// dropped instead of polluting the next message's delta buffer.
@@ -328,6 +320,18 @@ pub enum SeedCommand {
 
 /// The actor's own lifetime.
 pub enum CoreCommand {
+    /// Internal: one dispatched tool call answered (or timed out inside its
+    /// own toolbox). Carried per call rather than per batch so a fast tool's
+    /// result is durable while a slow one still runs.
+    ///
+    /// A `Core` command because the *actor* dispatches tool calls and takes
+    /// the answers — the turn only makes provider calls; what the model asked
+    /// for is run at the level that holds the composed toolbox.
+    ToolReturned {
+        work: u64,
+        tool_call_id: String,
+        outcome: ToolReturn,
+    },
     /// Internal: reconsider what this agent should be doing. The one thing
     /// any component may say, and it names nobody — see
     /// [`Components::advance`](super::component::Components::advance). Told by

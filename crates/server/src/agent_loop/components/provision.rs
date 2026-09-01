@@ -22,14 +22,17 @@ use std::sync::Arc;
 pub(crate) struct Provision;
 
 impl Provision {
-    /// Build this agent's contexts on a spawned task.
-    pub(crate) fn start(&mut self, cx: &mut Cx<'_>) {
+    /// Build this agent's contexts on a spawned task. `vended` is every
+    /// toolbox the actor collected from its components, generation already
+    /// baked in — a cancel makes them refuse their own calls.
+    pub(crate) fn start(
+        &mut self,
+        vended: Vec<Arc<dyn Toolbox>>,
+        cx: &mut Cx<'_>,
+    ) {
         let (work, cancel) = cx.scratch.begin(WorkKind::Provisioning);
         let self_ref = cx.actor.self_ref();
-        // The toolboxes the components vend, provisioned like everything
-        // else. Built here so the generation is baked in: a cancel makes
-        // these toolboxes refuse their own calls.
-        let vended = vended_toolboxes(self_ref.clone(), work);
+        let _ = work;
         let context_provider = cx.runtime.context_provider.clone();
         let configured_prompt = cx.params.system_prompt.clone();
         let run_def_tools = cx.params.tools.clone();

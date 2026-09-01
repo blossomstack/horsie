@@ -61,21 +61,6 @@ impl PartState for TimerState {
     }
 }
 
-/// The timer toolbox, vended by this component: `set_timer`, `list_timers`,
-/// `cancel_timer`, each running on the actor and answered like any remote
-/// tool.
-pub(crate) fn toolbox(
-    actor: horsie_actor::ActorRef<AgentCommand>,
-    work: u64,
-) -> std::sync::Arc<dyn horsie_agentcore::Toolbox> {
-    crate::agent_loop::component::ActorToolbox::new(
-        domain::timer_tool_specs(),
-        |call| AgentCommand::Timer(TimerCommand::ToolCall(call)),
-        actor,
-        work,
-    )
-}
-
 /// Spawn a one-shot sleep that tells the actor `TimerFired` after `delay`. The
 /// firing is journaled/handled on the mailbox; a stale fire (timer since
 /// cancelled) is ignored there, so an un-cancellable sleep task is harmless.
@@ -260,6 +245,21 @@ impl Component for Timers {
             }
             _ => {}
         }
+    }
+
+    /// The timer toolbox: `set_timer`, `list_timers`, `cancel_timer`, each
+    /// running on the actor and answered like any remote tool.
+    fn toolbox(
+        &self,
+        actor: horsie_actor::ActorRef<AgentCommand>,
+        work: u64,
+    ) -> Option<std::sync::Arc<dyn horsie_agentcore::Toolbox>> {
+        Some(crate::agent_loop::component::ActorToolbox::new(
+            domain::timer_tool_specs(),
+            |call| AgentCommand::Timer(TimerCommand::ToolCall(call)),
+            actor,
+            work,
+        ))
     }
 
     /// Every timer that survived, re-armed with its remaining delay — firing

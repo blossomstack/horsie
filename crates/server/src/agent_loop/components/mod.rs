@@ -188,10 +188,54 @@ impl Components {
             AgentCommand::TaskList(c) => self.task_lists.handle(c, cx).await,
             AgentCommand::Provision(c) => self.provision.handle(c, cx).await,
             AgentCommand::Compaction(c) => self.compaction.handle(c, cx).await,
+            AgentCommand::Core(CoreCommand::ToolReturned {
+                work,
+                tool_call_id,
+                outcome,
+            }) => self.tool_returned(work, tool_call_id, outcome, cx).await,
             AgentCommand::Core(CoreCommand::Advance) => self.advance(cx).await,
             AgentCommand::Core(CoreCommand::Cancel { ack }) => self.cancel(ack, cx).await,
             AgentCommand::Core(CoreCommand::Shutdown) => return None,
         })
+    }
+
+    /// Every toolbox the components vend, asked of each in registry order.
+    ///
+    /// The actor collects them here and provisioning composes them ahead of
+    /// the runtime's, so a vended tool wins a name collision. Listing the
+    /// fields is deliberate: a component added to the struct is asked here or
+    /// this stops compiling nowhere — so the roster lists them all, and a
+    /// component with no tools answers `None` for free.
+    pub(crate) fn toolboxes(
+        &self,
+        actor: horsie_actor::ActorRef<AgentCommand>,
+        work: u64,
+    ) -> Vec<std::sync::Arc<dyn horsie_agentcore::Toolbox>> {
+        let Self {
+            provision,
+            timers,
+            turn,
+            queue,
+            reads,
+            log,
+            seed,
+            task_lists,
+            compaction,
+        } = self;
+        [
+            provision.toolbox(actor.clone(), work),
+            timers.toolbox(actor.clone(), work),
+            turn.toolbox(actor.clone(), work),
+            queue.toolbox(actor.clone(), work),
+            reads.toolbox(actor.clone(), work),
+            log.toolbox(actor.clone(), work),
+            seed.toolbox(actor.clone(), work),
+            task_lists.toolbox(actor.clone(), work),
+            compaction.toolbox(actor, work),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     /// Ask each component, in registration order, to repair what a dead
@@ -201,26 +245,6 @@ impl Components {
         self.timers.on_load(cx).await;
         self.turn.on_load(cx).await;
     }
-}
-
-/// The toolboxes the components vend — the timer toolbox, the task-list
-/// toolbox, whatever a component added later brings along.
-///
-/// Collected here because the roster is the one place that knows what
-/// components exist; each toolbox itself is its component's own, built by that
-/// component's `toolbox()`. Registered into the composed toolbox at
-/// provisioning time, ahead of the runtime's so a vended tool wins a name
-/// collision — and from there on nothing anywhere knows these tools are
-/// special: composed, filtered, dispatched and answered exactly as remote
-/// tools are.
-pub(crate) fn vended_toolboxes(
-    actor: horsie_actor::ActorRef<AgentCommand>,
-    work: u64,
-) -> Vec<std::sync::Arc<dyn horsie_agentcore::Toolbox>> {
-    vec![
-        timers::toolbox(actor.clone(), work),
-        task_list::toolbox(actor, work),
-    ]
 }
 
 impl Components {

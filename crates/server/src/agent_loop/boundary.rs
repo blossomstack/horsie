@@ -22,8 +22,13 @@
 //! reach the model on the next call rather than after the turn: every tool
 //! call is answered by the time this runs, so the queue may join in.
 
+use crate::agent_loop::component::DispatchedCall;
 use crate::agent_loop::prelude::*;
-use horsie_actor::{CommandEffect, ReplyTo};
+use horsie_actor::{ActorRef, CommandEffect, ReplyTo};
+use horsie_agentcore::{StoppedCall, ToolOutcome, Toolbox};
+use serde_json::Value;
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 /// Why the next provider call cannot happen yet.
 ///
@@ -52,12 +57,13 @@ impl Components {
         if !cx.scratch.ready {
             return CommandEffect::none();
         }
-        // 2. Anyone's veto.
+        // 2. Anyone's veto. The turn's — calls the model made that have no
+        //    answer — is also this actor's work order: whichever of them has
+        //    no task running yet is dispatched right here, because tool calls
+        //    are the actor's to run, not any component's.
         if let Some(blocked) = self.blocked(cx) {
             match blocked {
-                Blocked::ToolCalls(open) => {
-                    tracing::trace!(calls = ?open, "holding: tool calls are still running");
-                }
+                Blocked::ToolCalls(open) => self.dispatch_tools(open, cx),
                 Blocked::Parked => tracing::trace!("holding: parked on a question"),
             }
             return CommandEffect::none();
@@ -138,8 +144,104 @@ impl Components {
         if !cx.scratch.ctx_stale && cx.scratch.ctx.is_some() {
             return false;
         }
-        self.provision.start(cx);
+        // The actor gathers every toolbox its components vend and hands the
+        // lot to provisioning — the components never learn who composed them.
+        let vended = self
+            .toolboxes(cx.actor.self_ref(), cx.scratch.work);
+        self.provision.start(vended, cx);
         true
+    }
+
+    /// Run whichever of the model's open calls has no task yet.
+    ///
+    /// Idempotent like everything the boundary does: dispatched calls are in
+    /// `scratch.calls`, stoppers wait in `scratch.stopped`, and asking again
+    /// dispatches only what is genuinely new. Every call goes to the composed
+    /// toolbox — the actor cannot tell a component's tool from a remote one.
+    fn dispatch_tools(&mut self, open: Vec<String>, cx: &mut Cx<'_>) {
+        let Some(tctx) = cx.scratch.ctx.clone() else {
+            // A crash can land here: an interrupted turn's calls are repaired
+            // on load, but a raced report may leave one open before contexts
+            // exist. Provisioning first is always safe.
+            let _ = self.needs_contexts(cx);
+            return;
+        };
+        for id in open {
+            let in_flight = cx.scratch.calls.iter().any(|c| c.id == id)
+                || cx.scratch.stopped.iter().any(|c| c.tool_call_id == id);
+            if in_flight {
+                continue;
+            }
+            let Some((name, input)) = cx.state.tool_call_named(&id) else {
+                tracing::warn!(id, "an open tool call is not in the transcript");
+                continue;
+            };
+            cx.scratch.calls.push(DispatchedCall {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+            });
+            spawn_tool_call(
+                &tctx.toolbox,
+                name,
+                input,
+                id,
+                cx.scratch.work,
+                cx.scratch.cancel.clone(),
+                cx.actor.self_ref(),
+            );
+        }
+    }
+
+    /// One dispatched call answered. Journal the result; when the batch
+    /// settles on a stopper, hand the turn its ending.
+    pub(super) async fn tool_returned(
+        &mut self,
+        work: u64,
+        tool_call_id: String,
+        outcome: ToolReturn,
+        cx: &mut Cx<'_>,
+    ) -> CommandEffect<AgentDomainEvent> {
+        if !cx.scratch.live(work) {
+            tracing::warn!(work, tool_call_id, "dropping a superseded tool result");
+            return CommandEffect::none();
+        }
+        let position = cx.scratch.calls.iter().position(|c| c.id == tool_call_id);
+        let call = match position {
+            Some(position) => cx.scratch.calls.remove(position),
+            None => {
+                tracing::warn!(tool_call_id, "a tool result answered no dispatched call");
+                return CommandEffect::none();
+            }
+        };
+        let mut events = Vec::new();
+        match outcome {
+            ToolReturn::Result {
+                output,
+                is_error,
+                artifacts,
+            } => events.push(AgentDomainEvent::ToolComplete {
+                tool_call_id: call.id,
+                output,
+                is_error,
+                artifacts,
+                at_ms: horsie_models::now_ms(),
+            }),
+            // No result yet for a stopper: what it *means* is the turn's to
+            // decide, once nothing else is in flight.
+            ToolReturn::Stopped => cx.scratch.stopped.push(StoppedCall {
+                tool: call.name,
+                tool_call_id: call.id,
+                input: call.input,
+            }),
+        }
+        if cx.scratch.calls.is_empty() && !cx.scratch.stopped.is_empty() {
+            let stopped = std::mem::take(&mut cx.scratch.stopped);
+            return self.turn.ended_by_tools(events, stopped, cx).await;
+        }
+        // Ordinary results only: the persist lands, the advance that follows
+        // sees the batch shrink, and the last one clears the veto.
+        CommandEffect::persist(events)
     }
 
     /// Every part's veto, asked of each in turn.
@@ -176,3 +278,54 @@ impl Components {
         self.turn.cancelled(cx).await
     }
 }
+
+/// Dispatch one tool call on its own task — the actor's, for every kind of
+/// tool. Whether the toolbox guards
+/// its wire with timeouts is its own business; cancel is the rescue either
+/// way, and the fence drops whatever a dead turn's task still says.
+pub(super) fn spawn_tool_call(
+    toolbox: &Arc<dyn Toolbox>,
+    name: String,
+    input: Value,
+    tool_call_id: String,
+    work: u64,
+    cancel: CancellationToken,
+    self_ref: ActorRef<AgentCommand>,
+) {
+    let toolbox = toolbox.clone();
+    tokio::spawn(async move {
+        let result = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return,
+            result = toolbox.execute(&name, input.clone(), &tool_call_id) => result,
+        };
+        let outcome = match result {
+            // A string result is forwarded verbatim; re-encoding it as JSON
+            // would wrap it in quotes and escape every newline.
+            Ok(ToolOutcome::Result(v)) => ToolReturn::Result {
+                output: v
+                    .value
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| v.value.to_string()),
+                is_error: false,
+                artifacts: v.artifacts,
+            },
+            Ok(ToolOutcome::StopRun) => ToolReturn::Stopped,
+            // An error produced no artifacts by definition.
+            Err(e) => ToolReturn::Result {
+                output: e.to_string(),
+                is_error: true,
+                artifacts: Vec::new(),
+            },
+        };
+        let _ = self_ref
+            .tell(AgentCommand::Core(CoreCommand::ToolReturned {
+                work,
+                tool_call_id,
+                outcome,
+            }))
+            .await;
+    });
+}
+

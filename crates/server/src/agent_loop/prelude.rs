@@ -24,7 +24,6 @@ pub(crate) use crate::agent_loop::component::{
 };
 pub(crate) use crate::agent_loop::components::{
     ComponentState, Components, QueueState, TaskListPart, TimerState, TurnState, UsageState,
-    vended_toolboxes,
 };
 pub(crate) use crate::agent_loop::events::AgentDomainEvent;
 pub(crate) use crate::agent_loop::params::AgentParams;

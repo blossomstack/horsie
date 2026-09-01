@@ -2,15 +2,16 @@
 //!
 //! This file does not decide when a call happens —
 //! [`Components::advance`](super::boundary) does, and it calls
-//! [`Turn::run_step`]. What comes back is this component's: an assistant
-//! message to journal, tool calls to dispatch, or a turn that is over. Every
-//! report is fenced by the work generation, so a cancelled turn's stragglers
-//! are dropped.
+//! [`Turn::run_step`]. What comes back is this component's to *journal*: an
+//! assistant message, or a turn that is over. It is not this component's to
+//! run — the tool calls a message carries are dispatched by the actor, which
+//! reads them off the persisted state; this file hears nothing until a
+//! stopper hands it an ending. Every report is fenced by the work generation,
+//! so a cancelled turn's stragglers are dropped.
 //!
-//! Between calls this component holds nothing the agent depends on. Whether
-//! the next call may run is read off the state — the calls it made and the
-//! results they have — so a crash mid-batch and a live batch look identical,
-//! and a compaction that lands between two calls is invisible here.
+//! Between calls this component holds nothing the agent depends on, so a
+//! crash mid-batch and a live batch look identical, and a compaction that
+//! lands between two calls is invisible here.
 //!
 //! The second half of this file is the conclusion: what an ending *means* —
 //! a park, an ask, a submitted result, a contradiction — decided here because
@@ -24,7 +25,7 @@ use async_trait::async_trait;
 use horsie_actor::{ActorRef, CommandEffect, ReplyTo};
 use horsie_agentcore::{
     AgentEvent, AgentLogBody, EventSink, EventSinkError, LlmError, Message, StepError,
-    StepRequest, StoppedCall, ToolOutcome, Toolbox, Usage, extract_text, extract_tool_calls,
+    StepRequest, StoppedCall, Usage, extract_text, extract_tool_calls,
     tool_fingerprint,
 };
 use horsie_models::now_ms;
@@ -32,7 +33,6 @@ use serde_json::Value;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio_util::sync::CancellationToken;
 
 /// Defaults the old loop carried in its config; still server policy.
 const MAX_ITERATIONS: u32 = 100;
@@ -160,18 +160,6 @@ pub(crate) struct TurnFlight {
     usage: Usage,
     /// The last call's prompt size alone — what is loaded in context now.
     context_tokens: u32,
-    /// Calls that ended the run, collected as their batch settles.
-    stopped: Vec<StoppedCall>,
-    /// The names and inputs of the calls dispatched for the current message,
-    /// so a stopper can be reported with what it asked for.
-    dispatched: Vec<PendingCall>,
-}
-
-/// A dispatched call, kept only until it answers.
-struct PendingCall {
-    id: String,
-    name: String,
-    input: Value,
 }
 
 /// Forwards streamed text chunks to the mailbox, tagged with the turn so a
@@ -236,8 +224,6 @@ impl Turn {
             fingerprints: VecDeque::new(),
             usage: Usage::without_cache(0, 0),
             context_tokens: cx.state.context_tokens(),
-            stopped: Vec::new(),
-            dispatched: Vec::new(),
         })
     }
 
@@ -493,34 +479,11 @@ impl Turn {
             return CommandEffect::persist(events);
         }
 
-        // Dispatch the batch. Every call — a component's own tool and a
-        // remote one alike — goes to the composed toolbox on a spawned task
-        // and answers with `ToolReturned`. This file cannot tell them apart,
-        // which is the point.
-        let Some(tctx) = cx.scratch.ctx.clone() else {
-            return CommandEffect::persist(events);
-        };
-        let work = cx.scratch.work;
-        let cancel = cx.scratch.cancel.clone();
-        let self_ref = cx.actor.self_ref();
-        let mut dispatched = Vec::new();
-        for (id, name, input) in tool_calls {
-            dispatched.push(PendingCall {
-                id: id.clone(),
-                name: name.clone(),
-                input: input.clone(),
-            });
-            spawn_tool_call(
-                &tctx.toolbox,
-                name,
-                input,
-                id,
-                work,
-                cancel.clone(),
-                self_ref.clone(),
-            );
-        }
-        self.flight(cx).dispatched = dispatched;
+        // Tool calls are not dispatched here — running what the model asked
+        // for is the actor's job, not this component's. The message persists,
+        // the advance that follows finds the calls open in the state, and the
+        // actor runs them. This component hears nothing until they have all
+        // answered.
         CommandEffect::persist(events)
     }
 
@@ -565,63 +528,14 @@ impl Turn {
         .await
     }
 
-    /// One dispatched tool call answered.
-    ///
-    /// Journaling the result is the whole of it: the log is where an
-    /// unanswered call is visible, so closing one there is what lets the
-    /// boundary make the next call. The one thing that cannot be journaled is
-    /// a *stopper* — a call that ends the run has no result by design — so
-    /// those are collected here and read when the batch settles.
-    async fn handle_tool_returned(
+    /// The batch settled on a stopper: the actor ran the calls, one of them
+    /// ended the run, and what that *means* is decided here.
+    pub(crate) async fn ended_by_tools(
         &mut self,
-        tool_call_id: String,
-        outcome: ToolReturn,
+        mut events: Vec<AgentDomainEvent>,
+        stopped: Vec<StoppedCall>,
         cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
-        let flight = self.flight(cx);
-        let position = flight.dispatched.iter().position(|c| c.id == tool_call_id);
-        let call = match position {
-            Some(position) => flight.dispatched.remove(position),
-            // A call this incarnation never dispatched — a repair the fold
-            // already answered, or a component's call answered by its own
-            // journal. Either way the log is the record, not this list.
-            None => PendingCall {
-                id: tool_call_id,
-                name: String::new(),
-                input: Value::Null,
-            },
-        };
-        let mut events = Vec::new();
-        match outcome {
-            ToolReturn::Result {
-                output,
-                is_error,
-                artifacts,
-            } => events.push(AgentDomainEvent::ToolComplete {
-                tool_call_id: call.id,
-                output,
-                is_error,
-                artifacts,
-                at_ms: now_ms(),
-            }),
-            // No result is recorded for a stopper: the dangling `tool_use` is
-            // what an answer arrives against later.
-            ToolReturn::Stopped => flight.stopped.push(StoppedCall {
-                tool: call.name,
-                tool_call_id: call.id,
-                input: call.input,
-            }),
-        }
-        let folded = Components::apply_all(cx.state, &events);
-        if !folded.open_tool_calls().is_empty() {
-            return CommandEffect::persist(events);
-        }
-        // The batch settled. A batch of ordinary results ends here — the
-        // boundary makes the next call — and only a stopper ends the turn.
-        let stopped = std::mem::take(&mut self.flight(cx).stopped);
-        if stopped.is_empty() {
-            return CommandEffect::persist(events);
-        }
         events.push(self.run_complete());
         let folded = Components::apply_all(cx.state, &events);
         self.finish(
@@ -677,17 +591,6 @@ impl Component for Turn {
                     return CommandEffect::none();
                 }
                 self.handle_llm_failed(error, cx).await
-            }
-            RunCommand::ToolReturned {
-                work,
-                tool_call_id,
-                outcome,
-            } => {
-                if !cx.scratch.live(work) {
-                    tracing::warn!(work, tool_call_id, "dropping a superseded tool result");
-                    return CommandEffect::none();
-                }
-                self.handle_tool_returned(tool_call_id, outcome, cx).await
             }
             RunCommand::StreamDelta { work, text } => {
                 // The fence again: a dead turn's chunks must not pollute the
@@ -833,55 +736,6 @@ impl Component for Turn {
     }
 }
 
-/// Dispatch one remote tool call on its own task. Whether the toolbox guards
-/// its wire with timeouts is its own business; cancel is the rescue either
-/// way, and the fence drops whatever a dead turn's task still says.
-fn spawn_tool_call(
-    toolbox: &Arc<dyn Toolbox>,
-    name: String,
-    input: Value,
-    tool_call_id: String,
-    work: u64,
-    cancel: CancellationToken,
-    self_ref: ActorRef<AgentCommand>,
-) {
-    let toolbox = toolbox.clone();
-    tokio::spawn(async move {
-        let result = tokio::select! {
-            biased;
-            () = cancel.cancelled() => return,
-            result = toolbox.execute(&name, input.clone(), &tool_call_id) => result,
-        };
-        let outcome = match result {
-            // A string result is forwarded verbatim; re-encoding it as JSON
-            // would wrap it in quotes and escape every newline.
-            Ok(ToolOutcome::Result(v)) => ToolReturn::Result {
-                output: v
-                    .value
-                    .as_str()
-                    .map(str::to_string)
-                    .unwrap_or_else(|| v.value.to_string()),
-                is_error: false,
-                artifacts: v.artifacts,
-            },
-            Ok(ToolOutcome::StopRun) => ToolReturn::Stopped,
-            // An error produced no artifacts by definition.
-            Err(e) => ToolReturn::Result {
-                output: e.to_string(),
-                is_error: true,
-                artifacts: Vec::new(),
-            },
-        };
-        let _ = self_ref
-            .tell(AgentCommand::Run(RunCommand::ToolReturned {
-                work,
-                tool_call_id,
-                outcome,
-            }))
-            .await;
-    });
-}
-
 /// How many turns an agent that owes a result may end without one before the
 /// step is failed. Two: the first nudge is a plain message, the second forces
 /// `submit_result` in `tool_choice`, and a model that defeats both is not going
@@ -890,7 +744,9 @@ pub(crate) const MAX_RESULT_NUDGES: u32 = 2;
 
 #[derive(Debug)]
 pub(crate) enum Conclusion {
-    Output(Value),
+    /// The step's result, and the `submit_result` call that carried it —
+    /// `None` when the run stopped with no calls at all.
+    Output(Value, Option<String>),
     /// One or more questions, all parked on together.
     Ask(Vec<AskedQuestion>),
     /// Two turn-enders at once. The calls are named so each can be told why.
@@ -959,7 +815,7 @@ impl Turn {
             }
             RunOutcome::Stopped { calls } => {
                 match Self::interpret(calls) {
-                    Conclusion::Output(output) => {
+                    Conclusion::Output(output, submitted) => {
                         parent
                             .deliver(AgentOutcome::UsageRecorded {
                                 agent,
@@ -978,6 +834,19 @@ impl Turn {
                         // could not have been warned about at the tool
                         // boundary, where its own timers are invisible.
                         let mut events = Vec::new();
+                        // The submitting call gets its result *journaled*: a
+                        // dangling `tool_use` left behind would read as an
+                        // open call to the next turn — and an actor that runs
+                        // open calls would submit this result a second time.
+                        if let Some(tool_call_id) = submitted {
+                            events.push(AgentDomainEvent::ToolComplete {
+                                tool_call_id,
+                                output: "result submitted".to_string(),
+                                is_error: false,
+                                artifacts: Vec::new(),
+                                at_ms: now_ms(),
+                            });
+                        }
                         if !state.timers().is_empty() {
                             events.push(AgentDomainEvent::TimerCancelled {
                                 ids: state.timers().iter().map(|t| t.id.clone()).collect(),
@@ -1092,7 +961,7 @@ impl Turn {
     /// reason they are separate tools rather than one with a `kind` field.
     pub(crate) fn interpret(calls: Vec<StoppedCall>) -> Conclusion {
         if calls.is_empty() {
-            return Conclusion::Output(Value::Null);
+            return Conclusion::Output(Value::Null, None);
         }
         // Several questions in one turn is ordinary: they are asked together
         // and answered together.
@@ -1135,7 +1004,7 @@ impl Turn {
         if let [only] = calls.as_slice()
             && only.tool == SUBMIT_RESULT_TOOL
         {
-            return Conclusion::Output(only.input.clone());
+            return Conclusion::Output(only.input.clone(), Some(only.tool_call_id.clone()));
         }
         // Finishing *and* asking, or submitting twice: contradictory, and only
         // the model can resolve it. Every call gets an error result, so nothing

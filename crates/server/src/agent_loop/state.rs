@@ -375,6 +375,29 @@ impl AgentState {
         open
     }
 
+    /// The name and input of the tool call `id`, read off the transcript —
+    /// what the actor needs to *run* an open call, scanned the same way
+    /// [`Self::open_tool_calls`] found it.
+    #[must_use]
+    pub fn tool_call_named(&self, id: &str) -> Option<(String, serde_json::Value)> {
+        self.transcript.entries().iter().rev().find_map(|e| {
+            let AgentLogBody::Llm(message) = &e.body else {
+                return None;
+            };
+            message.parts.iter().find_map(|part| match part {
+                horsie_agentcore::ContentPart::ToolCall(c) if c.id == id => {
+                    Some((c.name.clone(), c.input.clone()))
+                }
+                horsie_agentcore::ContentPart::ToolCall(_)
+                | horsie_agentcore::ContentPart::Text(_)
+                | horsie_agentcore::ContentPart::Thinking(_)
+                | horsie_agentcore::ContentPart::ToolResult(_)
+                | horsie_agentcore::ContentPart::SubAgentResult(_)
+                | horsie_agentcore::ContentPart::Artifact(_) => None,
+            })
+        })
+    }
+
     /// This agent's current values, for the agent document.
     #[must_use]
     pub fn state_view(&self) -> AgentStateView {
