@@ -33,11 +33,7 @@ pub(super) fn spawn_timer_sleep(
 }
 
 /// Execute one timer tool: the value it answers and the events that record it.
-///
-/// A free function over the folded state (plus the sleep it spawns), not a
-/// component method: it belongs to the timer *domain*, and the turn component
-/// calls it without touching any component instance.
-pub(super) fn execute_timer_tool(
+fn execute_timer_tool(
     folded: &AgentState,
     name: &str,
     input: &Value,
@@ -136,7 +132,12 @@ impl Component for Timers {
         cmd: TimerCommand,
         cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
-        let TimerCommand::TimerFired { id } = cmd;
+        let id = match cmd {
+            TimerCommand::ToolCall(call) => {
+                return answer_tool_call(call, cx, execute_timer_tool).await;
+            }
+            TimerCommand::TimerFired { id } => id,
+        };
         let Some(record) = cx.state.timers.iter().find(|t| t.id == id).cloned() else {
             // Cancelled or already removed — a stale sleep. Ignore.
             return CommandEffect::none();

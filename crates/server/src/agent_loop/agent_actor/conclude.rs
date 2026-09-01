@@ -450,7 +450,7 @@ impl Turn {
             .collect();
         let nudged = AgentDomainEvent::Nudged { at_ms };
         events.push(nudged);
-        let folded = fold_all(state, &events);
+        let folded = Components::apply_all(state, &events);
         if folded.nudges > MAX_RESULT_NUDGES {
             return CommandEffect::persist(events);
         }

@@ -1,24 +1,26 @@
-//! The `task_list` tool, decided on the mailbox.
+//! The task-list component.
 //!
 //! The data model and the pure state transitions live in
-//! [`crate::agent_loop::task_list`]. This is the agent-side half: the inline
-//! executor the turn routes to, and the fold. An apply-only module — it owns
-//! an event but no command, so it is not a component the actor holds.
+//! [`crate::agent_loop::task_list`]. This is the agent-side half: the
+//! `task_list` tool call the turn routes here, and the fold.
 //!
 //! The event carries the full resulting list rather than a delta, which is
 //! what lets replay skip re-deriving and re-validating every past mutation.
 
 use super::*;
+use async_trait::async_trait;
+use horsie_actor::{ActorRef, CommandEffect};
 use horsie_agentcore::{AgentLogBody, LifecycleEvent, TaskListLifecycle};
 use horsie_models::now_ms;
 use serde_json::Value;
 
 /// Execute the `task_list` tool: the rendered list it answers and the event
-/// that records the mutation. A free function over the folded state — no
-/// toolbox wrapper, no ask round-trip, no component instance.
-pub(super) fn execute_task_list_tool(
+/// that records the mutation.
+fn execute_task_list_tool(
     folded: &AgentState,
+    _name: &str,
     input: &Value,
+    _self_ref: ActorRef<AgentCommand>,
 ) -> Result<(Value, Vec<AgentDomainEvent>), horsie_agentcore::ToolCallError> {
     let action = crate::agent_loop::task_list::TaskListAction::from_input(input)?;
     let mut next = folded.task_list.clone();
@@ -37,8 +39,22 @@ pub(super) fn execute_task_list_tool(
     }
 }
 
-/// The agent's own task list — the fold's owner for its one event.
+/// The agent's own task list.
 pub(super) struct TaskLists;
+
+#[async_trait]
+impl Component for TaskLists {
+    type Command = TaskListCommand;
+
+    async fn handle(
+        &mut self,
+        cmd: TaskListCommand,
+        cx: &mut Cx<'_>,
+    ) -> CommandEffect<AgentDomainEvent> {
+        let TaskListCommand::ToolCall(call) = cmd;
+        answer_tool_call(call, cx, execute_task_list_tool).await
+    }
+}
 
 impl TaskLists {
     /// The list as the mutation left it — folded into the agent's state, and

@@ -81,6 +81,8 @@ pub enum AgentCommand {
     Run(RunCommand),
     /// Timers this agent has armed against itself.
     Timer(TimerCommand),
+    /// The agent's own task list.
+    TaskList(TaskListCommand),
     /// Questions answered from state, which wake nothing.
     Read(ReadCommand),
     /// Things written into this agent's log by somebody else.
@@ -175,13 +177,35 @@ pub enum ToolReturn {
     Stopped,
 }
 
-/// Timers this agent has armed against itself. The control tools are decided
-/// inline on the mailbox now; only the sleep's report remains a command.
+/// Timers this agent has armed against itself.
 pub enum TimerCommand {
+    /// Internal: the turn routed one of the timer tools here. The component
+    /// executes it, journals its own events, and answers the turn with
+    /// [`RunCommand::ToolReturned`].
+    ToolCall(ComponentToolCall),
     /// Internal: a timer's sleep elapsed.
     TimerFired {
         id: crate::agent_loop::timers::TimerId,
     },
+}
+
+/// The agent's own task list.
+pub enum TaskListCommand {
+    /// Internal: the turn routed the `task_list` tool here; answered with
+    /// [`RunCommand::ToolReturned`] exactly like a timer tool.
+    ToolCall(ComponentToolCall),
+}
+
+/// One tool call the turn routed to a component instead of the toolbox.
+///
+/// Carries the turn generation so a component never acts for a turn that has
+/// since been cancelled or superseded — the stale call is dropped, and the
+/// cancel already repaired its dangling `tool_use`.
+pub struct ComponentToolCall {
+    pub turn: u64,
+    pub tool_call_id: String,
+    pub name: String,
+    pub input: serde_json::Value,
 }
 
 /// Questions answered from state, which wake nothing.

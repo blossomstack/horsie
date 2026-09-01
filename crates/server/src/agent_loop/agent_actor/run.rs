@@ -201,8 +201,7 @@ struct WithInlineSpecs {
 impl Toolbox for WithInlineSpecs {
     fn specs(&self) -> Vec<ToolSpec> {
         let mut specs = self.inner.specs();
-        specs.extend(crate::agent_loop::timers::timer_tool_specs());
-        specs.push(crate::agent_loop::task_list::task_list_tool_spec());
+        specs.extend(component::component_tool_specs());
         specs
     }
 
@@ -212,18 +211,13 @@ impl Toolbox for WithInlineSpecs {
         input: Value,
         tool_call_id: &str,
     ) -> Result<ToolOutcome, horsie_agentcore::ToolCallError> {
-        if is_inline_name(name) {
+        if component::is_component_tool(name) {
             return Err(horsie_agentcore::ToolCallError::InvalidInput(format!(
-                "'{name}' is handled by the agent actor"
+                "'{name}' is handled by its component"
             )));
         }
         self.inner.execute(name, input, tool_call_id).await
     }
-}
-
-fn is_inline_name(name: &str) -> bool {
-    matches!(name, "set_timer" | "list_timers" | "cancel_timer")
-        || name == crate::agent_loop::task_list::TASK_LIST_TOOL
 }
 
 /// Forwards streamed text chunks to the mailbox, tagged with the turn so a
@@ -267,6 +261,7 @@ impl Turn {
         let cancel = CancellationToken::new();
         let id = self.next_turn_id;
         self.next_turn_id += 1;
+        cx.scratch.live_turn = Some(id);
         self.flight = Some(TurnFlight {
             id,
             cancel: cancel.clone(),
@@ -328,7 +323,7 @@ impl Turn {
                     let inline_names = specs
                         .iter()
                         .map(|s| s.name.clone())
-                        .filter(|n| is_inline_name(n))
+                        .filter(|n| component::is_component_tool(n))
                         .collect();
                     StepOutcome::Prepared(Box::new(TurnCtx {
                         provider: contexts.provider,
@@ -365,6 +360,7 @@ impl Turn {
     pub(super) fn clear_flight(&mut self, cx: &mut Cx<'_>) {
         self.flight = None;
         cx.scratch.turn_live = false;
+        cx.scratch.live_turn = None;
     }
 
     /// The turn in flight's id, for conclude's superseded-report guard.
@@ -424,7 +420,7 @@ impl Turn {
             context_tokens: flight.context_tokens,
             at_ms: now_ms(),
         });
-        let folded = fold_all(state, &events);
+        let folded = Components::apply_all(state, &events);
         self.finish(
             events,
             RunReport {
@@ -710,7 +706,7 @@ impl Turn {
                     tokens_after: data.tokens_after,
                     at_ms: now_ms(),
                 }];
-                let folded = fold_all(cx.state, &events);
+                let folded = Components::apply_all(cx.state, &events);
                 let Some(flight) = self.flight.as_mut() else {
                     return CommandEffect::none();
                 };
@@ -762,7 +758,7 @@ impl Turn {
                         at_ms: now_ms(),
                     });
                 }
-                let folded = fold_all(cx.state, &events);
+                let folded = Components::apply_all(cx.state, &events);
                 let (run_id, summarise_only) = (flight.id, flight.summarise_only);
                 match summarise_only {
                     true => {
@@ -820,7 +816,7 @@ impl Turn {
         let mut events = vec![AgentDomainEvent::MessageComplete {
             message: response.message.clone(),
         }];
-        let mut folded = fold_all(cx.state, &events);
+        let folded = Components::apply_all(cx.state, &events);
 
         // A truncated turn is not a finished turn. Tool calls are exempt: a
         // backend may report `length` alongside a complete tool call, and the
@@ -846,7 +842,7 @@ impl Turn {
                 at_ms: now_ms(),
             });
             let run_id = flight.id;
-            let folded = fold_all(cx.state, &events);
+            let folded = Components::apply_all(cx.state, &events);
             return self
                 .finish(
                     events,
@@ -900,74 +896,54 @@ impl Turn {
                 );
                 events.push(AgentDomainEvent::InputMessage { message });
             }
-            let folded = fold_all(cx.state, &events);
+            let folded = Components::apply_all(cx.state, &events);
             return self.dispatch_model_step(events, &folded, cx, None).await;
         }
 
-        // Route the batch: inline tools decided here on the mailbox, remote
-        // ones dispatched to spawned tasks that report back per call.
+        // Route the batch. A component-claimed tool becomes a command to its
+        // component; everything else goes to the toolbox on a spawned task.
+        // Both answer on the same channel — `ToolReturned` — so the batch
+        // bookkeeping cannot tell them apart.
         let inline_names = flight
             .ctxs
             .as_ref()
             .map(|c| c.inline_names.clone())
             .unwrap_or_default();
-        let mut remote: Vec<PendingCall> = Vec::new();
-        for (id, name, input) in tool_calls {
-            if inline_names.contains(&name) {
-                let executed = execute_inline(&folded, &name, &input, cx.actor.self_ref());
-                let (output, is_error, inline_events) = match executed {
-                    Ok((value, evs)) => (
-                        value
-                            .as_str()
-                            .map(str::to_string)
-                            .unwrap_or_else(|| value.to_string()),
-                        false,
-                        evs,
-                    ),
-                    Err(e) => (e.to_string(), true, Vec::new()),
-                };
-                for event in inline_events {
-                    folded = fold(folded, event.clone());
-                    events.push(event);
-                }
-                let complete = AgentDomainEvent::ToolComplete {
-                    tool_call_id: id,
-                    output,
-                    is_error,
-                    artifacts: Vec::new(),
-                    at_ms: now_ms(),
-                };
-                folded = fold(folded, complete.clone());
-                events.push(complete);
-            } else {
-                remote.push(PendingCall { id, name, input });
-            }
-        }
-
-        let Some(flight) = self.flight.as_mut() else {
-            return CommandEffect::persist(events);
-        };
-        if remote.is_empty() {
-            // The whole batch was inline; nothing will report back, so the
-            // next call dispatches now.
-            return self.dispatch_model_step(events, &folded, cx, None).await;
-        }
         let Some(tctx) = flight.ctxs.clone() else {
             return CommandEffect::persist(events);
         };
         let turn = flight.id;
         let cancel = flight.cancel.clone();
         let self_ref = cx.actor.self_ref();
-        for call in remote {
-            spawn_tool_call(
-                &tctx.toolbox,
-                call.name.clone(),
-                call.input.clone(),
-                call.id.clone(),
-                turn,
-                cancel.clone(),
-                self_ref.clone(),
-            );
+        for (id, name, input) in tool_calls {
+            let call = PendingCall {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+            };
+            // Claimed AND permitted: a filtered-out component tool still goes
+            // to the toolbox, whose filter answers "not permitted".
+            let routed = match inline_names.contains(&name) {
+                true => component::route_tool_call(ComponentToolCall {
+                    turn,
+                    tool_call_id: id,
+                    name,
+                    input,
+                }),
+                false => None,
+            };
+            match routed {
+                Some(cmd) => cx.tell(cmd).await,
+                None => spawn_tool_call(
+                    &tctx.toolbox,
+                    call.name.clone(),
+                    call.input.clone(),
+                    call.id.clone(),
+                    turn,
+                    cancel.clone(),
+                    self_ref.clone(),
+                ),
+            }
             flight.pending_calls.push(call);
         }
         CommandEffect::persist(events)
@@ -1055,7 +1031,7 @@ impl Turn {
                 input: call.input,
             }),
         }
-        let folded = fold_all(cx.state, &events);
+        let folded = Components::apply_all(cx.state, &events);
         if !flight.pending_calls.is_empty() {
             return CommandEffect::persist(events);
         }
@@ -1119,7 +1095,7 @@ impl Component for Turn {
                             context_tokens: flight.context_tokens,
                             at_ms: now_ms(),
                         }];
-                        let folded = fold_all(cx.state, &events);
+                        let folded = Components::apply_all(cx.state, &events);
                         self.finish(
                             events,
                             RunReport {
@@ -1408,20 +1384,4 @@ fn spawn_tool_call(
             }))
             .await;
     });
-}
-
-/// Execute one inline tool on the mailbox: the value it answers and the events
-/// that record it. Timers and the task list are decided here because their
-/// state is the agent's own — no ask round-trip, no toolbox wrapper. Both are
-/// pure domain functions over the state, not calls into another component.
-fn execute_inline(
-    folded: &AgentState,
-    name: &str,
-    input: &Value,
-    self_ref: ActorRef<AgentCommand>,
-) -> Result<(Value, Vec<AgentDomainEvent>), horsie_agentcore::ToolCallError> {
-    if name == crate::agent_loop::task_list::TASK_LIST_TOOL {
-        return task_list::execute_task_list_tool(folded, input);
-    }
-    timers::execute_timer_tool(folded, name, input, self_ref)
 }

@@ -189,7 +189,7 @@ impl Queue {
         let mut folded = state.clone();
         for (seq, record) in (state.hook_entry_count()..).zip(records) {
             let event = AgentDomainEvent::HookRan { record, seq, at_ms };
-            folded = fold(folded, event.clone());
+            folded = Components::apply(folded, event.clone());
             events.push(event);
         }
 

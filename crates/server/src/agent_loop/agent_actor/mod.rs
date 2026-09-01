@@ -48,7 +48,7 @@ pub use state::{AgentState, UsageTotal, hook_entry, hook_entry_id};
 pub use types::*;
 
 use compaction::{COMPACT_AT_PERCENT, COMPACT_RETAIN_PERCENT, Compaction};
-use component::{Component, Components, Cx, Scratch, fold, fold_all};
+use component::{Component, Components, Cx, Scratch, answer_tool_call};
 use log::LogWrites;
 use queue::Queue;
 use reads::Reads;
@@ -201,10 +201,11 @@ impl EventSourcedActor for AgentActor {
         AgentState::default()
     }
 
-    /// Fold one event into state — the shared [`component::fold`], so live
-    /// handling, replay and every component's own fold-forward agree.
+    /// Fold one event into state — [`Components::apply`], the event-side twin
+    /// of the registry's command routing, so live handling, replay and every
+    /// component's own fold-forward agree.
     fn apply_event(state: AgentState, event: AgentDomainEvent) -> AgentState {
-        fold(state, event)
+        Components::apply(state, event)
     }
 
     /// Hand the command to the component registry. The actor decides nothing
