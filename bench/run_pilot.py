@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
+import re  # noqa: F401  (used by run_one for vendor-name sanitising)
 import sys
 import time
 from dataclasses import dataclass, field
@@ -135,38 +135,49 @@ def cost_of(model: str, r: Result) -> float:
     ) / 1_000_000
 
 
+def turn_ended(entries: list[dict[str, Any]]) -> bool:
+    """Whether the transcript contains a completed turn.
+
+    `TurnEnded` is a real entry on the messages endpoint -- a `Lifecycle` body
+    whose `kind` is `TurnEnded`. That makes it the actual turn boundary, which
+    session *status* is not: a session is created `Provisioning`, and `Idle`
+    means both "has not started" and "has finished", so waiting on status alone
+    returns before the agent has read a single file.
+    """
+    for entry in entries:
+        body = entry.get("body") or {}
+        if body.get("type") != "Lifecycle":
+            continue
+        if (body.get("value") or {}).get("kind") == "TurnEnded":
+            return True
+    return False
+
+
 def wait_for_turn(h: Horsie, session_id: str, cfg: Config) -> tuple[str, dict[str, Any]]:
-    """Block until the session's first turn is over, and return its status.
+    """Block until the session's turn is over, and return its status.
 
-    **Status is not a turn boundary.** A session is created `Provisioning`,
-    and `Idle` means both "has not started" and "has finished" -- so polling for
-    `Idle` alone returns the instant the session exists, before the agent has
-    read a single file. Two independent guards, either of which is sufficient:
-
-    * we saw the session `Running` at least once, or
-    * usage is non-zero, which only happens once a turn has completed.
-
-    The right long-term answer is the SSE stream at `/events`, where a run's end
-    is an explicit `RunComplete`. Polling is here because a pilot should not
-    also be debugging a stream reader.
+    Status is polled because it is the cheap call, but it never *decides*
+    anything on its own: a terminal-looking status is only believed once the
+    transcript actually contains a `TurnEnded`. A failed session is terminal
+    either way -- there may be no turn to end.
     """
     deadline = time.monotonic() + cfg.timeout_s
-    seen_running = False
     detail: dict[str, Any] = {}
 
     while time.monotonic() < deadline:
         detail = h.get_session(session_id)
         status = detail.get("status", "")
 
-        if status == "Running":
-            seen_running = True
         if status in FAILED:
             return status, detail
 
-        usage = detail.get("usageTotal") or {}
-        turn_happened = seen_running or (usage.get("outputTokens") or 0) > 0
-        if status in TERMINAL and turn_happened:
-            return status, detail
+        if status in TERMINAL:
+            try:
+                page = h.read_messages(session_id, max_entries=1000)
+                if turn_ended((page or {}).get("entries") or []):
+                    return status, detail
+            except HorsieError:
+                pass  # transient read failure: keep waiting rather than lying
 
         time.sleep(cfg.poll_s)
 
@@ -174,24 +185,32 @@ def wait_for_turn(h: Horsie, session_id: str, cfg: Config) -> tuple[str, dict[st
 
 
 def last_assistant_text(h: Horsie, session_id: str) -> str:
-    """The text of the newest assistant entry, or "" if there is none.
+    """The text of the newest assistant message, or "" if there is none.
 
-    Entry shapes vary by kind, so this is deliberately forgiving: it walks the
-    page backwards and returns the first thing that looks like assistant text.
+    Walks the structure rather than pattern-matching the JSON. An assistant
+    entry is `body.type == "Llm"` with `body.value.role == "Assistant"`, and its
+    `parts` are tagged -- only `Text` parts are the reply. `Thinking` and
+    `ToolCall` parts also carry a `text` field, so anything that greps for
+    `"text"` silently returns reasoning instead of the answer.
     """
     try:
-        page = h.read_messages(session_id)
+        page = h.read_messages(session_id, max_entries=1000)
     except HorsieError:
         return ""
-    entries = (page or {}).get("entries") or []
-    for entry in reversed(entries):
-        blob = json.dumps(entry)
-        if '"assistant"' not in blob:
+    for entry in reversed((page or {}).get("entries") or []):
+        body = entry.get("body") or {}
+        if body.get("type") != "Llm":
             continue
-        text = "".join(re.findall(r'"text"\s*:\s*("(?:[^"\\]|\\.)*")', blob))
+        msg = body.get("value") or {}
+        if msg.get("role") != "Assistant":
+            continue
+        text = "".join(
+            (part.get("value") or {}).get("text") or ""
+            for part in msg.get("parts") or []
+            if part.get("type") == "Text"
+        )
         if text:
-            # Re-parse each captured JSON string so escapes come back as text.
-            return "".join(json.loads(s) for s in re.findall(r'"(?:[^"\\]|\\.)*"', text))
+            return text
     return ""
 
 
