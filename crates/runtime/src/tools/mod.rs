@@ -4,6 +4,7 @@ pub mod glob;
 pub mod grep;
 pub mod list_files;
 pub mod read_file;
+pub mod read_image;
 pub mod replace_lines;
 pub mod set_env;
 pub mod set_working_dir;
@@ -53,6 +54,10 @@ pub async fn dispatch(
         },
         ToolCall::ReadFile(i) => match dir {
             Ok(d) => read_file::exec(&d, i).await,
+            Err(reason) => return ToolResult::Err(ToolError { reason }),
+        },
+        ToolCall::ReadImage(i) => match dir {
+            Ok(d) => read_image::exec(&d, i).await,
             Err(reason) => return ToolResult::Err(ToolError { reason }),
         },
         ToolCall::WriteFile(i) => match dir {

@@ -417,6 +417,7 @@ pub trait ToolboxFactory: Send + Sync + 'static {
         workspace_names: Vec<String>,
         use_plugins: bool,
         mcp: crate::agent_loop::McpToolboxes,
+        artifacts: Option<crate::agent_loop::ArtifactSink>,
     ) -> Arc<dyn Toolbox>;
 }
 
@@ -431,23 +432,23 @@ impl ToolboxFactory for DefaultToolboxFactory {
         workspace_names: Vec<String>,
         use_plugins: bool,
         mcp: crate::agent_loop::McpToolboxes,
+        artifacts: Option<crate::agent_loop::ArtifactSink>,
     ) -> Arc<dyn Toolbox> {
         let client = runtime_client.clone();
-        let runtime = add_runtime_tools(ToolboxImpl::new(), runtime_client);
+        let runtime = add_runtime_tools(ToolboxImpl::new(), runtime_client.clone());
+        let image = crate::agent_loop::ReadImageToolbox::new(runtime_client, artifacts);
         // The runtime tools and any server-side MCP toolboxes, flattened into
         // one tool set. MCP names are not governed by a selection — see
         // `crate::tools` — so nothing narrows them here.
-        let composed: Arc<dyn Toolbox> = if mcp.is_empty() {
-            Arc::new(runtime)
-        } else {
-            // Composed even when *every* server failed: the composite is what
-            // knows why they are missing, and a bare runtime toolbox would
-            // answer a call for one with "no tool named …" all over again.
-            let mut boxes: Vec<Arc<dyn Toolbox>> = Vec::with_capacity(1 + mcp.boxes.len());
-            boxes.push(Arc::new(runtime));
-            boxes.extend(mcp.boxes);
-            Arc::new(CompositeToolbox::new(boxes).with_unavailable(mcp.unavailable))
-        };
+        // Composed even when every MCP server failed: the composite is what
+        // knows why they are missing. It also carries `read_image`, whose raw
+        // runtime bytes have to be stored before they become a tool artifact.
+        let mut boxes: Vec<Arc<dyn Toolbox>> = Vec::with_capacity(2 + mcp.boxes.len());
+        boxes.push(Arc::new(runtime));
+        boxes.push(Arc::new(image));
+        boxes.extend(mcp.boxes);
+        let composed: Arc<dyn Toolbox> =
+            Arc::new(CompositeToolbox::new(boxes).with_unavailable(mcp.unavailable));
         // No filtering here any more: the selection is applied once, outermost,
         // in `AgentActor` — see `FilteredToolbox`. Narrowing at this depth was
         // what confined a selection to runtime and MCP tools.
@@ -760,10 +761,12 @@ mod tests {
             vec!["october".into()],
             false,
             crate::agent_loop::McpToolboxes::default(),
+            None,
         );
         let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
         assert!(names.contains(&"bash".to_string()));
         assert!(names.contains(&"read_file".to_string()));
+        assert!(names.contains(&crate::agent_loop::READ_IMAGE_TOOL.to_string()));
     }
 
     #[test]
@@ -774,6 +777,7 @@ mod tests {
             vec!["october".into()],
             false,
             crate::agent_loop::McpToolboxes::default(),
+            None,
         );
         let tb = FilteredToolbox::apply(inner, Some(&["bash".to_string()]));
         let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
@@ -820,6 +824,7 @@ mod tests {
             vec!["october".into()],
             false,
             crate::agent_loop::McpToolboxes::default(),
+            None,
         );
         let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
         assert!(names.contains(&SKILL_TOOL.to_string()));
@@ -837,6 +842,7 @@ mod tests {
             vec!["october".into()],
             false,
             crate::agent_loop::McpToolboxes::default(),
+            None,
         );
 
         // Single workspace → `workspace` may be omitted.
@@ -886,6 +892,7 @@ mod tests {
             vec!["alpha".into(), "beta".into()],
             false,
             crate::agent_loop::McpToolboxes::default(),
+            None,
         );
         // Omitting `workspace` with several workspaces is rejected before any
         // scan.
@@ -927,6 +934,7 @@ mod tests {
             vec!["october".into()],
             true,
             crate::agent_loop::McpToolboxes::default(),
+            None,
         );
         let body = tb
             .execute(
@@ -959,6 +967,7 @@ mod tests {
             vec!["october".into()],
             false,
             crate::agent_loop::McpToolboxes::default(),
+            None,
         );
         let err = tb
             .execute(
@@ -982,6 +991,7 @@ mod tests {
             vec!["october".into()],
             true,
             crate::agent_loop::McpToolboxes::default(),
+            None,
         );
         let out = tb
             .execute(INSPECT_WORKSPACE_TOOL, json!({}), "tc1")
@@ -998,6 +1008,7 @@ mod tests {
             vec!["october".into()],
             false,
             crate::agent_loop::McpToolboxes::default(),
+            None,
         );
         let out = tb_off
             .execute(INSPECT_WORKSPACE_TOOL, json!({}), "tc1")

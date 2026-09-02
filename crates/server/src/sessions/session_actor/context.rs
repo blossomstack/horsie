@@ -1049,6 +1049,12 @@ impl ContextProvider for SessionContextProvider {
         // first box advertising a name, and a plugin declaring a server the
         // user already configured must not capture those calls, arguments and
         // all.
+        let artifact_sink = self.services.as_ref().map(|services| {
+            crate::agent_loop::ArtifactSink::new(
+                services.artifacts.clone(),
+                services.project.clone(),
+            )
+        });
         // A runtime-less agent hosts no plugin MCP servers: the runtime is what
         // runs them, so there is nothing to discover.
         if use_plugins && let Some(client) = &runtime_client {
@@ -1089,12 +1095,7 @@ impl ContextProvider for SessionContextProvider {
                             .push(Arc::new(crate::agent_loop::PluginMcpToolbox::new(
                                 client.clone(),
                                 discovery.tools,
-                                self.services.as_ref().map(|s| {
-                                    crate::agent_loop::ArtifactSink::new(
-                                        s.artifacts.clone(),
-                                        s.project.clone(),
-                                    )
-                                }),
+                                artifact_sink.clone(),
                             )));
                     }
                 }
@@ -1111,9 +1112,13 @@ impl ContextProvider for SessionContextProvider {
         // `inspect_workspace` — all three reach into a sandbox. What is left is
         // the server-side MCP set, which the layers below add to.
         let base: Arc<dyn Toolbox> = match &runtime_client {
-            Some(client) => {
-                DefaultToolboxFactory.for_agent(client.clone(), ws.names(), use_plugins, mcp)
-            }
+            Some(client) => DefaultToolboxFactory.for_agent(
+                client.clone(),
+                ws.names(),
+                use_plugins,
+                mcp,
+                artifact_sink,
+            ),
             None => runtime_less_toolbox(mcp),
         };
         let (with_memory, memory_index) =

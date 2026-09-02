@@ -18,6 +18,7 @@ mod context;
 mod hook_translation;
 mod inbox;
 mod mcp_toolbox;
+mod read_image_toolbox;
 mod task_list;
 mod timers;
 mod workspace;
@@ -46,6 +47,7 @@ pub use inbox::{
 pub use mcp_toolbox::{
     ArtifactSink, CompositeToolbox, McpToolbox, McpToolboxes, McpUnavailable, PluginMcpToolbox,
 };
+pub use read_image_toolbox::{READ_IMAGE_TOOL, ReadImageToolbox};
 pub use task_list::{
     TASK_LIST_TOOL, TaskListAction, TaskListState, TaskRecord, TaskStatus, task_list_tool_spec,
     wire_task,

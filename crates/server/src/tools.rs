@@ -76,6 +76,10 @@ const fn write(name: &'static str, description: &'static str) -> Row {
 const RUNTIME: &[Row] = &[
     write("bash", "Run a shell command in the session's runtime."),
     read("read_file", "Read a file, optionally a line range of it."),
+    read(
+        crate::agent_loop::READ_IMAGE_TOOL,
+        "Load an image file for the model to view.",
+    ),
     write("write_file", "Create or overwrite a file."),
     write("find_and_replace", "Replace text within a file."),
     write("replace_lines", "Replace a range of lines in a file."),
@@ -470,6 +474,7 @@ mod tests {
         for name in [
             crate::agent_loop::SKILL_TOOL,
             crate::agent_loop::INSPECT_WORKSPACE_TOOL,
+            crate::agent_loop::READ_IMAGE_TOOL,
             crate::agent_loop::TASK_LIST_TOOL,
             crate::sessions::spawn_tool::SPAWN_AGENT_TOOL,
             crate::sessions::spawn_tool::SUBAGENT_STATUS_TOOL,
