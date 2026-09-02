@@ -141,6 +141,8 @@ fn parse_endpoint(s: &str) -> Result<Endpoint, String> {
 }
 
 fn main() {
+    // Before anything opens an https:// or wss:// connection.
+    horsie_support::tls::install_crypto_provider();
     let cli = Cli::parse();
 
     // Credential mode: answer git and exit. Runs before endpoint parsing and

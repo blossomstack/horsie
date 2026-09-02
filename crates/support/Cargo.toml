@@ -25,6 +25,8 @@ hmac        = { workspace = true }
 hex         = { workspace = true }
 regex       = "1"
 reqwest     = { workspace = true }
+# Only to select the process-wide crypto provider; see `tls`.
+rustls      = { workspace = true }
 tokio       = { workspace = true, features = ["process", "io-util"] }
 tracing     = { workspace = true }
 url         = { workspace = true }

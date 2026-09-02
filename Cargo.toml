@@ -14,13 +14,16 @@ thiserror        = "2.0"
 tokio             = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "net", "time"] }
 tokio-util        = { version = "0.7" }
 tokio-stream      = { version = "0.1", features = ["sync"] }
-# `native-tls` is not optional: vendor processes and runtimes dial `wss://` URLs
-# whenever the session server sits behind HTTPS, and without a TLS feature
+# A TLS feature is not optional: vendor processes and runtimes dial `wss://`
+# URLs whenever the session server sits behind HTTPS, and without one
 # `connect_async` rejects those before any I/O ("TLS support not compiled in").
-# native-tls rather than rustls because reqwest's default-tls already links it
-# into every one of these binaries, and it reads the OS trust store — so a
-# self-hosted server behind a private CA works once that CA is trusted here.
-tokio-tungstenite = { version = "0.30", features = ["native-tls"] }
+#
+# `rustls-tls-native-roots` rather than `native-tls`: *native-roots* is the load
+# bearing half, not *native-tls*. It pulls `rustls-native-certs`, which reads the
+# same OS trust store — so a self-hosted server behind a private CA still works
+# once that CA is trusted on the machine. What it drops is the OpenSSL C library
+# underneath, which is what made a static musl build need a vendored OpenSSL.
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 futures-util      = "0.3"
 # The bus a clustered deployment publishes through. Default features off: the
 # defaults pull a synchronous connection stack this never uses, and everything
@@ -48,7 +51,11 @@ tracing           = "0.1"
 # anything; the rest of the default feature set is the plain formatter.
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url               = "2"
-reqwest           = { version = "0.12", features = ["json"] }
+# Default features off to keep `default-tls` (and with it OpenSSL) out; the rest
+# of the default set is re-listed. TLS comes from rustls with the OS trust store,
+# matching tokio-tungstenite above so every binary links one TLS stack.
+rustls            = { version = "0.23", default-features = false, features = ["ring"] }
+reqwest           = { version = "0.12", default-features = false, features = ["json", "charset", "http2", "system-proxy", "rustls-tls-native-roots"] }
 eventsource-stream    = "0.2.3"
 reqwest-eventsource = "0.6.0"
 tempfile          = "3"
