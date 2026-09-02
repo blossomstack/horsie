@@ -1,175 +1,135 @@
-# SWE-bench pilot (velos)
+# Terminal-Bench adapter for horsie
 
-Ten SWE-bench Verified instances through a horsie server, one velos container
-per task. About **$30–40 on Opus 5**. Its job is to break on the integration
-problems before a full 500-task run costs ~$2,000 to discover the same ones.
+Runs [Terminal-Bench](https://github.com/laude-institute/terminal-bench) tasks
+against a horsie server, so horsie can be measured the way other coding-agent
+harnesses are.
 
-It is deliberately not the benchmark harness. It answers four questions:
+**Status: working.** `hello-world` passes end to end against a live server —
+Terminal-Bench builds the task container, the adapter drives a real horsie
+session, and the task's own pytest suite scores it green.
 
-1. Do the task containers boot and dial back in?
-2. Can we tell reliably when a turn is finished?
-3. Does a usable patch come out the other end?
-4. **Is prompt caching actually working?** This is the one that decides whether
-   a full run costs $2k or $12k.
+## Why it looks different from every other agent
 
-## Read this first: velos and architecture
+Every other Terminal-Bench agent installs a CLI in the task container and types
+at it through tmux. horsie is inverted: the **agent runs on a horsie server**,
+and only a thin runtime lives in the container, dialling *out* to reach it.
 
-velos executes containers through **Apple Containerization**, which runs
-`linux/arm64` guests and does not emulate x86_64. SWE-bench's official
-evaluation images are published for **`linux/amd64` only**. They will not run on
-velos as it stands.
+So the adapter works both sides at once:
 
-`build_images.py` preflights every base image's manifest and refuses to build
-one that has no manifest for the target platform, because the failure otherwise
-arrives late and unreadable: the container boots, dies on `exec`, and what you
-see from horsie is a session that never leaves `Provisioning`.
-
-Three real options, in the order I'd consider them:
-
-**A. Pick a benchmark that doesn't ship amd64-only images.** Terminal-Bench
-builds its task images from Dockerfiles you control, and many are plain
-Debian + apt — arch-agnostic. It is also the better test of a *harness* rather
-than a model, which is what horsie is. This is the cheapest path to a real
-number and it needs no changes anywhere.
-
-**B. Add a Docker/containerd backend to velos, and run x86_64 Linux workers.**
-The `ContainerRuntime` trait already exists (`velos/crates/runtime/src/lib.rs`)
-and is five methods: `run`/`stop`/`start`/`remove`/`list`. veloslet currently
-shells out to Apple's `container` CLI. This is the "additional runtimes and
-platforms" the velos README already names as planned, and it unlocks the whole
-published-benchmark ecosystem, not just SWE-bench.
-
-**C. Rebuild the SWE-bench environments for arm64.** Possible for many
-instances via SWE-bench's own build tooling, but not all — some pin x86-only
-wheels. The deeper cost is not engineering: a rebuilt environment is not the
-published one, so **the resulting scores are not comparable to anyone else's**,
-which removes most of the reason to run SWE-bench at all.
-
-The rest of this file assumes you have images that run on your workers.
-
-## Why one vendor per task (and why that's a workaround)
-
-The container image is a field on the **vendor**, not on the session. SWE-bench
-ships a different image per instance, so as things stand the only way to vary it
-per task is a throwaway vendor per task. That is what the pilot does.
-
-It works today and needs no server change, but it is churn in service of a
-missing feature. Three ways out, cheapest first:
-
-- **One image per *repo* rather than per instance.** SWE-bench Verified spans
-  about a dozen repositories. Build one image per repo with that project's
-  dependencies, and get the per-instance checkout from
-  `environment.value.repos[].gitRef` instead of from the image. A dozen vendors,
-  not five hundred. The catch is real: dependency pins drift across commits
-  within a repo, which is precisely why SWE-bench builds per-instance images —
-  so expect some instances to fail on environment rather than on reasoning, and
-  measure that rate before trusting the score.
-- **An image override on the session's environment spec.** One vendor, N images,
-  no vendor churn. A small, contained change to horsie and the honest fix.
-- **A generic image plus `repos`, letting the agent install dependencies.**
-  Simplest, and the worst science: install failures become model failures, and
-  the number stops meaning what SWE-bench's number means.
-
-## What it needs
-
-| Variable | Meaning |
+| Where | What |
 |---|---|
-| `HORSIE_URL` | Server base URL. Default `http://localhost:3789` |
-| `HORSIE_TOKEN` | Bearer token — `horsie auth login`, or a device token |
-| `HORSIE_PROJECT` | Project id. Default `default` |
-| `VELOS_URL` | velos control-plane root, e.g. `http://velos:8080` |
-| `VELOS_TOKEN` | velos admin token. Omit if velos runs without auth |
-| `HORSIE_CALLBACK_URL` | `ws://…/api/runtime/connect` — the URL a **container** reaches horsie on |
-| `BENCH_IMAGE_TEMPLATE` | e.g. `registry.example.com/bench:swebench-{instance_id}` |
-| `BENCH_RUNTIME_BIN` | Path to `horsie-runtime` inside the image |
+| In the container | Install `horsie` + `horsie-runtime`, run `horsie connect` — which publishes the container as a runtime vendor |
+| On the host | Create a session against that vendor and drive it over the HTTP API |
 
-`HORSIE_CALLBACK_URL` is the one people get wrong. It must be reachable from
-**velos's container network**, not from your laptop — those are different
-addresses, and a loopback URL is rejected at save time rather than accepted and
-then failing later as an unexplained session timeout.
+The tmux session is used only for setup. There is nothing to type at.
 
-velos's launch spec carries no registry credentials, so the worker must be able
-to pull the image on its own: public, or `container` already logged in.
-
-The horsie server also needs a model provider configured with a real API key. A
-fresh server has none and cannot run a turn without one.
+Two consequences worth knowing. The container needs to reach the horsie server
+and **nothing else** — that is one outbound websocket, so a task environment
+with no general internet is fine as long as that one host is routable. And the
+asciinema recording will be near-empty, because the work happens through
+horsie's runtime rather than the pane; scoring is unaffected, since
+Terminal-Bench grades by running the task's tests.
 
 ## Running it
 
 ```bash
-# 1. Real task rows from the dataset (nothing invented).
-python3 bench/fetch_tasks.py --count 10
+uv venv && uv pip install terminal-bench
 
-# 2. Build the runtime for the workers' platform, WITHOUT the sandbox feature --
-#    the container is already the isolation boundary, and a second one inside it
-#    only breaks the runtime's own writes.
-cargo build --release --no-default-features \
-    --target aarch64-unknown-linux-musl -p horsie-runtime
+# Static binaries -- see "The glibc problem" below. Alpine's native target is
+# musl, so no --target flag is needed.
+docker run --rm -v "$PWD":/src -w /src \
+    -e OPENSSL_STATIC=1 -e OPENSSL_DIR=/usr rust:alpine sh -c \
+    'apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static perl make && \
+     cargo build --release -p horsie --bin horsie && \
+     cargo build --release --no-default-features -p horsie-runtime --bin horsie-runtime'
 
-# 3. Bake it into each task image and push. Preflights the manifests first.
-python3 bench/build_images.py \
-    --runtime target/aarch64-unknown-linux-musl/release/horsie-runtime \
-    --registry registry.example.com/bench
+export HORSIE_URL=https://your-horsie-server
+export HORSIE_TOKEN=...        # horsie auth login, or a device token
+export HORSIE_PROJECT=1
+export HORSIE_BIN_DIR=$PWD/target/release
 
-# 4. Smoke one task first. Twenty minutes here saves the other nine.
-python3 bench/run_pilot.py --limit 1 --keep
-
-# 5. The rest.
-python3 bench/run_pilot.py --model claude-opus-5 --effort high
+PYTHONPATH=/path/to/bench tb run \
+    --dataset-path tasks --task-id hello-world \
+    --agent-import-path tb_agent.horsie_agent:HorsieAgent \
+    --agent-kwarg model_name=<alias> \
+    --n-concurrent 1
 ```
 
-Patches land in `bench/out/patches/*.diff`; per-task status, timing, tokens and
-cost land in `bench/out/results.json`. Scoring is the official evaluator's job —
-this produces its input, it does not grade anything.
+Secrets come from the environment, never from `--agent-kwarg`, so they stay out
+of Terminal-Bench's run manifests.
 
-## The three things that will bite
+| `--agent-kwarg` | Default | Meaning |
+|---|---|---|
+| `model_name` | *(required)* | Model alias as configured on the server |
+| `workdir` | `/app` | Workspace the agent operates in |
+| `binaries_dir` | `$HORSIE_BIN_DIR` | Directory holding static `horsie` + `horsie-runtime` |
+| `timeout_sec` | `1200` | Wall clock for the turn |
+| `connect_timeout_sec` | `90` | How long to wait for the vendor to announce itself |
+| `effort` | server default | Thinking effort |
+| `max_iterations` | server default | Cap on agent loop iterations |
 
-**`horsie-runtime` must be inside the image, at the path the vendor names.** A
-velos container's entrypoint `exec`s `runtimeBin` directly, so there is no hook
-to fetch it at boot. `BENCH_RUNTIME_BIN` and `build_images.py --runtime-bin`
-must agree, or the container dies on exec.
+## The glibc problem
 
-**Cleanup is load-bearing on velos.** Deleting the **session** is what destroys
-the container and frees the worker slot. velos exposes no container listing, so
-horsie has no orphan sweep to catch one that got skipped — a leaked container
-sits on the pool until something happens to create the same name again. `--keep`
-leaves both behind on purpose for debugging; remember to clean up by hand after.
+**Every published horsie Linux binary is dynamically linked against glibc
+≥ 2.38.** Terminal-Bench's own base image (`python-3-13:20250620`) is Debian
+bookworm — glibc 2.36 — so the network installer cannot work there. This is not
+a Terminal-Bench quirk; bookworm and Ubuntu 22.04 are extremely common bases.
 
-**Status is not a turn boundary.** A session is created `Provisioning`, and
-`Idle` means both "has not started" and "has finished" — so waiting for `Idle`
-alone returns before the agent has read a single file. `wait_for_turn` guards
-with two independent signals: it saw `Running` at least once, or usage is
-non-zero. The clean fix is the SSE stream at `/events`, where a run's end is an
-explicit `RunComplete`.
+`install-horsie.sh` checks the version up front and fails with that sentence,
+because otherwise the binary installs cleanly and then dies with
+`GLIBC_2.38 not found` at first use, far from its cause.
 
-## Reading the output
+The fix is static musl binaries, built as shown above and passed via
+`binaries_dir`. They are ~17 MB each, statically linked, and run on any Linux of
+the right architecture including Alpine. The installer prefers them and only
+falls back to downloading when they are absent.
 
-The summary line that matters is the cache hit rate. Below ~50%, stop and find
-what is changing at the front of the prompt between turns — a timestamp or a
-session id near the top of the system prompt is the usual culprit. Caching is a
-prefix match, so one varying byte early invalidates everything after it, and the
-run silently costs 5–8× more.
+**horsie should publish musl builds.** Its release currently ships only
+`*-unknown-linux-gnu`, which excludes a large share of real-world container
+bases — a distribution gap this benchmark merely happened to expose first.
 
-Patch extraction is marker-delimited (`<<<HORSIE_BENCH_PATCH`). If several tasks
-come back with "no patch markers in the final message", the prompt is losing to
-the model's own formatting instincts — that is a real finding about the harness,
-not a script bug, and it is exactly the kind of thing this pilot is for.
+## What would make this simpler
 
-## Worth changing in horsie
+`horsie connect` runs a whole vendor agent inside the task container to publish
+one container that already exists. The mechanism underneath is more general than
+that: the server mints a dial token, puts it in the runtime's environment, and
+waits for the dial-back.
 
-Everything here runs against the server as it is today. These make a full run
-scriptable rather than clumsy, and each is small:
+An **external vendor kind** — one whose `create` returns the endpoint and token
+instead of launching anything, and whose `delete` is a no-op — would collapse
+this adapter to: mint, copy one static binary in, exec it. No CLI, no auth login
+inside the container, no vendor process. It is also how you would attach horsie
+to a CI job or a developer's running container, which is worth more than the
+benchmark.
 
-- **An image override on the environment spec** — removes the per-task vendor
-  churn entirely. See "Why one vendor per task" above.
-- **`horsie vendors list|save|test|delete`** — the control operations already
-  exist and are reachable over HTTP; the CLI has no commands for them. This is
-  the only reason the pilot talks raw JSON at all.
-- **A session-create path that takes a model directly.** `horsie agent invoke`
-  needs an agent *preset*, so an ad-hoc "this model, this vendor, this message"
-  run has no CLI form.
-- **`horsie session wait <id>`** — block until the run completes, exit non-zero
-  on failure. Every non-interactive use of horsie needs this, not just
-  benchmarking.
-- **`--json` on `session status`** — it currently renders a human table, so
-  usage and cost have to be re-fetched over HTTP to be counted.
+## Files
+
+| File | Purpose |
+|---|---|
+| `tb_agent/horsie_agent.py` | The `BaseAgent` subclass Terminal-Bench loads |
+| `tb_agent/install-horsie.sh` | Runs in the container: static binaries or download, then log in |
+| `horsie_client.py` | Minimal horsie HTTP client — sessions, messages, vendors |
+| `horsie_turn.py` | Waiting for a turn to actually end, and reading its result |
+
+## Two things that were wrong before real data corrected them
+
+**`TurnEnded` is on the wire.** It appears on `GET /sessions/{id}/messages` as a
+`Lifecycle` body with `value.kind == "TurnEnded"`. Session *status* is not a
+turn boundary: a session is created `Provisioning`, and `Idle` means both "has
+not started" and "has finished", so waiting on status alone returns before the
+agent has read a single file. `wait_for_turn` polls status because it is cheap
+but only believes it once the transcript contains a `TurnEnded`.
+
+**Assistant parts are tagged, and the role is capitalised.** An assistant entry
+is `body.type == "Llm"` with `body.value.role == "Assistant"`. Its `parts` carry
+a `type`, and only `Text` is the reply — `Thinking` and `ToolCall` parts also
+have a `text` field, so anything that greps the JSON for `"text"` silently
+returns the model's reasoning instead of its answer.
+
+## Cost accounting
+
+`usage_of()` reports input, output, and cache tokens; `reports_cache()` says
+whether the provider reported cache accounting **at all**. Absent cache numbers
+and a genuine 0% hit rate are different findings and must not collapse into the
+same value — the ChatGPT/codex backend reports input and output only, and
+reading that as "0% cache hits" would raise a false alarm on every run.
