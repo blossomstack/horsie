@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Run a handful of SWE-bench instances through a horsie server, one Fly
-machine per task, and write a patch per instance for the official evaluator.
+"""Run a handful of SWE-bench instances through a horsie server, one velos
+container per task, and write a patch per instance for the official evaluator.
 
 This is a *pilot*, not the benchmark harness. Its job is to surface the
 integration problems -- image baking, turn-completion detection, patch
@@ -97,11 +97,12 @@ class Config:
     token: str
     project: str
     model: str
-    fly_app: str
-    fly_token: str
+    velos_url: str
+    velos_token: str | None
     callback_url: str
     image_template: str
-    cpus: int
+    runtime_bin: str
+    cpu: int
     memory_mb: int
     timeout_s: int
     poll_s: float
@@ -219,8 +220,8 @@ def extract_patch(text: str) -> str:
 
 def run_one(cfg: Config, task: dict[str, Any]) -> Result:
     instance_id = task["instance_id"]
-    # Fly machine names are `horsie-{runtime_id}`, and a vendor name lands in
-    # paths -- keep it boring.
+    # velos containers are named `horsie-{runtime_id}` and a vendor name lands
+    # in paths -- keep it boring.
     vendor = "bench-" + re.sub(r"[^a-zA-Z0-9-]", "-", instance_id).lower()[:40]
     image = cfg.image_template.format(instance_id=instance_id)
     repo_dir = task.get("repo_dir", "/testbed")
@@ -231,14 +232,15 @@ def run_one(cfg: Config, task: dict[str, Any]) -> Result:
     session_id = ""
 
     try:
-        h.save_vendor_fly(
+        h.save_vendor_velos(
             vendor,
-            app=cfg.fly_app,
+            server_url=cfg.velos_url,
             image=image,
             callback_url=cfg.callback_url,
-            credential=cfg.fly_token,
-            cpus=cfg.cpus,
+            credential=cfg.velos_token,
+            cpu=cfg.cpu,
             memory_mb=cfg.memory_mb,
+            runtime_bin=cfg.runtime_bin,
         )
 
         probe = h.test_vendor(vendor) or {}
@@ -292,9 +294,11 @@ def run_one(cfg: Config, task: dict[str, Any]) -> Result:
         r.seconds = round(time.monotonic() - started, 1)
         r.cost_usd = round(cost_of(cfg.model, r), 4)
         if not cfg.keep:
-            # Order matters: deleting the session releases the runtime, and a
-            # vendor deleted while a session still points at it leaves the
-            # machine to the orphan sweep instead of shutting it down now.
+            # Order matters, and on velos it matters more than elsewhere.
+            # Deleting the *session* is what destroys the container and frees
+            # the worker slot. velos exposes no container listing, so there is
+            # no orphan sweep to catch one that got skipped -- it would sit on
+            # the pool until something happened to create the same name again.
             for cleanup in (
                 lambda: h.delete_session(session_id) if session_id else None,
                 lambda: h.delete_vendor(vendor),
@@ -314,7 +318,7 @@ def main() -> int:
     p.add_argument("--limit", type=int, default=0, help="run only the first N tasks")
     p.add_argument("--timeout", type=int, default=1800, help="seconds per task")
     p.add_argument("--poll", type=float, default=5.0)
-    p.add_argument("--cpus", type=int, default=2)
+    p.add_argument("--cpu", type=int, default=2)
     p.add_argument("--memory-mb", type=int, default=4096)
     p.add_argument("--out", type=Path, default=Path("bench/out"))
     p.add_argument(
@@ -329,12 +333,15 @@ def main() -> int:
         token=env("HORSIE_TOKEN"),
         project=env("HORSIE_PROJECT", required=False, default="default"),
         model=args.model,
-        fly_app=env("FLY_APP"),
-        fly_token=env("FLY_API_TOKEN"),
+        velos_url=env("VELOS_URL"),
+        velos_token=env("VELOS_TOKEN", required=False) or None,
         callback_url=env("HORSIE_CALLBACK_URL"),
         image_template=env("BENCH_IMAGE_TEMPLATE"),
-        cpus=args.cpus,
+        cpu=args.cpu,
         memory_mb=args.memory_mb,
+        runtime_bin=env(
+            "BENCH_RUNTIME_BIN", required=False, default="/usr/local/bin/horsie-runtime"
+        ),
         timeout_s=args.timeout,
         poll_s=args.poll,
         keep=args.keep,

@@ -57,27 +57,30 @@ class Horsie:
 
     # ----------------------------------------------------------------- vendors
 
-    def save_vendor_fly(
+    def save_vendor_velos(
         self,
         name: str,
         *,
-        app: str,
+        server_url: str,
         image: str,
         callback_url: str,
         credential: str | None,
-        region: str = "iad",
-        cpus: int = 2,
+        cpu: int = 2,
         memory_mb: int = 4096,
-        cpu_kind: str = "shared",
+        runtime_bin: str = "/usr/local/bin/horsie-runtime",
         workspace_root: str = "/workspaces",
     ) -> Any:
-        """Create or fully replace a Fly vendor. ``PUT`` is the only verb: a
+        """Create or fully replace a velos vendor. ``PUT`` is the only verb: a
         vendor row is a connection setting keyed by name, so re-saving is how a
         rotated token is applied.
 
-        ``volumes`` is off deliberately. A volume exists so a hibernated runtime
-        keeps its workspace; a benchmark task is used once and destroyed, so a
-        volume here is only a resource to leak.
+        ``callback_url`` is the ``ws://`` URL a container reaches the horsie
+        server on **from velos's container network** -- not necessarily the
+        address a browser uses.
+
+        ``credential`` may be ``None``: a velos deployment running without auth
+        need not serve ``/auth/v1/me`` at all, and the vendor treats its 404 as
+        "no auth here" rather than "your token is wrong".
         """
         return self._request(
             "PUT",
@@ -86,18 +89,15 @@ class Horsie:
                 "name": name,
                 "credential": credential,
                 "settings": {
-                    "kind": "Fly",
+                    "kind": "Velos",
                     "value": {
-                        "app": app,
+                        "serverUrl": server_url,
                         "image": image,
-                        "region": region,
+                        "runtimeBin": runtime_bin,
                         "workspaceRoot": workspace_root,
                         "callbackUrl": callback_url,
-                        "volumes": False,
-                        "cpuKind": cpu_kind,
-                        "cpus": cpus,
+                        "cpu": cpu,
                         "memoryMb": memory_mb,
-                        "volumeSizeGb": 1,
                     },
                 },
             },
