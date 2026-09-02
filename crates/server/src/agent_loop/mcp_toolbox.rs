@@ -35,6 +35,18 @@ impl ArtifactSink {
         Self { service, project }
     }
 
+    /// Store one named blob, returning the message-safe reference.
+    pub async fn store_one(
+        &self,
+        bytes: Vec<u8>,
+        filename: Option<String>,
+    ) -> Result<ArtifactRef, String> {
+        self.service
+            .put(&self.project, bytes, filename)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     /// Store every blob, keeping the ones that made it.
     ///
     /// A blob that will not store is logged and skipped rather than failing the

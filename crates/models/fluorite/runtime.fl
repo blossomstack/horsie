@@ -12,6 +12,7 @@ use hooks.HookRecord;
 // workspace or the shared plugin library.
 struct BashInput { command: String, timeout_secs: Option<u64> }
 struct ReadFileInput { path: String, start_line: Option<u64>, end_line: Option<u64> }
+struct ReadImageInput { path: String }
 struct WriteFileInput { path: String, content: String }
 
 // Content-based find/replace. `regex` (default false) switches `find` from a
@@ -41,6 +42,7 @@ struct SetEnvInput { name: String, value: Option<String> }
 union ToolCall {
     Bash(BashInput),
     ReadFile(ReadFileInput),
+    ReadImage(ReadImageInput),
     WriteFile(WriteFileInput),
     FindAndReplace(FindAndReplaceInput),
     ReplaceLines(ReplaceLinesInput),
@@ -414,7 +416,8 @@ struct ToolOutput {
     stdout: String,
     stderr: String,
     exit_code: i32,
-    /// Bytes the call produced that are not text — an MCP screenshot block.
+    /// Bytes the call produced that are not text — an MCP screenshot block or
+    /// an image read from the workspace.
     /// Bytes rather than references because the runtime has no database: it
     /// ships what it got and the server stores it, so what a message ends up
     /// holding is an `ArtifactRef` and never this.

@@ -88,6 +88,7 @@ async fn scan_composes_prompt_and_exposes_skill_tool() {
         ws.names(),
         false,
         horsie_server::agent_loop::McpToolboxes::default(),
+        None,
     );
     let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
     assert!(names.contains(&"bash".to_string()));
@@ -118,6 +119,7 @@ async fn empty_workspace_yields_plain_prompt_but_tools_present() {
         ws.names(),
         false,
         horsie_server::agent_loop::McpToolboxes::default(),
+        None,
     );
     let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
     assert!(names.contains(&"skill".to_string()));

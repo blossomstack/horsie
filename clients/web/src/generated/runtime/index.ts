@@ -1,6 +1,7 @@
 
 export * from './bashInput';
 export * from './readFileInput';
+export * from './readImageInput';
 export * from './writeFileInput';
 export * from './findAndReplaceInput';
 export * from './replaceLinesInput';
