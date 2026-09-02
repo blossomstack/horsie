@@ -376,19 +376,33 @@ def main() -> int:
     produced = sum(1 for r in results if r.ok)
     total = sum(r.cost_usd for r in results)
     cache_read = sum(r.cache_read_tokens for r in results)
+    cache_write = sum(r.cache_creation_tokens for r in results)
     fresh = sum(r.input_tokens for r in results)
-    hit_rate = cache_read / (cache_read + fresh) if (cache_read + fresh) else 0.0
 
     print()
     print(f"patches produced : {produced}/{len(results)}")
     print(f"total cost       : ${total:.2f}  (mean ${total / max(len(results), 1):.2f}/task)")
-    print(f"cache hit rate   : {hit_rate:.0%}")
-    if hit_rate < 0.5:
+
+    # Absent cache numbers and a genuine 0% hit rate are different findings, and
+    # only one of them is a problem. The ChatGPT backend reports input/output
+    # tokens and nothing else, so treating "no fields" as "no hits" would raise
+    # a false alarm on every run against it.
+    if cache_read == 0 and cache_write == 0:
+        print("cache            : not reported by this provider")
         print()
-        print("  Cache hit rate is low. Something in the prompt prefix is changing")
-        print("  between turns -- a timestamp or a session id near the front of the")
-        print("  system prompt is the usual cause. Fix this before a full run: it is")
-        print("  the difference between a $1.5k run and a $10k one.")
+        print("  No cache accounting means no way to tell a working cache from a")
+        print("  broken one. Before committing to a full run on a metered API, do")
+        print("  one pass on a provider that reports it -- caching is the difference")
+        print("  between a $2k run and a $12k one, and it fails silently.")
+    else:
+        hit_rate = cache_read / (cache_read + fresh) if (cache_read + fresh) else 0.0
+        print(f"cache hit rate   : {hit_rate:.0%}")
+        if hit_rate < 0.5:
+            print()
+            print("  Cache hit rate is low. Something in the prompt prefix is changing")
+            print("  between turns -- a timestamp or a session id near the front of the")
+            print("  system prompt is the usual cause. Fix this before a full run: it is")
+            print("  the difference between a $2k run and a $12k one.")
     print()
     print(f"patches in {cfg.out_dir / 'patches'} -- hand them to the official evaluator.")
     return 0 if produced else 1
