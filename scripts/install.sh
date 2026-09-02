@@ -11,9 +11,30 @@ set -eu
 REPO="blossomstack/horsie"
 BINDIR="${BINDIR:-$HOME/.local/bin}"
 
+# On Linux, pick musl when the local glibc is too old for the -gnu build (or
+# when there is no glibc at all, as on Alpine). The -gnu binaries need glibc
+# >= 2.38, which rules out Debian 12 and Ubuntu 22.04 -- both extremely common
+# container bases. Getting this wrong is not a download error: the binary
+# installs cleanly and then dies with `GLIBC_2.38 not found` at first use, far
+# from its cause.
+linux_libc() {
+  have=""
+  if command -v ldd >/dev/null 2>&1; then
+    have="$(ldd --version 2>&1 | head -1 | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+$' | tail -1)"
+  fi
+  # No detectable glibc version means musl, uclibc, or an ldd that does not
+  # report one. Static binaries run in all three cases; -gnu does not.
+  [ -n "$have" ] || { echo "musl"; return; }
+  if [ "$(printf '%s\n2.38\n' "$have" | sort -V | head -1)" = "2.38" ]; then
+    echo "gnu"
+  else
+    echo "musl"
+  fi
+}
+
 os() {
   case "$(uname -s)" in
-    Linux) echo "unknown-linux-gnu" ;;
+    Linux) echo "unknown-linux-$(linux_libc)" ;;
     Darwin) echo "apple-darwin" ;;
     *) echo "unsupported OS: $(uname -s)" >&2; exit 1 ;;
   esac
