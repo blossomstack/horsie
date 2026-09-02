@@ -174,6 +174,13 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+          # musl builds are statically linked, so they run on any Linux of the
+          # right architecture -- including images far older than the glibc the
+          # -gnu builds need, which is most real-world container bases.
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
           - runner: macos-latest
             target: aarch64-apple-darwin
           - runner: macos-latest # cross-compiled; Intel runners are being retired
@@ -187,8 +194,29 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
 
+      # Only the linker. Nothing here needs a C library beyond that, because
+      # the TLS stack is rustls -- an OpenSSL in the tree would need a
+      # musl-native one, which Ubuntu does not ship.
+      - name: Install the musl linker
+        if: ${{ contains(matrix.target, 'musl') }}
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+
       - name: Build
         run: cargo build --release --locked -p horsie -p horsie-runtime -p horsie-server --target ${{ matrix.target }}
+
+      # A -gnu build that is not dynamically linked, or a musl build that is,
+      # means the toolchain silently did something other than what was asked --
+      # and the symptom would otherwise be a user's container dying on exec.
+      - name: Verify linkage
+        run: |
+          out=$(file "target/${{ matrix.target }}/release/horsie")
+          echo "$out"
+          case "${{ matrix.target }}" in
+            *musl) echo "$out" | grep -q "statically linked" \
+                     || { echo "expected a static musl binary" >&2; exit 1; } ;;
+            *)     echo "$out" | grep -q "dynamically linked" \
+                     || { echo "expected a dynamically linked gnu binary" >&2; exit 1; } ;;
+          esac
 
       - name: Package
         run: |
