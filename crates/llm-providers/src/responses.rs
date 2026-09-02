@@ -223,6 +223,27 @@ struct ResponsesItemAcc {
     name: String,
 }
 
+/// Copy a Responses `usage` object onto the stream state.
+///
+/// `input_tokens` is stored as sent. This wire already counts the cached span
+/// inside its input total, which is the same normalization `Usage.input_tokens`
+/// documents -- so subtracting here would understate the prompt, and adding the
+/// cache figure on top would double-count it. Neither: store, then break it
+/// down.
+///
+/// `cache_read_tokens` stays `None` when the provider sent no
+/// `input_tokens_details`. A provider that reports no cache accounting is not a
+/// provider reporting zero cache hits, and flattening the two to `0` makes an
+/// unmeasured cache indistinguishable from a broken one.
+fn record_usage(state: &mut ResponsesStreamState, usage: &async_llm::responses::ResponsesUsage) {
+    state.usage.input_tokens = usage.input_tokens;
+    state.usage.output_tokens = usage.output_tokens;
+    state.usage.cache_read_tokens = usage
+        .input_tokens_details
+        .as_ref()
+        .map(|details| details.cached_tokens);
+}
+
 struct ResponsesStreamState {
     items: BTreeMap<usize, ResponsesItemAcc>,
     parts: Vec<ContentPart>,
@@ -555,15 +576,13 @@ impl ResponsesProvider {
             }
             ResponsesStreamEvent::Completed { response } => {
                 if let Some(usage) = response.usage {
-                    state.usage.input_tokens = usage.input_tokens;
-                    state.usage.output_tokens = usage.output_tokens;
+                    record_usage(state, &usage);
                 }
                 return Ok(Some(responses_stop_reason(state, false)));
             }
             ResponsesStreamEvent::Incomplete { response } => {
                 if let Some(usage) = response.usage {
-                    state.usage.input_tokens = usage.input_tokens;
-                    state.usage.output_tokens = usage.output_tokens;
+                    record_usage(state, &usage);
                 }
                 return Ok(Some(responses_stop_reason(state, true)));
             }
@@ -771,5 +790,66 @@ mod artifact_tests {
             "{:?}",
             content[0]
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod usage_tests {
+    //! What a Responses `usage` object becomes on the way to `Usage`.
+    use super::*;
+    use async_llm::responses::{ResponsesInputTokensDetails, ResponsesUsage};
+
+    fn record(usage: &ResponsesUsage) -> Usage {
+        let mut state = ResponsesStreamState::default();
+        record_usage(&mut state, usage);
+        state.usage
+    }
+
+    /// The distinction the `Option` exists for. A provider that sends no
+    /// details reports *nothing* about caching; reading that as a zero hit rate
+    /// makes an unmeasured cache look like a broken one, which is a bug report
+    /// nobody can act on.
+    #[test]
+    fn no_details_means_unknown_not_zero() {
+        let out = record(&ResponsesUsage {
+            input_tokens: 100,
+            output_tokens: 5,
+            ..Default::default()
+        });
+        assert_eq!(out.input_tokens, 100);
+        assert_eq!(out.cache_read_tokens, None);
+    }
+
+    /// `input_tokens` is stored as sent. This wire already counts the cached
+    /// span inside its input total -- the same normalization `Usage` documents
+    /// -- so the cache figure is a breakdown of the total, never an addition
+    /// to it. 12_062 in, 11_904 of it cached, is one 12_062-token prompt.
+    #[test]
+    fn cached_tokens_break_the_input_total_down_rather_than_adding_to_it() {
+        let out = record(&ResponsesUsage {
+            input_tokens: 12_062,
+            input_tokens_details: Some(ResponsesInputTokensDetails {
+                cached_tokens: 11_904,
+            }),
+            output_tokens: 95,
+            total_tokens: 12_157,
+        });
+        assert_eq!(out.input_tokens, 12_062);
+        assert_eq!(out.cache_read_tokens, Some(11_904));
+        assert!(out.cache_read_tokens.unwrap() <= out.input_tokens);
+    }
+
+    /// A real zero is reportable and distinct from absent: the provider
+    /// measured the cache and found no hits.
+    #[test]
+    fn a_reported_zero_survives_as_a_zero() {
+        let out = record(&ResponsesUsage {
+            input_tokens: 40,
+            input_tokens_details: Some(ResponsesInputTokensDetails { cached_tokens: 0 }),
+            output_tokens: 2,
+            total_tokens: 42,
+        });
+        assert_eq!(out.cache_read_tokens, Some(0));
     }
 }

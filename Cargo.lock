@@ -203,9 +203,9 @@ dependencies = [
 
 [[package]]
 name = "async-llm"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0be9ac38c9d59d8640dda7531fb99fba6dbc0e282a8b613e2d04d44e0084dae9"
+checksum = "7f186d5d2800d7b94d6a6a6d48152718ced33735d4370accebfecb5c3479038e"
 dependencies = [
  "async-stream",
  "async-trait",
