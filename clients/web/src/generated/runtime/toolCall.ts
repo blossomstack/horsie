@@ -5,6 +5,7 @@ import { GlobInput } from './globInput';
 import { GrepInput } from './grepInput';
 import { ListFilesInput } from './listFilesInput';
 import { ReadFileInput } from './readFileInput';
+import { ReadImageInput } from './readImageInput';
 import { ReplaceLinesInput } from './replaceLinesInput';
 import { SetEnvInput } from './setEnvInput';
 import { SetWorkingDirInput } from './setWorkingDirInput';
@@ -15,6 +16,7 @@ import { WriteFileInput } from './writeFileInput';
 export type ToolCall =
   | { tool: "Bash"; value: BashInput }
   | { tool: "ReadFile"; value: ReadFileInput }
+  | { tool: "ReadImage"; value: ReadImageInput }
   | { tool: "WriteFile"; value: WriteFileInput }
   | { tool: "FindAndReplace"; value: FindAndReplaceInput }
   | { tool: "ReplaceLines"; value: ReplaceLinesInput }
