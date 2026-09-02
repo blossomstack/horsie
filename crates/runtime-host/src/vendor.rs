@@ -489,6 +489,11 @@ impl RuntimeVendorClient {
         server_url: &str,
         token: Option<&str>,
     ) -> Result<(Sink, Stream), ConnectError> {
+        // Here rather than only in each binary's `main`: this is a library, and
+        // whoever links it -- a test, an embedder, a future binary -- has no
+        // reason to know that dialling `wss://` needs process-wide setup first.
+        // Idempotent, so the mains calling it too costs nothing.
+        horsie_support::tls::install_crypto_provider();
         let request = client_request(server_url, token).map_err(ConnectError::Transient)?;
         let (ws, _) = tokio_tungstenite::connect_async(request)
             .await
@@ -1095,6 +1100,9 @@ mod tests {
             let _ = listener.accept().await;
         });
 
+        // This dials tungstenite directly rather than through `connect`, so it
+        // has to establish the same process state a binary would.
+        horsie_support::tls::install_crypto_provider();
         let err = tokio_tungstenite::connect_async(format!("wss://127.0.0.1:{port}/"))
             .await
             .expect_err("a listener that hangs up cannot complete a handshake")

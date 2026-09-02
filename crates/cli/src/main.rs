@@ -582,6 +582,8 @@ async fn dispatch(command: Command, project: Option<&str>) -> Result<i32, CliErr
 
 #[tokio::main]
 async fn main() {
+    // Before anything opens an https:// or wss:// connection.
+    horsie_support::tls::install_crypto_provider();
     let cli = Cli::parse();
     let code = match dispatch(cli.command, cli.project.as_deref()).await {
         Ok(code) => code,

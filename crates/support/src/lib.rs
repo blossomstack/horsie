@@ -12,3 +12,4 @@ pub mod git;
 pub mod mcp;
 pub mod plugin;
 pub mod remote_url;
+pub mod tls;

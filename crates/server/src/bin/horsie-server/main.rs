@@ -59,6 +59,8 @@ struct Cli {
 
 #[tokio::main]
 async fn main() {
+    // Before anything opens an https:// or wss:// connection.
+    horsie_support::tls::install_crypto_provider();
     init_tracing();
     let cli = Cli::parse();
     if let Err(e) = run(cli).await {
