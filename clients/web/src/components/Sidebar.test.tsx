@@ -35,14 +35,14 @@ vi.mock("../api/client", () => ({
   getCurrentProject: () => "p1",
 }));
 
-function renderSidebar(at = "/") {
+function renderSidebar(at = "/", onHide?: () => void) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   return render(
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[at]}>
-        <Sidebar />
+        <Sidebar onHide={onHide} />
       </MemoryRouter>
     </QueryClientProvider>,
   );
@@ -65,6 +65,17 @@ afterEach(() => {
   localStorage.clear();
   // The confirm store is module-level, so it outlives the component.
   resetConfirm();
+});
+
+describe("Sidebar", () => {
+  it("requests hiding the sidebar", () => {
+    const onHide = vi.fn();
+    renderSidebar("/", onHide);
+
+    fireEvent.click(screen.getByTestId("hide-sidebar-button"));
+
+    expect(onHide).toHaveBeenCalledOnce();
+  });
 });
 
 describe("Sidebar tag filter", () => {

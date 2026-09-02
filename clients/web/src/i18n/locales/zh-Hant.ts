@@ -143,6 +143,7 @@ const zhHant: typeof en = {
     offline: "離線",
     sessions: "工作階段",
     showSessions: "顯示工作階段清單",
+    hideSessions: "隱藏工作階段清單",
     filterByTag: "依標籤篩選",
     newSession: "建立新的工作階段",
     filterPlaceholder: "篩選工作階段…",

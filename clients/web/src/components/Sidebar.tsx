@@ -5,6 +5,7 @@ import {
   Inbox,
   ListFilter,
   Plus,
+  PanelLeftClose,
   Settings,
   ShieldCheck,
   Workflow,
@@ -121,7 +122,7 @@ function FooterLink({
   );
 }
 
-export function Sidebar() {
+export function Sidebar({ onHide }: { onHide?: () => void }) {
   const { t } = useTranslation();
   const { data: sessions, isLoading, isError } = useSessionList();
   // Persisted for the same reason group order and collapse once were: an
@@ -192,12 +193,19 @@ export function Sidebar() {
             HORSIE
           </span>
         </Link>
-        {/* Only the fault state earns a place here, and it stays outside the
-            link: it is status, not a destination. "N running" restated what
-            every session row below already carries, and "Ready" labelled the
-            absence of news. A dead server link is visible nowhere else —
-            without it the first symptom is an empty session list that looks
-            like an account with no sessions. */}
+        {/* The fault state stays outside the link: it is status, not a
+            destination. A dead server link is visible nowhere else — without
+            it the first symptom is an empty session list that looks like an
+            account with no sessions. */}
+        <button
+          className="key-icon ml-auto hidden shrink-0 md:flex"
+          onClick={onHide}
+          data-testid="hide-sidebar-button"
+          title={t("rail.hideSessions")}
+          aria-label={t("rail.hideSessions")}
+        >
+          <PanelLeftClose size={16} aria-hidden />
+        </button>
         {isError && (
           <span
             className="ml-auto flex shrink-0 items-center gap-2 text-red-ink"
