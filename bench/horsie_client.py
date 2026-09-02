@@ -152,7 +152,7 @@ class Horsie:
         self._request("DELETE", f"/sessions/{session_id}")
 
     def send_message(self, session_id: str, text: str) -> Any:
-        return self._request("POST", f"/sessions/{session_id}/messages", {"message": text})
+        return self._request("POST", f"/sessions/{session_id}/messages", {"text": text})
 
     def read_messages(self, session_id: str, *, max_entries: int = 200) -> Any:
         return self._request("GET", f"/sessions/{session_id}/messages?max={max_entries}")
