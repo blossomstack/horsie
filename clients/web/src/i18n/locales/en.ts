@@ -144,6 +144,7 @@ const en = {
     offline: "Offline",
     sessions: "Sessions",
     showSessions: "Show sessions",
+    hideSessions: "Hide sessions",
     filterByTag: "Filter by tag",
     newSession: "Start a new session",
     filterPlaceholder: "Filter sessions…",

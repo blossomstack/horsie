@@ -143,6 +143,7 @@ const zhHans: typeof en = {
     offline: "离线",
     sessions: "会话",
     showSessions: "显示会话列表",
+    hideSessions: "隐藏会话列表",
     filterByTag: "按标签筛选",
     newSession: "新建会话",
     filterPlaceholder: "筛选会话…",
