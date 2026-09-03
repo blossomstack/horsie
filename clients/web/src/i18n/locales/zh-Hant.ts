@@ -1079,7 +1079,7 @@ const zhHant: typeof en = {
     chooseStep: "選擇一個步驟進行編輯。",
     namePlaceholder: "fix-bug",
     stepBudget: "步驟預算",
-    stepBudgetPlaceholder: "100（預設）",
+    stepBudgetPlaceholder: "1000（預設）",
     startsAt: "起始步驟",
     chooseAStep: "—— 請選擇一個步驟 ——",
     noSuchStep: "{{name}}（此步驟不存在）",

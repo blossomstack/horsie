@@ -1119,7 +1119,7 @@ const en = {
     chooseStep: "Choose a step to edit it.",
     namePlaceholder: "fix-bug",
     stepBudget: "Step budget",
-    stepBudgetPlaceholder: "100 (default)",
+    stepBudgetPlaceholder: "1000 (default)",
     startsAt: "Starts at",
     chooseAStep: "\u2014 choose a step \u2014",
     noSuchStep: "{{name}} (no such step)",
