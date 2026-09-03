@@ -46,6 +46,12 @@ export interface AgentSettings {
    */
   maxConcurrentSubagents?: number;
   /**
+   * Allow delegated agents to spawn further agents. Absent → no: delegation
+   * is deliberately one level deep unless this workload explicitly needs a
+   * broader, parallel review.
+   */
+  allowRecursiveDelegation?: boolean;
+  /**
    * Standing instructions this session's agent runs under, added to the
    * system prompt as its own section. Set from an agent preset, or directly
    * here; absent → none.

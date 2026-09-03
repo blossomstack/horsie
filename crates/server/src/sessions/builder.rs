@@ -82,6 +82,7 @@ fn settings_from_wire(choice: AgentChoice) -> AgentSettings {
         memory_spaces: w.memory_spaces.unwrap_or_default(),
         thinking_effort: w.thinking_effort,
         max_concurrent_subagents: w.max_concurrent_subagents,
+        allow_recursive_delegation: w.allow_recursive_delegation.unwrap_or(false),
         instructions: w.instructions,
         auto_compact: w.auto_compact,
         plugins: Vec::new(),
@@ -393,6 +394,7 @@ mod tests {
             memory_spaces: None,
             thinking_effort: None,
             max_concurrent_subagents: None,
+            allow_recursive_delegation: None,
             auto_compact: None,
         }
     }

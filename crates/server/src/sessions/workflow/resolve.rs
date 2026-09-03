@@ -216,6 +216,7 @@ fn step_settings(
         memory_spaces: preset.memory_spaces.clone(),
         thinking_effort: preset.thinking_effort.clone(),
         max_concurrent_subagents: None,
+        allow_recursive_delegation: false,
         instructions: preset.instructions.clone(),
         auto_compact: preset.auto_compact,
         // A workflow step is not a main agent, and only a main agent gets the

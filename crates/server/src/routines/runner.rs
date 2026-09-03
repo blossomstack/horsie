@@ -134,6 +134,7 @@ impl RoutineRunner {
             memory_spaces: Some(agent.memory_spaces.clone()),
             thinking_effort: agent.thinking_effort.clone(),
             max_concurrent_subagents: None,
+            allow_recursive_delegation: None,
             instructions: agent.instructions.clone(),
             auto_compact: agent.auto_compact,
         };

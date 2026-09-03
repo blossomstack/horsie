@@ -3,9 +3,8 @@
 //! owning session's mailbox — the session is the one place that enforces
 //! limits, persists the tree, and owns the child actors.
 //!
-//! Layered onto every agent in a session, main and sub alike (which is what
-//! makes sub-spawning work), carrying the *calling* agent's identity so
-//! spawns are attributed to the right parent.
+//! Layered onto an agent only when it is allowed to delegate, carrying the
+//! *calling* agent's identity so spawns are attributed to the right parent.
 
 use crate::agent_loop::AgentCatalog;
 use crate::sessions::addressing::SessionRef;
@@ -23,12 +22,17 @@ pub const SPAWN_AGENT_TOOL: &str = "spawn_agent";
 pub const SUBAGENT_STATUS_TOOL: &str = "subagent_status";
 
 fn spawn_agent_spec(catalog: &AgentCatalog) -> ToolSpec {
-    let mut description = "Spawn a subagent to work on a task independently and in parallel. \
-        Returns immediately with the subagent's id; its result or failure is automatically \
-        delivered back to you as a message. Continue with independent work, or wait if none \
-        remains; do not poll subagent_status or call it repeatedly. Spawning fails when the \
-        session's subagent limits (depth or concurrency) are reached."
-        .to_string();
+    let mut description =
+        "Delegation is costly: normally do the work yourself. Spawn a subagent only \
+        for a clearly independent, non-overlapping deliverable that will save more wall-clock \
+        time than its duplicated context costs. It is not a replacement for parallel file reads \
+        or other parallel tool calls. Do not delegate the core task and repeat it yourself; \
+        child scopes must be disjoint from yours and from siblings. Returns immediately with the \
+        subagent's id; its result or failure is automatically delivered back to you as a message. \
+        Continue with independent work, or wait if none remains; do not poll subagent_status or \
+        call it repeatedly. If the result is needed for your response, wait for it. Spawning \
+        fails when the session's subagent limits (depth or concurrency) are reached."
+            .to_string();
     let mut properties = serde_json::Map::new();
     properties.insert(
         "title".to_string(),
@@ -107,7 +111,7 @@ fn subagent_status_spec() -> ToolSpec {
     }
 }
 
-/// Wraps an agent's toolbox, adding `spawn_agent` and `subagent_status`.
+/// Wraps an agent's toolbox, adding the delegation tools.
 pub struct SubAgentToolbox {
     inner: Arc<dyn Toolbox>,
     session: SessionRef,
@@ -352,7 +356,21 @@ mod tests {
             spawn.description
         );
         assert!(
-            spawn.description.contains("do not poll"),
+            spawn.description.contains("normally do the work yourself"),
+            "{}",
+            spawn.description
+        );
+        assert!(
+            spawn
+                .description
+                .contains("not a replacement for parallel file reads"),
+            "{}",
+            spawn.description
+        );
+        assert!(
+            spawn
+                .description
+                .contains("disjoint from yours and from siblings"),
             "{}",
             spawn.description
         );
