@@ -92,9 +92,9 @@ test("D6: a message sent during a turn is marked unsent, then answered by the ne
   appBase,
   mock,
 }) => {
-  // Turn 1: a slow tool keeps it Running while the second message goes out.
+  // A slow tool keeps the provider step running while another message arrives.
+  // That message joins the next provider step in the same run.
   await mock.queueToolCall("bash", { command: "sleep 3" });
-  await mock.queueText("First turn finished.");
   await mock.queueText("Answered the queued one.");
   await createSession(page, appBase);
   await sendMessage(page, "start something slow");
@@ -112,7 +112,7 @@ test("D6: a message sent during a turn is marked unsent, then answered by the ne
   await expect(page.getByTestId("composer-input")).toBeEnabled();
   await expect(page.getByTestId("composer-send")).toBeVisible();
 
-  // The next turn carries it out of the queue and the marker goes with it.
+  // The next provider step carries it out of pending history.
   await expect(page.getByTestId("assistant-text").last()).toContainText(
     "Answered the queued one.",
   );
