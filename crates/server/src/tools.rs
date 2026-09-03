@@ -81,6 +81,10 @@ const RUNTIME: &[Row] = &[
         "Load an image file for the model to view.",
     ),
     write("write_file", "Create or overwrite a file."),
+    write(
+        "apply_patch",
+        "Apply a validated multi-file patch with ordered hunks.",
+    ),
     write("find_and_replace", "Replace text within a file."),
     write("replace_lines", "Replace a range of lines in a file."),
     read("list_files", "List a directory's contents."),

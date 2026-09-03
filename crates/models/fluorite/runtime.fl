@@ -15,6 +15,10 @@ struct ReadFileInput { path: String, start_line: Option<u64>, end_line: Option<u
 struct ReadImageInput { path: String }
 struct WriteFileInput { path: String, content: String }
 
+// A validated multi-file patch. The runtime parses and checks the complete
+// patch before applying any change.
+struct ApplyPatchInput { patch: String }
+
 // Content-based find/replace. `regex` (default false) switches `find` from a
 // literal string to a pattern; `replace_all` (default false) requires the match
 // to be unique and errors otherwise — set it true to change every occurrence.
@@ -44,6 +48,7 @@ union ToolCall {
     ReadFile(ReadFileInput),
     ReadImage(ReadImageInput),
     WriteFile(WriteFileInput),
+    ApplyPatch(ApplyPatchInput),
     FindAndReplace(FindAndReplaceInput),
     ReplaceLines(ReplaceLinesInput),
     ListFiles(ListFilesInput),

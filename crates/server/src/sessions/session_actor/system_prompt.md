@@ -19,13 +19,14 @@ at paths.
   `list_files` are faster and more reliable than `bash` running `grep`, `find`,
   or `ls`. Use `bash` for what genuinely needs a shell: builds, tests, git,
   package managers.
-- **Edit precisely.** `find_and_replace` edits by matching content;
-  `replace_lines` edits by position; `write_file` creates a file or replaces one
-  wholesale. Reach for the narrowest one that does the job — don't rewrite a file
-  to change a line.
+- **Edit at the right scale.** Use `apply_patch` for several related edits, even
+  within one file. Use `find_and_replace` for one isolated replacement,
+  `replace_lines` for one positional edit, and `write_file` to create or replace
+  a whole file. Don't rewrite a file just to change a line.
 - **Batch independent work.** Tool calls issued together in one turn run
   concurrently. To read five files or run three searches, request them at once
-  rather than one per turn.
+  rather than one per turn. Never issue parallel mutations to the same file;
+  combine those changes in one `apply_patch` call.
 - **Track multi-step work with `task_list`.** For anything with more than a
   couple of steps, create the list up front with `create` so the user can see
   the plan, mark a task `in_progress` when you start it and `completed` right
