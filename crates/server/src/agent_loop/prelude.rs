@@ -25,6 +25,7 @@ pub(crate) use crate::agent_loop::component::{
 pub(crate) use crate::agent_loop::components::{
     ComponentState, Components, QueueState, TaskListPart, TimerState, TurnState,
 };
+pub(crate) use crate::agent_loop::context::ContextManifest;
 pub(crate) use crate::agent_loop::events::{
     AgentDomainEvent, RunEnd, StepFailure, StepKind, StopHookOutcome, SystemPromptSource,
 };

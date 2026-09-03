@@ -146,6 +146,9 @@ impl StepRun {
 /// and published to the shared step_run for whoever needs it.
 pub struct TurnCtx {
     pub provider: std::sync::Arc<dyn horsie_agentcore::LlmProvider>,
+    /// Stable initialization discovery. Persisted with `AgentInitialized` and
+    /// reused only to rebuild live clients after reload.
+    pub manifest: ContextManifest,
     /// The fully-composed, selection-filtered toolbox every call dispatches
     /// through — the components' own tools included, indistinguishable from
     /// the rest.

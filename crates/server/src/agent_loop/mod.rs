@@ -67,9 +67,9 @@ pub use components::timers::domain::{
 pub use context::compaction_window;
 pub use context::{
     AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, AskedQuestion, ContextError,
-    ContextProvider, Contexts, DefaultToolboxFactory, FilteredToolbox, FixedContextProvider,
-    INSPECT_WORKSPACE_TOOL, SKILL_TOOL, StartTurn, StopHookRequest, StopHookResult, ToolboxFactory,
-    TurnPreparation,
+    ContextManifest, ContextProvider, Contexts, DefaultToolboxFactory, FilteredToolbox,
+    FixedContextProvider, FrozenPluginAgent, INSPECT_WORKSPACE_TOOL, SKILL_TOOL, StartTurn,
+    StopHookRequest, StopHookResult, ToolboxFactory, TurnPreparation,
 };
 pub use events::{
     AgentDomainEvent, AgentHistoryEntry, RunEnd, StepFailure, StepKind, StopHookOutcome,

@@ -19,9 +19,10 @@ use super::{
     hooks::{SessionHookSink, halt_reason, stop_verdict},
 };
 use crate::agent_loop::{
-    AgentRunDef, CompositeToolbox, ContextError, ContextProvider, Contexts, DefaultToolboxFactory,
-    SharedContext, SharedScan, StartTurn, StopHookOutcome, StopHookRequest, StopHookResult,
-    ToolboxFactory, TurnPreparation, WorkspaceContext, compose_system_prompt, scan_workspace,
+    AgentCatalog, AgentRunDef, CompositeToolbox, ContextError, ContextManifest, ContextProvider,
+    Contexts, DefaultToolboxFactory, FrozenPluginAgent, SharedContext, SharedScan, StartTurn,
+    StopHookOutcome, StopHookRequest, StopHookResult, ToolboxFactory, TurnPreparation,
+    WorkspaceContext, compose_system_prompt, scan_workspace,
 };
 use crate::sessions::addressing::SessionRef;
 use crate::sessions::run_forest::SeedMode;
@@ -47,13 +48,17 @@ use std::sync::{Arc, Mutex, PoisonError};
 use uuid::Uuid;
 
 tokio::task_local! {
-    /// True only while rebuilding disposable clients for an already initialized
-    /// agent. The existing context builder then skips semantic discovery.
-    static RECONNECT_ONLY: bool;
+    /// Durable discovery used only while rebuilding disposable clients for an
+    /// initialized agent. The context builder must not scan or provision.
+    static RECONNECT_MANIFEST: ContextManifest;
+}
+
+fn reconnect_manifest() -> Option<ContextManifest> {
+    RECONNECT_MANIFEST.try_with(Clone::clone).ok()
 }
 
 fn reconnect_only() -> bool {
-    RECONNECT_ONLY.try_with(|value| *value).unwrap_or(false)
+    RECONNECT_MANIFEST.try_with(|_| ()).is_ok()
 }
 
 /// Report turn-preparation progress into an agent's log.
@@ -891,11 +896,14 @@ impl ContextProvider for SessionContextProvider {
         StopHookResult { records, outcome }
     }
 
-    async fn reconnect(&self) -> Result<Contexts, ContextError> {
-        RECONNECT_ONLY.scope(true, self.provide()).await
+    async fn reconnect(&self, manifest: &ContextManifest) -> Result<Contexts, ContextError> {
+        RECONNECT_MANIFEST
+            .scope(manifest.clone(), self.provide())
+            .await
     }
 
     async fn provide(&self) -> Result<Contexts, ContextError> {
+        let reconnect = reconnect_manifest();
         let settings = &self.settings;
         let def = session_run_def(settings);
         // Set only by a typed subagent, whose plugin definition may narrow what
@@ -974,9 +982,17 @@ impl ContextProvider for SessionContextProvider {
         // hook, always reporting `source: "startup"`. It now fires once per
         // agent load at `start_hooks`, early enough for its context to reach
         // the turn that triggered it.
+        let durable_agents = reconnect.as_ref().map(|manifest| {
+            manifest
+                .plugin_agents
+                .clone()
+                .into_iter()
+                .map(FrozenPluginAgent::into_catalog)
+                .collect::<AgentCatalog>()
+        });
         let shared = use_plugins.then(|| SharedContext {
             skills: Arc::new(shared_scan.skills),
-            agents: Arc::new(shared_scan.agents),
+            agents: Arc::new(durable_agents.unwrap_or(shared_scan.agents)),
             root: shared_scan.root,
         });
         // Resolved here rather than carried from the spawn: the definition is a
@@ -984,7 +1000,6 @@ impl ContextProvider for SessionContextProvider {
         // uninstalled between spawn and wake fails loudly.
         let plugin_agent = match (&self.agent_type, shared.as_ref()) {
             (None, _) => None,
-            (Some(_), _) if reconnect_only() => None,
             (Some(name), Some(shared)) => Some(shared.agents.get(name).cloned().ok_or_else(|| {
                 ContextError::retryable(format!(
                     "this subagent runs as agent type '{name}', which no installed plugin declares"
@@ -1145,10 +1160,14 @@ impl ContextProvider for SessionContextProvider {
         // With no runtime there are no runtime-backed tools and no `skill` or
         // `inspect_workspace` — all three reach into a sandbox. What is left is
         // the server-side MCP set, which the layers below add to.
+        let workspace_names = reconnect
+            .as_ref()
+            .map(|manifest| manifest.workspace_names.clone())
+            .unwrap_or_else(|| ws.names());
         let base: Arc<dyn Toolbox> = match &runtime_client {
             Some(client) => DefaultToolboxFactory.for_agent(
                 client.clone(),
-                ws.names(),
+                workspace_names.clone(),
                 use_plugins,
                 mcp,
                 artifact_sink,
@@ -1358,8 +1377,22 @@ impl ContextProvider for SessionContextProvider {
         if broadcast {
             emit_progress(&self.session, self.kind.agent_key(), "ready", None).await;
         }
+        let manifest = reconnect.unwrap_or_else(|| ContextManifest {
+            workspace_names,
+            plugin_agents: shared
+                .as_ref()
+                .map(|context| {
+                    context
+                        .agents
+                        .iter()
+                        .map(FrozenPluginAgent::from_catalog)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        });
         Ok(Contexts {
             provider,
+            manifest,
             toolbox,
             tool_narrowing,
             system_prompt,
@@ -1960,6 +1993,7 @@ mod tests {
             .count();
         let initial = provider.provide().await.expect("initial contexts");
         assert!(initial.system_prompt.is_some());
+        let manifest = initial.manifest.clone();
         let after_initial = f.agent.scan_count();
         assert_eq!(after_initial, before + 1);
         let provisions_after_initial = f
@@ -1970,7 +2004,11 @@ mod tests {
             .count();
         assert_eq!(provisions_after_initial, provisions_before + 1);
 
-        let _connected = provider.reconnect().await.expect("reconnected contexts");
+        let connected = provider
+            .reconnect(&manifest)
+            .await
+            .expect("reconnected contexts");
+        assert_eq!(connected.manifest, manifest);
         assert_eq!(
             f.agent.scan_count(),
             after_initial,
@@ -2023,6 +2061,43 @@ mod tests {
         assert!(
             !tools.contains(&"bash".to_string()),
             "the narrowing must exclude what it did not name: {tools:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_subagent_reconnect_uses_the_durable_catalog_without_scanning() {
+        let (f, session, id) = agent_harness().await;
+        let sub = spawn_typed(&session, Some("code-reviewer")).await.unwrap();
+        let provider = typed_provider(&f, &session, id, sub, None);
+
+        let initial = provider.provide().await.expect("initial contexts");
+        let manifest = initial.manifest.clone();
+        let initial_narrowing = initial.tool_narrowing.clone();
+        assert!(!manifest.plugin_agents.is_empty());
+        let scans = f.agent.scan_count();
+        let provisions = f
+            .agent
+            .relayed()
+            .iter()
+            .filter(|kind| kind.as_str() == "ProvisionAgent")
+            .count();
+
+        let reconnected = provider.reconnect(&manifest).await.expect("reconnect");
+        assert_eq!(reconnected.manifest, manifest);
+        assert_eq!(reconnected.tool_narrowing, initial_narrowing);
+        assert_eq!(
+            f.agent.scan_count(),
+            scans,
+            "typed reconnect must use the durable agent catalogue"
+        );
+        assert_eq!(
+            f.agent
+                .relayed()
+                .iter()
+                .filter(|kind| kind.as_str() == "ProvisionAgent")
+                .count(),
+            provisions,
+            "typed reconnect must not provision again"
         );
     }
 

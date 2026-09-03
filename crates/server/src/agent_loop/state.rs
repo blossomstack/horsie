@@ -184,7 +184,7 @@ impl AgentState {
                     matches!(
                         &entry.record,
                         AgentDomainEvent::SystemPromptRecorded { .. }
-                            | AgentDomainEvent::AgentInitialized
+                            | AgentDomainEvent::AgentInitialized { .. }
                     )
                 })
                 .cloned()
@@ -345,7 +345,18 @@ impl AgentState {
     pub fn initialized(&self) -> bool {
         self.history
             .iter()
-            .any(|entry| matches!(&entry.record, AgentDomainEvent::AgentInitialized))
+            .any(|entry| matches!(&entry.record, AgentDomainEvent::AgentInitialized { .. }))
+    }
+
+    #[must_use]
+    pub fn context_manifest(&self) -> Option<&ContextManifest> {
+        self.history.iter().rev().find_map(|entry| {
+            if let AgentDomainEvent::AgentInitialized { manifest } = &entry.record {
+                Some(manifest)
+            } else {
+                None
+            }
+        })
     }
 
     #[must_use]
@@ -758,7 +769,9 @@ mod history_tests {
                 source: SystemPromptSource::InitialContext,
                 content: "fixed prompt".into(),
             },
-            AgentDomainEvent::AgentInitialized,
+            AgentDomainEvent::AgentInitialized {
+                manifest: ContextManifest::default(),
+            },
             AgentDomainEvent::StepStarted {
                 kind: StepKind::Agent,
             },
@@ -813,7 +826,9 @@ mod history_tests {
                     content: "initial observation".into(),
                 },
             ),
-            AgentDomainEvent::AgentInitialized,
+            AgentDomainEvent::AgentInitialized {
+                manifest: ContextManifest::default(),
+            },
         );
         let assistant = Message {
             id: "a".into(),

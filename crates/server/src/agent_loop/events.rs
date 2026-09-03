@@ -76,7 +76,9 @@ pub enum AgentDomainEvent {
         source: SystemPromptSource,
         content: String,
     },
-    AgentInitialized,
+    AgentInitialized {
+        manifest: crate::agent_loop::ContextManifest,
+    },
     ConnectionCompleted,
     /// Its assigned history sequence is both step identity and callback fence.
     StepStarted {

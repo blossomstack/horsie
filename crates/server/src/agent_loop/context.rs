@@ -144,6 +144,53 @@ pub trait AgentOutcomeSink: Send + Sync {
     async fn deliver(&self, outcome: AgentOutcome);
 }
 
+/// Stable discovery captured by one-time initialization and reused to rebuild
+/// live toolboxes without scanning the workspace again.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextManifest {
+    pub workspace_names: Vec<String>,
+    pub plugin_agents: Vec<FrozenPluginAgent>,
+}
+
+/// The serializable form of one plugin-declared agent. The runtime scan's
+/// parsed catalogue is process-local; these fields are the durable meaning
+/// needed to reconstruct the same catalogue after reload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrozenPluginAgent {
+    pub plugin: String,
+    pub name: String,
+    pub description: String,
+    pub model: Option<String>,
+    pub tools: Vec<String>,
+    pub prompt: String,
+}
+
+impl FrozenPluginAgent {
+    pub(crate) fn from_catalog(agent: &crate::agent_loop::CatalogAgent) -> Self {
+        Self {
+            plugin: agent.plugin.clone(),
+            name: agent.def.name.clone(),
+            description: agent.def.description.clone(),
+            model: agent.def.model.clone(),
+            tools: agent.def.tools.clone(),
+            prompt: agent.def.prompt.clone(),
+        }
+    }
+
+    pub(crate) fn into_catalog(self) -> crate::agent_loop::CatalogAgent {
+        crate::agent_loop::CatalogAgent {
+            plugin: self.plugin,
+            def: horsie_support::plugin::agents::PluginAgentDef {
+                name: self.name,
+                description: self.description,
+                model: self.model,
+                tools: self.tools,
+                prompt: self.prompt,
+            },
+        }
+    }
+}
+
 /// The per-run contexts an agent run executes within — the provider it calls,
 /// the toolbox it acts through, and the system prompt that frames it. Produced
 /// fresh by [`ContextProvider::provide`] at the top of every run. The timer /
@@ -151,6 +198,9 @@ pub trait AgentOutcomeSink: Send + Sync {
 /// [`AgentActor`](crate::agent_loop::AgentActor) itself, not here.
 pub struct Contexts {
     pub provider: Arc<dyn LlmProvider>,
+    /// Stable discovery written with `AgentInitialized` and handed back to
+    /// reconnect so rebuilding live clients never requires another scan.
+    pub manifest: ContextManifest,
     /// The agent's tools, already composed but **not** narrowed: the selection
     /// is applied once, outermost, by the actor that stacks the last layers on.
     pub toolbox: Arc<dyn Toolbox>,
@@ -226,10 +276,9 @@ pub trait ContextProvider: Send + Sync {
     async fn provide(&self) -> Result<Contexts, ContextError>;
 
     /// Restore disposable runtime and MCP clients for an initialized agent.
-    /// Implementations must not scan the workspace or regenerate prompt bytes.
-    async fn reconnect(&self) -> Result<Contexts, ContextError> {
-        self.provide().await
-    }
+    /// Implementations must use `manifest` rather than scanning the workspace
+    /// or regenerating prompt bytes.
+    async fn reconnect(&self, manifest: &ContextManifest) -> Result<Contexts, ContextError>;
 
     /// Whether this provider has hooks to fire before a run starts.
     ///
@@ -368,8 +417,19 @@ pub struct FixedContextProvider {
 #[async_trait]
 impl ContextProvider for FixedContextProvider {
     async fn provide(&self) -> Result<Contexts, ContextError> {
+        self.contexts(ContextManifest::default())
+    }
+
+    async fn reconnect(&self, manifest: &ContextManifest) -> Result<Contexts, ContextError> {
+        self.contexts(manifest.clone())
+    }
+}
+
+impl FixedContextProvider {
+    fn contexts(&self, manifest: ContextManifest) -> Result<Contexts, ContextError> {
         Ok(Contexts {
             provider: self.provider.clone(),
+            manifest,
             toolbox: self.toolbox.clone(),
             tool_narrowing: None,
             system_prompt: None,

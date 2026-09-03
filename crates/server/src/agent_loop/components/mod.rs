@@ -286,7 +286,7 @@ impl Components {
             | AgentDomainEvent::TimerFired { .. }) => Timers::apply(&mut state, e),
             e @ AgentDomainEvent::TaskListChanged { .. } => TaskLists::apply(&mut state, e),
             AgentDomainEvent::SystemPromptRecorded { .. }
-            | AgentDomainEvent::AgentInitialized
+            | AgentDomainEvent::AgentInitialized { .. }
             | AgentDomainEvent::ConnectionCompleted
             | AgentDomainEvent::StepStarted { .. }
             | AgentDomainEvent::StepFailed { .. }

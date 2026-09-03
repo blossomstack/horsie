@@ -15,7 +15,7 @@
 
 use crate::agent_loop::AgentRunDef;
 use crate::agent_loop::context::{
-    AgentOutcome, AgentOutcomeSink, ContextError, ContextProvider, Contexts,
+    AgentOutcome, AgentOutcomeSink, ContextError, ContextManifest, ContextProvider, Contexts,
 };
 use crate::agent_loop::prelude::*;
 use async_trait::async_trait;
@@ -29,6 +29,13 @@ pub(crate) struct StubContext;
 impl crate::agent_loop::ContextProvider for StubContext {
     async fn provide(
         &self,
+    ) -> Result<crate::agent_loop::Contexts, crate::agent_loop::ContextError> {
+        Err(crate::agent_loop::ContextError::retryable("no context"))
+    }
+
+    async fn reconnect(
+        &self,
+        _manifest: &ContextManifest,
     ) -> Result<crate::agent_loop::Contexts, crate::agent_loop::ContextError> {
         Err(crate::agent_loop::ContextError::retryable("no context"))
     }
@@ -77,6 +84,10 @@ pub(crate) struct HangingContext;
 #[async_trait]
 impl ContextProvider for HangingContext {
     async fn provide(&self) -> Result<Contexts, ContextError> {
+        std::future::pending().await
+    }
+
+    async fn reconnect(&self, _manifest: &ContextManifest) -> Result<Contexts, ContextError> {
         std::future::pending().await
     }
 }

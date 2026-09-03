@@ -45,6 +45,7 @@ impl Provision {
         let run_def_tools = cx.params.tools.clone();
         let thinking_effort = cx.params.thinking_effort;
         let conversation_id = cx.runtime.journal_id.to_string();
+        let manifest = cx.state.context_manifest().cloned();
         tokio::spawn(async move {
             // Cancellable, because this is the *most* likely place to hang: it
             // awaits an MCP connect and a workspace scan across a process
@@ -53,9 +54,14 @@ impl Provision {
                 biased;
                 () = cancel.cancelled() => return,
                 provided = async {
-                    match initializing {
-                        true => context_provider.provide().await,
-                        false => context_provider.reconnect().await,
+                    if initializing {
+                        context_provider.provide().await
+                    } else if let Some(manifest) = &manifest {
+                        context_provider.reconnect(manifest).await
+                    } else {
+                        Err(crate::agent_loop::ContextError::terminal(
+                            "initialized agent has no durable context manifest",
+                        ))
                     }
                 } => provided,
             };
@@ -81,6 +87,7 @@ impl Provision {
                 let specs = toolbox.specs();
                 Box::new(TurnCtx {
                     provider: contexts.provider,
+                    manifest: contexts.manifest,
                     toolbox,
                     specs,
                     system_prompt: contexts
@@ -147,7 +154,9 @@ impl Component for Provision {
                             content: turn_ctx.system_prompt.clone(),
                         });
                     }
-                    events.push(AgentDomainEvent::AgentInitialized);
+                    events.push(AgentDomainEvent::AgentInitialized {
+                        manifest: turn_ctx.manifest.clone(),
+                    });
                     events
                 } else {
                     turn_ctx.system_prompt = cx.state.system_prompt();
