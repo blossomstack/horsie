@@ -259,7 +259,11 @@ impl Components {
     /// with: any journal ever written stays readable, whatever a future spec
     /// chooses to run.
     pub fn apply(mut state: AgentState, event: AgentDomainEvent) -> AgentState {
-        let history_record = event.clone();
+        // `Seeded` carries a whole `AgentState`; storing that event inside the
+        // state it installs would recursively duplicate the source snapshot.
+        // The adopted history is already the durable account.
+        let history_record =
+            (!matches!(&event, AgentDomainEvent::Seeded { .. })).then(|| event.clone());
         match event {
             e @ (AgentDomainEvent::Seeded { .. } | AgentDomainEvent::SeedSummaryTaken { .. }) => {
                 Seeding::apply(&mut state, e)
@@ -293,7 +297,9 @@ impl Components {
             | AgentDomainEvent::StopHookCompleted { .. }
             | AgentDomainEvent::RunEnded { .. } => {}
         }
-        state.record_history(history_record);
+        if let Some(history_record) = history_record {
+            state.record_history(history_record);
+        }
         state
     }
 

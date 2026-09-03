@@ -751,6 +751,29 @@ mod history_tests {
     }
 
     #[test]
+    fn seeding_adopts_history_without_recording_a_recursive_snapshot() {
+        let source = fold(
+            AgentActor::initial_state(),
+            AgentDomainEvent::SystemPromptRecorded {
+                source: SystemPromptSource::Configured,
+                content: "fixed".into(),
+            },
+        );
+        let seeded = fold(
+            AgentActor::initial_state(),
+            AgentDomainEvent::Seeded {
+                state: Box::new(source.clone()),
+                seed: None,
+            },
+        );
+        assert_eq!(seeded.history().len(), source.history().len());
+        assert!(matches!(
+            &seeded.history()[0].record,
+            AgentDomainEvent::SystemPromptRecorded { content, .. } if content == "fixed"
+        ));
+    }
+
+    #[test]
     fn step_marker_sequence_is_its_identity() {
         let state = fold(
             AgentActor::initial_state(),
