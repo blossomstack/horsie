@@ -875,8 +875,10 @@ mod params_tests {
 )]
 mod history_tests {
     use crate::agent_loop::prelude::*;
-    use horsie_agentcore::{ContentPart, Message, Role};
-    use horsie_models::agent::{TextPart, ToolCallPart, Usage};
+    use horsie_agentcore::{AgentLogBody, ContentPart, Message, Role};
+    use horsie_models::agent::{
+        ArtifactKind, ArtifactRef, ImageArtifact, TextPart, ToolCallPart, Usage,
+    };
 
     fn fold(state: AgentState, event: AgentDomainEvent) -> AgentState {
         AgentActor::apply_event(state, event)
@@ -888,6 +890,37 @@ mod history_tests {
             text: text.into(),
             artifacts: Vec::new(),
         }
+    }
+
+    #[test]
+    fn tool_result_artifacts_survive_the_history_fold() {
+        let artifact = ArtifactRef {
+            id: "image-id".into(),
+            media_type: "image/png".into(),
+            kind: ArtifactKind::Image(ImageArtifact {
+                width: Some(640),
+                height: Some(480),
+            }),
+            byte_size: 12,
+            filename: Some("page.png".into()),
+        };
+        let state = fold(
+            AgentActor::initial_state(),
+            AgentDomainEvent::ToolComplete {
+                tool_call_id: "tc1".into(),
+                output: "Image loaded.".into(),
+                is_error: false,
+                artifacts: vec![artifact.clone()],
+                at_ms: 1,
+            },
+        );
+        let AgentLogBody::Llm(message) = &state.log()[0].body else {
+            panic!("expected tool result message")
+        };
+        let ContentPart::ToolResult(result) = &message.parts[0] else {
+            panic!("expected tool result part")
+        };
+        assert_eq!(result.artifacts, vec![artifact]);
     }
 
     #[test]

@@ -32,8 +32,8 @@ use serde_json::Value;
 use std::collections::VecDeque;
 use std::time::Duration;
 
-/// Defaults the old loop carried in its config; still server policy.
-const MAX_ITERATIONS: u32 = 100;
+/// A high safety ceiling for long autonomous and workflow runs.
+const MAX_ITERATIONS: u32 = 10_000;
 const STUCK_THRESHOLD: usize = 5;
 const NUDGE_THRESHOLD: usize = 3;
 
@@ -356,6 +356,7 @@ impl Turn {
                     "You have called this tool with identical arguments multiple times. \
                      Please try a different approach.",
                     false,
+                    Vec::new(),
                     now_ms(),
                 );
                 events.push(AgentDomainEvent::InputMessage { message });
@@ -517,13 +518,16 @@ impl Turn {
                 artifacts,
                 at_ms,
             } => {
-                let mut message = Message::tool_result(tool_call_id, output, is_error, at_ms);
-                if let Some(horsie_agentcore::ContentPart::ToolResult(r)) =
-                    message.parts.first_mut()
-                {
-                    r.artifacts = artifacts;
-                }
-                state.push(at_ms, AgentLogBody::Llm(message));
+                state.push(
+                    at_ms,
+                    AgentLogBody::Llm(Message::tool_result(
+                        tool_call_id,
+                        output,
+                        is_error,
+                        artifacts,
+                        at_ms,
+                    )),
+                );
             }
             AgentDomainEvent::RunComplete { .. }
             | AgentDomainEvent::RunAborted { .. }
@@ -884,5 +888,13 @@ impl Turn {
         };
         events.push(resume);
         CommandEffect::persist(events)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn default_iteration_budget_supports_long_workflows() {
+        assert_eq!(super::MAX_ITERATIONS, 10_000);
     }
 }

@@ -141,7 +141,13 @@ async fn conformance_tool_result_reaches_the_next_step() {
         let calls = extract_tool_calls(&first.message.parts);
         assert_eq!(calls.len(), 1, "{kind:?}");
         history.push(first.message);
-        history.push(Message::tool_result(calls[0].0.clone(), "42", false, 0));
+        history.push(Message::tool_result(
+            calls[0].0.clone(),
+            "42",
+            false,
+            Vec::new(),
+            0,
+        ));
 
         let second = call(provider, specs, &history, &sink).await.unwrap();
         assert_eq!(

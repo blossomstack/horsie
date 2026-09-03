@@ -180,5 +180,5 @@ pub(crate) fn repair_dangling(
 
 pub(crate) fn synthetic_results(ids: Vec<String>) -> impl Iterator<Item = Message> {
     ids.into_iter()
-        .map(|id| Message::tool_result(id, INTERRUPTED_RESULT, true, now_ms()))
+        .map(|id| Message::tool_result(id, INTERRUPTED_RESULT, true, Vec::new(), now_ms()))
 }
