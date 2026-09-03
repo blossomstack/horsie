@@ -624,8 +624,22 @@ async fn run_loop<S>(
         match msg {
             Ok(Message::Text(text)) => {
                 let inbound = match serde_json::from_str::<RuntimeInboundMessage>(&text) {
-                    Ok(m) => m,
-                    Err(_) => continue,
+                    Ok(message) => message,
+                    Err(error) => {
+                        let refusal = serde_json::from_str::<serde_json::Value>(&text)
+                            .ok()
+                            .and_then(|frame| RequestRefused::for_undecodable_request(&frame))
+                            .map(RuntimeOutboundMessage::RequestRefused);
+                        if let Some(refusal) = refusal {
+                            tracing::warn!(%error, "runtime refused an unsupported request");
+                            if let Ok(json) = serde_json::to_string(&refusal) {
+                                let _ = sink.lock().await.send(Message::Text(json.into())).await;
+                            }
+                        } else {
+                            tracing::warn!(%error, "runtime received an undecodable frame");
+                        }
+                        continue;
+                    }
                 };
                 match inbound {
                     RuntimeInboundMessage::ToolCall(req) => {
@@ -1062,6 +1076,67 @@ mod tests {
             log_filter(Some("horsie_runtime=nonsense")).to_string(),
             DEFAULT_LOG_FILTER
         );
+    }
+
+    #[tokio::test]
+    async fn an_unsupported_request_is_refused_instead_of_dropped() {
+        let (runtime_io, caller_io) = tokio::io::duplex(64 * 1024);
+        let runtime_ws = WebSocketStream::from_raw_socket(
+            runtime_io,
+            tokio_tungstenite::tungstenite::protocol::Role::Server,
+            None,
+        )
+        .await;
+        let mut caller_ws = WebSocketStream::from_raw_socket(
+            caller_io,
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        let loop_task = tokio::spawn(run_loop(
+            runtime_ws,
+            Arc::new(horsie_runtime::workspace::WorkspaceRegistry::new(Vec::new())),
+            "runtime-1".to_string(),
+            Arc::new(horsie_runtime::state::RuntimeState::new()),
+        ));
+
+        let ready = caller_ws.next().await.expect("ready frame").expect("ready");
+        assert!(matches!(ready, Message::Text(_)));
+        caller_ws
+            .send(Message::Text(
+                serde_json::json!({
+                    "type": "ToolCall",
+                    "value": {
+                        "callId": "future-call",
+                        "agentId": "agent-1",
+                        "call": { "tool": "FutureTool", "value": {} }
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .expect("send unsupported request");
+
+        let reply = tokio::time::timeout(Duration::from_secs(1), caller_ws.next())
+            .await
+            .expect("the unsupported request must be answered")
+            .expect("reply frame")
+            .expect("reply");
+        let Message::Text(reply) = reply else {
+            panic!("expected text reply");
+        };
+        let reply: RuntimeOutboundMessage = serde_json::from_str(&reply).expect("typed refusal");
+        match reply {
+            RuntimeOutboundMessage::RequestRefused(refusal) => {
+                assert_eq!(refusal.call_id, "future-call");
+                assert!(refusal.reason.contains("does not support"));
+            }
+            other => panic!("expected RequestRefused, got {other:?}"),
+        }
+
+        drop(caller_ws);
+        loop_task.await.expect("runtime loop");
     }
 
     #[tokio::test]

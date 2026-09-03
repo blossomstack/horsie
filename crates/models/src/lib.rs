@@ -100,6 +100,22 @@ pub mod executor {
 pub mod runtime {
     include!(concat!(env!("OUT_DIR"), "/runtime/mod.rs"));
 
+    impl RequestRefused {
+        /// Recover a correlated failure from a request this runtime cannot decode.
+        ///
+        /// The `callId` envelope field stays readable when a newer request body
+        /// does not, so an older runtime can reject it instead of hanging its caller.
+        #[must_use]
+        pub fn for_undecodable_request(frame: &serde_json::Value) -> Option<Self> {
+            let call_id = frame.pointer("/value/callId")?.as_str()?.to_string();
+            Some(Self {
+                call_id,
+                reason: "this runtime does not support the request; update the horsie runtime"
+                    .to_string(),
+            })
+        }
+    }
+
     impl SessionStartSource {
         /// The spelling a hook is given, which is the spec's and not Rust's.
         ///
@@ -1027,6 +1043,26 @@ mod tests {
         assert!(json.contains("\"type\":\"ScanWorkspace\""));
         let back: RuntimeInboundMessage = serde_json::from_str(&json).unwrap();
         assert!(matches!(back, RuntimeInboundMessage::ScanWorkspace(r) if r.call_id == "c1"));
+    }
+
+    #[test]
+    fn an_older_runtime_can_refuse_a_new_request_by_its_call_id() {
+        use crate::runtime::{RequestRefused, RuntimeInboundMessage};
+
+        let frame = serde_json::json!({
+            "type": "ToolCall",
+            "value": {
+                "callId": "c-new",
+                "agentId": "a1",
+                "call": { "tool": "FutureTool", "value": {} }
+            }
+        });
+        assert!(serde_json::from_value::<RuntimeInboundMessage>(frame.clone()).is_err());
+
+        let refusal = RequestRefused::for_undecodable_request(&frame)
+            .expect("the stable envelope still carries a call id");
+        assert_eq!(refusal.call_id, "c-new");
+        assert!(refusal.reason.contains("does not support"));
     }
 
     #[test]

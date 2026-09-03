@@ -11,7 +11,7 @@ use crate::runtime_vendor::RuntimeVendorError;
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::runtime_vendor::{
     CreateRuntimeRequest, DeleteRuntimeRequest, GetRuntimeRequest, HibernateRuntimeRequest,
-    RuntimeSpec as WireRuntimeSpec, RuntimeVendorCommand, RuntimeVendorEvent,
+    RequestFailed, RuntimeSpec as WireRuntimeSpec, RuntimeVendorCommand, RuntimeVendorEvent,
     RuntimeVendorInboundMessage, RuntimeVendorOutboundMessage, VendorRegistered, VendorRejected,
 };
 use std::collections::HashMap;
@@ -41,7 +41,12 @@ const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 /// provision window rather than a typical request timeout.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
 
-type Waiters = Arc<Mutex<HashMap<String, oneshot::Sender<RuntimeVendorEvent>>>>;
+struct Waiter {
+    reply: oneshot::Sender<RuntimeVendorEvent>,
+    runtime_call: Option<(String, String)>,
+}
+
+type Waiters = Arc<Mutex<HashMap<String, Waiter>>>;
 
 /// A sink that erases the socket type, so `WebsocketRuntimeVendor` is not generic over the
 /// transport once constructed.
@@ -217,8 +222,8 @@ impl WebsocketRuntimeVendor {
                     );
                 }
                 // An unmatched id is an unsolicited event, not an error.
-                if let Some(tx) = waiters.lock().await.remove(&msg.request_id) {
-                    let _ = tx.send(msg.event);
+                if let Some(waiter) = waiters.lock().await.remove(&msg.request_id) {
+                    let _ = waiter.reply.send(msg.event);
                 }
             }
             connected.store(false, Ordering::Relaxed);
@@ -319,9 +324,37 @@ impl WebsocketRuntimeVendor {
         &self,
         command: RuntimeVendorCommand,
     ) -> Result<RuntimeVendorEvent, RequestError> {
+        self.request_inner(command, None).await
+    }
+
+    /// Relay one correlated runtime request.
+    ///
+    /// The runtime call identity sits beside the vendor request waiter so any
+    /// transport handle for this runtime can release it during reconciliation.
+    pub(crate) async fn request_runtime(
+        &self,
+        runtime_id: &str,
+        call_id: &str,
+        command: RuntimeVendorCommand,
+    ) -> Result<RuntimeVendorEvent, RequestError> {
+        self.request_inner(command, Some((runtime_id.to_string(), call_id.to_string())))
+            .await
+    }
+
+    async fn request_inner(
+        &self,
+        command: RuntimeVendorCommand,
+        runtime_call: Option<(String, String)>,
+    ) -> Result<RuntimeVendorEvent, RequestError> {
         let request_id = Uuid::new_v4().to_string();
-        let (tx, rx) = oneshot::channel();
-        self.waiters.lock().await.insert(request_id.clone(), tx);
+        let (reply, rx) = oneshot::channel();
+        self.waiters.lock().await.insert(
+            request_id.clone(),
+            Waiter {
+                reply,
+                runtime_call,
+            },
+        );
 
         let msg = RuntimeVendorInboundMessage {
             request_id: request_id.clone(),
@@ -345,6 +378,30 @@ impl WebsocketRuntimeVendor {
                     "the runtime vendor did not answer in time".to_string(),
                 ))
             }
+        }
+    }
+
+    /// Fail a relayed call locally when reconciliation proves no reply is coming.
+    pub(crate) async fn fail_runtime_request(
+        &self,
+        runtime_id: &str,
+        call_id: &str,
+        message: String,
+    ) {
+        let mut waiters = self.waiters.lock().await;
+        let request_id = waiters.iter().find_map(|(request_id, waiter)| {
+            matches!(
+                &waiter.runtime_call,
+                Some((runtime, call)) if runtime == runtime_id && call == call_id
+            )
+            .then(|| request_id.clone())
+        });
+        let waiter = request_id.and_then(|request_id| waiters.remove(&request_id));
+        drop(waiters);
+        if let Some(waiter) = waiter {
+            let _ = waiter
+                .reply
+                .send(RuntimeVendorEvent::RequestFailed(RequestFailed { message }));
         }
     }
 

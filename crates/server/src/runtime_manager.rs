@@ -162,11 +162,13 @@ pub const NARRATION_BUFFER: usize = 8;
 /// What the manager keeps for one acquired runtime, for as long as it is
 /// acquired.
 ///
-/// Per `(runtime, incarnation)` rather than per client, because both members are
-/// about the *sandbox*: one in-flight map so a reconciler sees every agent's
-/// calls rather than one agent's, and one reconciler task so N clones of a
-/// `RuntimeClient` do not become N polling loops.
+/// Per `(runtime, incarnation)` rather than per client: one transport owns its
+/// waiter table, one in-flight map sees every agent's calls, and one reconciler
+/// serves both instead of N client clones starting N rival loops.
 struct RuntimeSlot {
+    /// One transport owns both the calls and the waiter table the reconciler
+    /// abandons. Rebuilding it per acquisition would split those two halves.
+    transport: Arc<dyn horsie_runtime_host::RuntimeTransport>,
     in_flight: Arc<InFlight>,
     /// Aborted when this slot is dropped — on hibernate, on delete, or when the
     /// manager itself goes away.
@@ -201,9 +203,9 @@ impl RuntimeManager {
 
     /// This runtime's slot, spawning its reconciler on the first acquisition.
     ///
-    /// The transport is only used to build the reconciler, and only on the round
-    /// that creates the slot: every later acquisition of the same runtime joins
-    /// the loop already running rather than starting a rival.
+    /// The first transport is kept with the reconciler it serves. Later
+    /// acquisitions reuse both, so reconciliation always releases the same
+    /// waiters that session calls register.
     fn slot(
         &self,
         session: &str,
@@ -222,6 +224,7 @@ impl RuntimeManager {
                 in_flight.clone(),
             ));
             Arc::new(RuntimeSlot {
+                transport: transport.clone(),
                 in_flight,
                 _reconciler: ReconcilerTask(reconciler),
             })
@@ -457,7 +460,7 @@ impl RuntimeManager {
             )
             .await?;
         let slot = self.slot(at.runtime, at.incarnation, &transport);
-        let client = Self::client(at.runtime, transport, slot.in_flight.clone());
+        let client = Self::client(at.runtime, slot.transport.clone(), slot.in_flight.clone());
 
         // Every acquisition, not only the first. The steps are idempotent, and
         // this is the one party that cannot know whether a hibernated runtime
@@ -718,7 +721,7 @@ impl RuntimeManager {
         }
     }
 
-    /// A client over the handle the vendor just returned.
+    /// A client over the runtime slot's shared handle.
     ///
     /// The handle is bound to the vendor's *name*, not to the link that
     /// answered this call: a caller holds the client for a whole run — the
@@ -920,6 +923,21 @@ mod tests {
             account: "acct-1".to_string(),
             bus,
         }))
+    }
+
+    #[tokio::test]
+    async fn a_runtime_slot_keeps_one_transport_for_calls_and_reconciliation() {
+        let manager = manager(Arc::new(RwLock::new(HashMap::new())));
+        let first: Arc<dyn horsie_runtime_host::RuntimeTransport> =
+            Arc::new(horsie_runtime_host::MockTransport::ok("first"));
+        let second: Arc<dyn horsie_runtime_host::RuntimeTransport> =
+            Arc::new(horsie_runtime_host::MockTransport::ok("second"));
+
+        let original = manager.slot("runtime-1", "incarnation-1", &first);
+        let reused = manager.slot("runtime-1", "incarnation-1", &second);
+
+        assert!(Arc::ptr_eq(&original, &reused));
+        assert!(Arc::ptr_eq(&reused.transport, &first));
     }
 
     /// Say what a runtime says when it comes up: its handshake, on its own out
