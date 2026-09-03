@@ -345,6 +345,9 @@ impl Component for SessionCore {
     #[allow(clippy::wildcard_enum_match_arm)]
     fn apply(state: &mut SessionState, event: &SessionDomainEvent) {
         match event.clone() {
+            SessionDomainEvent::AgentRunOutcomeRecorded { agent, run_id } => {
+                state.agent_run_outcomes.insert(agent.to_string(), run_id);
+            }
             SessionDomainEvent::AgentDeleted { id, .. } => {
                 state.forest.apply_agent_deleted(id);
             }

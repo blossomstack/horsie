@@ -1438,12 +1438,12 @@ impl SessionActor {
         // to the agent that asked them. This is the one moment the session sees
         // their text, and the inbox needs it — so it is taken here rather than
         // by widening a type whose whole point is to be narrow.
-        let asked = if let AgentOutcome::Asked { agent, asks } = &outcome {
+        let asked = if let AgentOutcome::Asked { agent, asks, .. } = &outcome {
             Some((*agent, asks.clone()))
         } else {
             None
         };
-        let (who, end) = match TurnEnd::split(outcome) {
+        let (who, run_id, end) = match TurnEnd::split(outcome) {
             Ok(pair) => pair,
             // Usage is banked for every agent alike, and always: the tokens
             // were spent whatever became of the turn that spent them. The main
@@ -1492,6 +1492,9 @@ impl SessionActor {
                 .await;
             }
         };
+        if state.has_agent_run_outcome(who, run_id) {
+            return CommandEffect::none();
+        }
         // One lookup: the entry that hosts the agent says what its outcome
         // means. No ordering between registries to get right, because there is
         // one registry.
@@ -1505,7 +1508,7 @@ impl SessionActor {
                 self.index_inbox_asks(agent, &asks);
             }
         }
-        match key {
+        let effect = match key {
             Some(AgentKey::Main) => self.on_main_outcome(state, end, ctx).await,
             Some(AgentKey::Step(_)) => match state.forest.step_of_agent(who) {
                 Some((run, index)) => self.on_step_outcome(state, run, index, who, end, ctx).await,
@@ -1517,8 +1520,25 @@ impl SessionActor {
             Some(AgentKey::Sub(_)) => self.on_sub_agent_outcome(state, who, end, ctx).await,
             None => {
                 tracing::warn!(agent = %who, "outcome from an agent nothing hosts; ignored");
-                CommandEffect::none()
+                return CommandEffect::none();
             }
+        };
+        Self::record_agent_run_outcome(effect, who, run_id)
+    }
+
+    fn record_agent_run_outcome(
+        effect: CommandEffect<SessionDomainEvent>,
+        agent: Uuid,
+        run_id: u64,
+    ) -> CommandEffect<SessionDomainEvent> {
+        let snapshot = effect.snapshots();
+        let mut events = effect.events().to_vec();
+        events.push(SessionDomainEvent::AgentRunOutcomeRecorded { agent, run_id });
+        let effect = CommandEffect::persist(events);
+        if snapshot {
+            effect.and_snapshot()
+        } else {
+            effect
         }
     }
 
@@ -1665,6 +1685,7 @@ impl EventSourcedActor for SessionActor {
                 SubSessions::apply(&mut state, &event)
             }
             SessionDomainEvent::UsageRecorded { .. }
+            | SessionDomainEvent::AgentRunOutcomeRecorded { .. }
             | SessionDomainEvent::AgentDeleted { .. }
             | SessionDomainEvent::SpecRecorded { .. }
             | SessionDomainEvent::Renamed { .. } => SessionCore::apply(&mut state, &event),

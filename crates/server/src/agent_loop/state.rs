@@ -367,6 +367,60 @@ impl AgentState {
             .join("\n\n")
     }
 
+    /// The first normal step marker after the newest run boundary.
+    #[must_use]
+    pub fn current_run_id(&self) -> Option<u64> {
+        let from = self
+            .history
+            .iter()
+            .rposition(|entry| matches!(&entry.record, AgentDomainEvent::RunEnded { .. }))
+            .map_or(0, |position| position + 1);
+        self.history[from..].iter().find_map(|entry| {
+            matches!(
+                &entry.record,
+                AgentDomainEvent::StepStarted {
+                    kind: StepKind::Agent,
+                }
+            )
+            .then_some(entry.seq)
+        })
+    }
+
+    /// The run id and reason of the newest durable run boundary.
+    #[must_use]
+    pub fn latest_run_end(&self) -> Option<(u64, &RunEnd)> {
+        let end = self
+            .history
+            .iter()
+            .rposition(|entry| matches!(&entry.record, AgentDomainEvent::RunEnded { .. }))?;
+        let from = self.history[..end]
+            .iter()
+            .rposition(|entry| matches!(&entry.record, AgentDomainEvent::RunEnded { .. }))
+            .map_or(0, |position| position + 1);
+        let segment = &self.history[from..end];
+        let run_id = segment
+            .iter()
+            .find_map(|entry| {
+                matches!(
+                    &entry.record,
+                    AgentDomainEvent::StepStarted {
+                        kind: StepKind::Agent,
+                    }
+                )
+                .then_some(entry.seq)
+            })
+            .or_else(|| {
+                segment.iter().find_map(|entry| {
+                    matches!(&entry.record, AgentDomainEvent::StepStarted { .. })
+                        .then_some(entry.seq)
+                })
+            })?;
+        let AgentDomainEvent::RunEnded { reason, .. } = &self.history[end].record else {
+            return None;
+        };
+        Some((run_id, reason))
+    }
+
     /// The open top marker after the newest run boundary.
     #[must_use]
     pub fn open_step(&self) -> Option<(u64, &StepKind)> {

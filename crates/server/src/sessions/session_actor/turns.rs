@@ -815,7 +815,10 @@ mod tests {
 
         session
             .tell(SessionCommand::AgentOutcome(
-                crate::agent_loop::AgentOutcome::Interrupted { agent: id },
+                crate::agent_loop::AgentOutcome::Interrupted {
+                    agent: id,
+                    run_id: 0,
+                },
             ))
             .await
             .unwrap();
@@ -824,6 +827,72 @@ mod tests {
             s.status() == crate::sessions::spec::SessionStatus::Idle
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn a_redelivered_agent_run_outcome_is_applied_once() {
+        let f = actor_fixture().await;
+        let id = Uuid::new_v4();
+        let (session, journal) = load_from(
+            &f,
+            id,
+            &[SessionDomainEvent::TurnBegan {
+                at_ms: 0,
+                agent: id,
+            }],
+        )
+        .await;
+
+        session
+            .tell(SessionCommand::AgentOutcome(
+                crate::agent_loop::AgentOutcome::Interrupted {
+                    agent: id,
+                    run_id: 7,
+                },
+            ))
+            .await
+            .unwrap();
+        wait_for_state(&journal, id, "first outcome", |state| {
+            state.has_agent_run_outcome(id, 7)
+        })
+        .await;
+
+        session
+            .tell(SessionCommand::AgentOutcome(
+                crate::agent_loop::AgentOutcome::Failed {
+                    agent: id,
+                    run_id: 7,
+                    error: "duplicate must not win".into(),
+                    recoverable: false,
+                    terminal: false,
+                },
+            ))
+            .await
+            .unwrap();
+        let (reply, rx) = oneshot::channel();
+        session
+            .tell(SessionCommand::Read(ReadCommand::Snapshot {
+                reply: ReplyTo::from_sender(reply),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            rx.await.unwrap().status,
+            crate::sessions::spec::SessionStatus::Idle
+        );
+
+        let events = crate::sessions::events::session_events(&journal, id).await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, SessionDomainEvent::AgentRunOutcomeRecorded { .. }))
+                .count(),
+            1
+        );
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            SessionDomainEvent::TurnFailed { error, .. } if error == "duplicate must not win"
+        )));
     }
 
     /// A turn that failed before its loop began banks no boundary in the
@@ -858,7 +927,10 @@ mod tests {
 
         session
             .tell(SessionCommand::AgentOutcome(
-                crate::agent_loop::AgentOutcome::Interrupted { agent: id },
+                crate::agent_loop::AgentOutcome::Interrupted {
+                    agent: id,
+                    run_id: 0,
+                },
             ))
             .await
             .unwrap();

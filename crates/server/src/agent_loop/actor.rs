@@ -218,6 +218,35 @@ fn recovery_repairs(state: &AgentState) -> Vec<AgentDomainEvent> {
     }
 }
 
+fn terminal_outcome(agent: uuid::Uuid, run_id: u64, reason: &RunEnd) -> Option<AgentOutcome> {
+    match reason {
+        RunEnd::Complete { output } => Some(AgentOutcome::Concluded {
+            agent,
+            run_id,
+            output: output.clone(),
+        }),
+        RunEnd::AwaitingInput { asks } => Some(AgentOutcome::Asked {
+            agent,
+            run_id,
+            asks: asks.clone(),
+        }),
+        RunEnd::Parked => Some(AgentOutcome::Parked { agent, run_id }),
+        RunEnd::Cancelled => None,
+        RunEnd::Interrupted => Some(AgentOutcome::Interrupted { agent, run_id }),
+        RunEnd::Failed {
+            error,
+            recoverable,
+            terminal,
+        } => Some(AgentOutcome::Failed {
+            agent,
+            run_id,
+            error: error.clone(),
+            recoverable: *recoverable,
+            terminal: *terminal,
+        }),
+    }
+}
+
 #[async_trait]
 impl EventSourcedActor for AgentActor {
     type Command = AgentCommand;
@@ -313,38 +342,34 @@ impl EventSourcedActor for AgentActor {
                     .await;
             }
         }
-        // Terminal outcomes leave the actor only after their run boundary is
-        // durable. Replaying a snapshot does not call this hook, and a parent
-        // applies replacements by agent identity, so delivery is idempotent.
+        // A run becomes visible to its owner only after its start marker is
+        // durable. A message joining an existing run has the same run id and
+        // produces no second start.
+        if events
+            .iter()
+            .any(|event| matches!(event, AgentDomainEvent::TurnBegan { .. }))
+            && let Some(run_id) = state.current_run_id()
+        {
+            self.runtime
+                .parent
+                .deliver(AgentOutcome::Started {
+                    agent: self.runtime.journal_id,
+                    run_id,
+                })
+                .await;
+        }
+        // Terminal outcomes leave only after their boundary is durable. The
+        // run id lets a recovering agent redeliver without applying it twice.
         for event in events {
             let AgentDomainEvent::RunEnded { reason, .. } = event else {
                 continue;
             };
-            let agent = self.runtime.journal_id;
-            let outcome = match reason {
-                RunEnd::Complete { output } => AgentOutcome::Concluded {
-                    agent,
-                    output: output.clone(),
-                },
-                RunEnd::AwaitingInput { asks } => AgentOutcome::Asked {
-                    agent,
-                    asks: asks.clone(),
-                },
-                RunEnd::Parked => AgentOutcome::Parked { agent },
-                RunEnd::Cancelled => continue,
-                RunEnd::Interrupted => AgentOutcome::Interrupted { agent },
-                RunEnd::Failed {
-                    error,
-                    recoverable,
-                    terminal,
-                } => AgentOutcome::Failed {
-                    agent,
-                    error: error.clone(),
-                    recoverable: *recoverable,
-                    terminal: *terminal,
-                },
+            let Some((run_id, _)) = state.latest_run_end() else {
+                continue;
             };
-            self.runtime.parent.deliver(outcome).await;
+            if let Some(outcome) = terminal_outcome(self.runtime.journal_id, run_id, reason) {
+                self.runtime.parent.deliver(outcome).await;
+            }
         }
         // Whatever just became durable may have changed what this agent should
         // be doing — a queue item, a tool result, a boundary. Asking is cheap
@@ -398,6 +423,12 @@ impl EventSourcedActor for AgentActor {
                 ack: horsie_actor::ReplyTo::from_sender(ack),
             }))
             .await;
+        } else if let Some((run_id, reason)) = state.latest_run_end()
+            && let Some(outcome) = terminal_outcome(self.runtime.journal_id, run_id, reason)
+        {
+            // A crash may land after `RunEnded` but before its best-effort tell.
+            // The session deduplicates this by `(agent, run_id)`.
+            self.runtime.parent.deliver(outcome).await;
         }
         self.agent_loop.on_load(&mut cx).await;
         // Recovery is over and the repairs are queued behind this: the advance

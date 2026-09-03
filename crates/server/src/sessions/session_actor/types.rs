@@ -579,6 +579,12 @@ pub enum SessionDomainEvent {
         error: String,
         terminal: bool,
     },
+    /// A terminal agent run outcome this session has applied. Stored beside
+    /// the domain event it caused so redelivery after agent recovery is safe.
+    AgentRunOutcomeRecorded {
+        agent: Uuid,
+        run_id: u64,
+    },
     /// The main agent started a turn.
     ///
     /// Recorded, not decided: the agent owns its own queue and chooses when
@@ -864,18 +870,23 @@ impl TurnEnd {
     /// routing path with a non-ending outcome still in hand — the narrowing is
     /// total, and nothing below it needs a case for a variant that never
     /// arrives.
-    pub(super) fn split(outcome: AgentOutcome) -> Result<(Uuid, Self), (Uuid, NotAnEnd)> {
+    pub(super) fn split(outcome: AgentOutcome) -> Result<(Uuid, u64, Self), (Uuid, NotAnEnd)> {
         match outcome {
-            AgentOutcome::Concluded { agent, output } => Ok((agent, Self::Concluded { output })),
-            AgentOutcome::Asked { agent, .. } => Ok((agent, Self::Asked)),
-            AgentOutcome::Parked { agent } => Ok((agent, Self::Parked)),
-            AgentOutcome::Interrupted { agent } => Ok((agent, Self::Interrupted)),
+            AgentOutcome::Concluded {
+                agent,
+                run_id,
+                output,
+            } => Ok((agent, run_id, Self::Concluded { output })),
+            AgentOutcome::Asked { agent, run_id, .. } => Ok((agent, run_id, Self::Asked)),
+            AgentOutcome::Parked { agent, run_id } => Ok((agent, run_id, Self::Parked)),
+            AgentOutcome::Interrupted { agent, run_id } => Ok((agent, run_id, Self::Interrupted)),
             AgentOutcome::Failed {
                 agent,
+                run_id,
                 error,
                 terminal,
                 ..
-            } => Ok((agent, Self::Failed { error, terminal })),
+            } => Ok((agent, run_id, Self::Failed { error, terminal })),
             AgentOutcome::UsageRecorded {
                 agent,
                 usage_total,
@@ -887,7 +898,7 @@ impl TurnEnd {
                     context_tokens,
                 },
             )),
-            AgentOutcome::Started { agent } => Err((agent, NotAnEnd::Started)),
+            AgentOutcome::Started { agent, .. } => Err((agent, NotAnEnd::Started)),
             AgentOutcome::SeedSummary {
                 agent,
                 sub_sessions,
@@ -1052,6 +1063,11 @@ pub struct SessionState {
     /// without waking anything.
     #[serde(default)]
     pub agent_context_tokens: HashMap<String, u32>,
+    /// Newest terminal agent run applied to this session, by agent id. Agent
+    /// recovery may redeliver the same durable boundary; this makes that
+    /// delivery idempotent across session restarts too.
+    #[serde(default)]
+    pub agent_run_outcomes: HashMap<String, u64>,
     /// Every unit of work this session hosts — the main session, its
     /// workflow runs, every subagent and every sub session — as one hierarchy.
     #[serde(default)]
@@ -1059,6 +1075,13 @@ pub struct SessionState {
 }
 
 impl SessionState {
+    #[must_use]
+    pub fn has_agent_run_outcome(&self, agent: Uuid, run_id: u64) -> bool {
+        self.agent_run_outcomes
+            .get(&agent.to_string())
+            .is_some_and(|seen| *seen >= run_id)
+    }
+
     /// How the runtime `agent` runs on is doing.
     ///
     /// `None` means there is nothing to wait for: either the agent's session

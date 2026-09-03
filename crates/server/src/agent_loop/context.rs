@@ -69,39 +69,40 @@ pub struct AskedQuestion {
 /// its transcript is the session's, and the agent's own for anything else.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentOutcome {
-    /// The agent started a turn off its own queue.
+    /// The agent sealed pending history into a new run.
     ///
-    /// Not a terminal outcome, and the one report that flows *before* the work
-    /// rather than after it. It exists because the agent, not its owner,
-    /// decides when its queue becomes a turn — so the owner can no longer
-    /// learn that a turn began by being the thing that began it.
-    Started { agent: Uuid },
+    /// Not terminal. Delivered only after the first agent-step marker is
+    /// durable; `run_id` is that marker's history sequence.
+    Started { agent: Uuid, run_id: u64 },
     /// A turn the process died inside, found at recovery and reported by the
     /// only thing that can tell: the agent whose turn it was.
     ///
-    /// Delivered from `on_recovery_complete`, which the runtime runs before the
-    /// first live command — so an agent physically cannot begin a new turn
-    /// before this has been sent, and an owner reading it never has to work out
-    /// *which* turn it means. That ordering is the whole mechanism; there is no
-    /// fence and no turn number anywhere.
-    Interrupted { agent: Uuid },
+    /// Carries the first agent-step marker sequence so recovery may redeliver
+    /// the durable boundary and the owner can ignore a duplicate.
+    Interrupted { agent: Uuid, run_id: u64 },
     /// The agent produced its output (structured, or its final text).
-    Concluded { agent: Uuid, output: Value },
+    Concluded {
+        agent: Uuid,
+        run_id: u64,
+        output: Value,
+    },
     /// The agent paused to ask the user. A turn may ask more than once — each
     /// question is its own tool call, and they are answered together, since the
     /// run cannot resume while any of them is still missing a result.
     Asked {
         agent: Uuid,
+        run_id: u64,
         asks: Vec<AskedQuestion>,
     },
     /// The agent parked itself awaiting its timers.
-    Parked { agent: Uuid },
+    Parked { agent: Uuid, run_id: u64 },
     /// The agent run failed. `recoverable` is about the *run* — whether trying
     /// it again could work — while `terminal` is about the agent's owner: its
     /// sandbox is gone and no later message can bring it back. A provider `401`
     /// is neither recoverable nor terminal; fix the key and the next turn runs.
     Failed {
         agent: Uuid,
+        run_id: u64,
         error: String,
         recoverable: bool,
         terminal: bool,

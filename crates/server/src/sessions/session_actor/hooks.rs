@@ -308,16 +308,20 @@ impl HookRouting {
                 // its own per-key branching: a halt is a failure with a
                 // reason, and what a failure means for a main agent, a
                 // subagent and a step is already decided in one place.
+                let agent = match key {
+                    AgentKey::Main => actor.id,
+                    AgentKey::Sub(id) | AgentKey::Step(id) | AgentKey::SubSession(id) => id,
+                };
+                let run_id = state
+                    .agent_run_outcomes
+                    .get(&agent.to_string())
+                    .map_or(0, |seen| seen.saturating_add(1));
                 actor
                     .on_agent_outcome(
                         state,
                         AgentOutcome::Failed {
-                            agent: match key {
-                                AgentKey::Main => actor.id,
-                                AgentKey::Sub(id)
-                                | AgentKey::Step(id)
-                                | AgentKey::SubSession(id) => id,
-                            },
+                            agent,
+                            run_id,
                             error: reason,
                             // Not recoverable and not terminal: re-running the
                             // same turn would meet the same hook, but the

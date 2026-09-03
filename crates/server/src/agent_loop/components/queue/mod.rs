@@ -14,7 +14,6 @@
 
 pub mod inbox;
 
-use crate::agent_loop::context::AgentOutcome;
 use crate::agent_loop::prelude::*;
 use horsie_actor::CommandEffect;
 use horsie_agentcore::{
@@ -66,19 +65,6 @@ impl Queue {
                 kind: StepKind::Agent,
             },
         ];
-        // The owner no longer learns a turn began by being the thing that began
-        // it, so it is told. Before the work, not after: this is what moves a
-        // session to `Running`. A message joining a turn already in flight is
-        // not a new turn and says nothing new.
-        if !state.turn_in_flight() {
-            cx.runtime
-                .parent
-                .deliver(AgentOutcome::Started {
-                    agent: cx.runtime.journal_id,
-                })
-                .await;
-        }
-
         let start = crate::agent_loop::StartTurn {
             // An agent that has never spoken to a provider is starting up;
             // anything else was folded from a journal. Read off the *LLM*

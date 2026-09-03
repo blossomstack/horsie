@@ -263,7 +263,9 @@ pub fn route(event: &SessionDomainEvent, state: &SessionState) -> Vec<Entry> {
         // what decided them. Routing them from here as well would render the
         // same fact twice. The session keeps its own copy only to move
         // `status`, which is not something a viewer reads off the log.
-        E::TurnBegan { .. } | E::AskRecorded { .. } => Vec::new(),
+        E::TurnBegan { .. } | E::AskRecorded { .. } | E::AgentRunOutcomeRecorded { .. } => {
+            Vec::new()
+        }
     }
 }
 
