@@ -33,10 +33,14 @@ pub struct AgentConfig {
     pub compaction: Option<crate::compaction::CompactionBudget>,
 }
 
+/// The number of completion/tool-use cycles an agent may make when its caller
+/// does not supply an explicit limit.
+pub const DEFAULT_MAX_ITERATIONS: u32 = 10_000;
+
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            max_iterations: 100,
+            max_iterations: DEFAULT_MAX_ITERATIONS,
             stuck_threshold: 5,
             nudge_threshold: 3,
             max_tokens: None,
@@ -1499,6 +1503,11 @@ mod tests {
             .unwrap();
         assert_eq!(ie.message_id, "result:hc1");
         assert!(matches!(ie.input, AgentInput::ToolResult(_)));
+    }
+
+    #[test]
+    fn default_max_iterations_is_ten_thousand() {
+        assert_eq!(AgentConfig::default().max_iterations, 10_000);
     }
 
     #[tokio::test]

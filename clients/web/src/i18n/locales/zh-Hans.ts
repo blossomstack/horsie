@@ -1082,7 +1082,7 @@ const zhHans: typeof en = {
     chooseStep: "选择一个步骤进行编辑。",
     namePlaceholder: "fix-bug",
     stepBudget: "步骤预算",
-    stepBudgetPlaceholder: "100（默认）",
+    stepBudgetPlaceholder: "1000（默认）",
     startsAt: "起始步骤",
     chooseAStep: "—— 请选择一个步骤 ——",
     noSuchStep: "{{name}}（此步骤不存在）",

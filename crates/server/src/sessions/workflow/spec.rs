@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 /// Most steps one run may execute before it is failed. A definition with a
 /// loop and a condition that never flips would otherwise run forever.
-pub const DEFAULT_MAX_STEPS: u32 = 100;
+pub const DEFAULT_MAX_STEPS: u32 = 1_000;
 
 /// A directed edge out of a step (storage twin of the wire `WorkflowTransition`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -125,6 +125,11 @@ pub fn output_as_input(output: &Value) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_max_steps_is_one_thousand() {
+        assert_eq!(default_max_steps(), 1_000);
+    }
 
     #[test]
     fn the_start_step_is_handed_the_run_input_under_a_plain_header() {

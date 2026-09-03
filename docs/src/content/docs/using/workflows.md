@@ -79,7 +79,7 @@ A transition may point back to an earlier step; the graph draws it as a dashed
 curve.
 
 Loops are bounded by the workflow's **step budget** — the most steps one run
-may execute, set on the definition, 100 if left blank. It is the only thing
+may execute, set on the definition, 1,000 if left blank. It is the only thing
 stopping a loop whose outcome never changes: a run that hits it fails with
 `step budget exhausted` rather than spinning forever. A run snapshots the
 budget when it starts, so changing it never affects a run under way.
