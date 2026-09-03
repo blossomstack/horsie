@@ -17,16 +17,15 @@
 //! a park, an ask, a submitted result, a contradiction — decided here because
 //! only the turn knows what would wake the agent again.
 
-use crate::agent_loop::prelude::*;
 use crate::agent_loop::context::{AgentOutcome, AgentOutcomeSink, AskedQuestion};
+use crate::agent_loop::prelude::*;
 use crate::sessions::ask_tool::ASK_USER_TOOL;
 use crate::sessions::workflow::SUBMIT_RESULT_TOOL;
 use async_trait::async_trait;
 use horsie_actor::{ActorRef, CommandEffect, ReplyTo};
 use horsie_agentcore::{
-    AgentEvent, AgentLogBody, EventSink, EventSinkError, LlmError, Message, StepError,
-    StepRequest, StoppedCall, Usage, extract_text, extract_tool_calls,
-    tool_fingerprint,
+    AgentEvent, AgentLogBody, EventSink, EventSinkError, LlmError, Message, StepError, StepRequest,
+    StoppedCall, extract_text, extract_tool_calls, tool_fingerprint,
 };
 use horsie_models::now_ms;
 use serde_json::Value;
@@ -140,11 +139,18 @@ pub struct RunReport {
 pub(crate) enum RunOutcome {
     /// Agent ended its turn with plain text. Whether that is a park or a
     /// mistake is decided here, where what would wake the agent is known.
-    Completed { text: String },
+    Completed {
+        text: String,
+    },
     /// A tool ended the run. One call per stopper the model issued.
-    Stopped { calls: Vec<StoppedCall> },
+    Stopped {
+        calls: Vec<StoppedCall>,
+    },
     Cancelled,
-    Failed { error: String, recoverable: bool },
+    Failed {
+        error: String,
+        recoverable: bool,
+    },
 }
 
 /// One turn's in-flight bookkeeping — what the old background loop held in
@@ -156,10 +162,6 @@ pub(crate) struct TurnFlight {
     /// Consecutive failed attempts at the *current* call.
     attempt: u32,
     fingerprints: VecDeque<String>,
-    /// Banked the moment each call answers, so no later failure loses it.
-    usage: Usage,
-    /// The last call's prompt size alone — what is loaded in context now.
-    context_tokens: u32,
 }
 
 /// Forwards streamed text chunks to the mailbox, tagged with the turn so a
@@ -187,25 +189,6 @@ impl EventSink for DeltaSink {
     }
 }
 
-/// Sums two optional per-turn cache-token counts. Stays `None` only when
-/// *neither* side reported anything — a turn/provider that's silent about
-/// cache data shouldn't zero out a total another turn already contributed to.
-fn sum_optional(a: Option<u32>, b: Option<u32>) -> Option<u32> {
-    match (a, b) {
-        (None, None) => None,
-        (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
-    }
-}
-
-/// Bank one call's cost into the turn's running total.
-fn bank_usage(total: &mut Usage, spent: &Usage) {
-    total.input_tokens += spent.input_tokens;
-    total.output_tokens += spent.output_tokens;
-    total.cache_creation_tokens =
-        sum_optional(total.cache_creation_tokens, spent.cache_creation_tokens);
-    total.cache_read_tokens = sum_optional(total.cache_read_tokens, spent.cache_read_tokens);
-}
-
 impl Turn {
     /// The turn's bookkeeping, started if this is its first call.
     ///
@@ -222,8 +205,6 @@ impl Turn {
             iteration: 0,
             attempt: 0,
             fingerprints: VecDeque::new(),
-            usage: Usage::without_cache(0, 0),
-            context_tokens: cx.state.context_tokens(),
         })
     }
 
@@ -302,38 +283,19 @@ impl Turn {
         .await
     }
 
-    /// What the turn has spent, and where it left the context.
-    ///
-    /// The one pair of numbers only this component holds, which is why every
-    /// ending journals one of the two events below: an ending that journals
-    /// neither would lose the turn's cost and leave the agent reading
-    /// `turn_in_flight` for ever.
-    fn spent(&self) -> (Usage, u32, u32) {
-        self.flight.as_ref().map_or_else(
-            || (Usage::without_cache(0, 0), 0, 0),
-            |f| (f.usage.clone(), f.context_tokens, f.iteration),
-        )
-    }
-
-    /// The turn ended as it should have.
+    /// Mark a normal run boundary. Completed provider steps already banked
+    /// their own usage with their assistant messages.
     fn run_complete(&self) -> AgentDomainEvent {
-        let (usage, context_tokens, iterations) = self.spent();
         AgentDomainEvent::RunComplete {
-            usage,
-            iterations,
-            context_tokens,
+            iterations: self.flight.as_ref().map_or(0, |flight| flight.iteration),
             at_ms: now_ms(),
         }
     }
 
-    /// The turn ended without finishing — a failure, or a cancel.
+    /// Mark a failed or cancelled run boundary. There is no bill here: any
+    /// completed provider step was persisted and banked when it returned.
     fn run_aborted(&self) -> AgentDomainEvent {
-        let (usage, context_tokens, _) = self.spent();
-        AgentDomainEvent::RunAborted {
-            usage,
-            context_tokens,
-            at_ms: now_ms(),
-        }
+        AgentDomainEvent::RunAborted { at_ms: now_ms() }
     }
 
     /// Spawn one provider call over the state's prompt.
@@ -393,14 +355,10 @@ impl Turn {
         let flight = self.flight(cx);
         flight.iteration += 1;
         flight.attempt = 0;
-        // Banked the moment the call answers, before anything downstream can
-        // fail: every later exit reports this call's cost.
-        bank_usage(&mut flight.usage, &response.usage);
-        flight.context_tokens = response.usage.input_tokens;
-
         let tool_calls = extract_tool_calls(&response.message.parts);
         let mut events = vec![AgentDomainEvent::MessageComplete {
             message: response.message.clone(),
+            usage: response.usage.clone(),
         }];
         let folded = Components::apply_all(cx.state, &events);
 
@@ -618,8 +576,14 @@ impl Component for Turn {
     #[allow(clippy::wildcard_enum_match_arm)]
     fn apply(state: &mut AgentState, event: AgentDomainEvent) {
         match event {
-            AgentDomainEvent::MessageComplete { message }
-            | AgentDomainEvent::MessageAborted { message } => {
+            AgentDomainEvent::MessageComplete { message, usage } => {
+                let at_ms = message.created_at_ms;
+                state.push(at_ms, AgentLogBody::Llm(message));
+                if let Some(part) = state.part_mut::<UsageState>() {
+                    part.step_completed(usage);
+                }
+            }
+            AgentDomainEvent::MessageAborted { message } => {
                 let at_ms = message.created_at_ms;
                 state.push(at_ms, AgentLogBody::Llm(message));
             }
@@ -638,26 +602,7 @@ impl Component for Turn {
                 }
                 state.push(at_ms, AgentLogBody::Llm(message));
             }
-            AgentDomainEvent::RunComplete {
-                usage,
-                context_tokens,
-                ..
-            } => {
-                if let Some(part) = state.part_mut::<UsageState>() {
-                    part.turn_ended(usage, context_tokens, true);
-                }
-                if let Some(part) = state.part_mut::<TurnState>() {
-                    part.ended();
-                }
-            }
-            AgentDomainEvent::RunAborted {
-                usage,
-                context_tokens,
-                ..
-            } => {
-                if let Some(part) = state.part_mut::<UsageState>() {
-                    part.turn_ended(usage, context_tokens, false);
-                }
+            AgentDomainEvent::RunComplete { .. } | AgentDomainEvent::RunAborted { .. } => {
                 if let Some(part) = state.part_mut::<TurnState>() {
                     part.ended();
                 }
@@ -774,13 +719,6 @@ impl Turn {
 
         match report.outcome {
             RunOutcome::Completed { text } => {
-                parent
-                    .deliver(AgentOutcome::UsageRecorded {
-                        agent,
-                        usage_total: state.usage_total(),
-                        context_tokens: state.context_tokens(),
-                    })
-                    .await;
                 if cx.params.requires_result {
                     return self.ended_without_result(state, cx, agent, parent).await;
                 }
@@ -817,13 +755,6 @@ impl Turn {
                 match Self::interpret(calls) {
                     Conclusion::Output(output, submitted) => {
                         parent
-                            .deliver(AgentOutcome::UsageRecorded {
-                                agent,
-                                usage_total: state.usage_total(),
-                                context_tokens: state.context_tokens(),
-                            })
-                            .await;
-                        parent
                             .deliver(AgentOutcome::Concluded { agent, output })
                             .await;
                         // Submitting says the work is done, which makes any
@@ -857,13 +788,6 @@ impl Turn {
                     }
                     Conclusion::Ask(asks) => {
                         parent
-                            .deliver(AgentOutcome::UsageRecorded {
-                                agent,
-                                usage_total: state.usage_total(),
-                                context_tokens: state.context_tokens(),
-                            })
-                            .await;
-                        parent
                             .deliver(AgentOutcome::Asked {
                                 agent,
                                 asks: asks.clone(),
@@ -881,29 +805,13 @@ impl Turn {
                         // history and streams read state, so it is invisible.
                         CommandEffect::persist(vec![recorded]).and_snapshot()
                     }
-                    Conclusion::Contradiction(calls) => {
-                        parent
-                            .deliver(AgentOutcome::UsageRecorded {
-                                agent,
-                                usage_total: state.usage_total(),
-                                context_tokens: state.context_tokens(),
-                            })
-                            .await;
-                        self.correct_contradiction(calls, state)
-                    }
+                    Conclusion::Contradiction(calls) => self.correct_contradiction(calls, state),
                 }
             }
             RunOutcome::Cancelled => {
                 // The tokens were spent whatever became of the turn that spent
                 // them; the caller banked them as `RunAborted` in the same
                 // batch, so the total read here includes them.
-                parent
-                    .deliver(AgentOutcome::UsageRecorded {
-                        agent,
-                        usage_total: state.usage_total(),
-                        context_tokens: state.context_tokens(),
-                    })
-                    .await;
                 // A cancelled tool call has no result and never will get one.
                 // Journal the synthetic result now, where it belongs —
                 // directly after the assistant message that made the call —
@@ -928,13 +836,6 @@ impl Turn {
                 CommandEffect::persist(events).and_snapshot()
             }
             RunOutcome::Failed { error, recoverable } => {
-                parent
-                    .deliver(AgentOutcome::UsageRecorded {
-                        agent,
-                        usage_total: state.usage_total(),
-                        context_tokens: state.context_tokens(),
-                    })
-                    .await;
                 parent
                     .deliver(AgentOutcome::Failed {
                         agent,

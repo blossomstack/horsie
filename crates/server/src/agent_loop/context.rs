@@ -1,5 +1,5 @@
-use crate::agent_loop::state::UsageTotal;
 use crate::agent_loop::shared::mcp_toolbox::CompositeToolbox;
+use crate::agent_loop::state::UsageTotal;
 use async_trait::async_trait;
 use horsie_agentcore::{LlmProvider, ToolCallError, ToolOutcome, ToolSpec, Toolbox, ToolboxImpl};
 use horsie_runtime_host::{RuntimeClient, add_runtime_tools};
@@ -106,11 +106,10 @@ pub enum AgentOutcome {
         recoverable: bool,
         terminal: bool,
     },
-    /// A run completed successfully, carrying this agent's freshly-updated
-    /// cumulative usage. Delivered alongside `Concluded`/`Asked` (never
-    /// `Failed`/`Parked`, which have no completed run's usage to report), so
-    /// a parent hosting multiple agents can maintain its own durable
-    /// session-level usage total without waking an idle agent to ask for it.
+    /// A provider-backed step completed, carrying this agent's freshly updated
+    /// cumulative usage. Delivered after that step's event is durable, so a
+    /// parent hosting several agents can update its session-level total without
+    /// waiting for the whole run loop to conclude.
     UsageRecorded {
         agent: Uuid,
         usage_total: UsageTotal,
@@ -569,9 +568,11 @@ impl Toolbox for AgentToolbox {
                 };
             }
             let ws_name = self.resolve_workspace(requested_ws)?;
-            let (ws, _) =
-                crate::agent_loop::shared::workspace::scan(&self.runtime_client, Some(ws_name.clone()))
-                    .await;
+            let (ws, _) = crate::agent_loop::shared::workspace::scan(
+                &self.runtime_client,
+                Some(ws_name.clone()),
+            )
+            .await;
             let Some(info) = ws.find(&ws_name) else {
                 return Err(ToolCallError::InvalidInput(format!(
                     "workspace '{ws_name}' is not available"
@@ -608,7 +609,8 @@ impl Toolbox for AgentToolbox {
                 )));
             }
             let (ws, shared) =
-                crate::agent_loop::shared::workspace::scan(&self.runtime_client, filter.clone()).await;
+                crate::agent_loop::shared::workspace::scan(&self.runtime_client, filter.clone())
+                    .await;
             let mut out = crate::agent_loop::shared::workspace::inspect_result(&ws);
             // Append the shared library when listing everything for an
             // opted-in agent.

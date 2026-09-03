@@ -203,11 +203,32 @@ impl EventSourcedActor for AgentActor {
             self.scratch.deltas.clear();
         }
         self.revision.send_modify(|r| *r += 1);
+        // A provider-backed step owns its cost. Publish the freshly folded
+        // cumulative value only after that step's record is durable.
+        if events.iter().any(|event| {
+            matches!(
+                event,
+                AgentDomainEvent::MessageComplete { .. }
+                    | AgentDomainEvent::Compacted { usage: Some(_), .. }
+                    | AgentDomainEvent::SeedSummaryTaken { usage: Some(_), .. }
+            )
+        }) {
+            self.runtime
+                .parent
+                .deliver(crate::agent_loop::AgentOutcome::UsageRecorded {
+                    agent: self.runtime.journal_id,
+                    usage_total: state.usage_total(),
+                    context_tokens: state.context_tokens(),
+                })
+                .await;
+        }
         // Whatever just became durable may have changed what this agent should
         // be doing — a queue item, a tool result, a boundary. Asking is cheap
         // and idempotent; the alternative is every writer remembering to.
         if let Some(self_ref) = &self.self_ref {
-            let _ = self_ref.tell(AgentCommand::Core(CoreCommand::Advance)).await;
+            let _ = self_ref
+                .tell(AgentCommand::Core(CoreCommand::Advance))
+                .await;
         }
         let Some(observer) = &self.observer else {
             return;

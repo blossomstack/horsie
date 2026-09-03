@@ -12,10 +12,58 @@ use crate::agent_loop::AgentState;
 use horsie_agentcore::{LifecycleEvent, Message, Usage};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SystemPromptSource {
+    Configured,
+    InitialContext,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StepKind {
+    Initialize,
+    Connect,
+    Agent,
+    StopHook,
+    Compaction,
+    SeedSummary { request_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StepFailure {
+    Interrupted,
+    Provider(String),
+    TimedOut,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RunEnd {
+    Complete,
+    Cancelled,
+    Interrupted,
+    Failed(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentHistoryEntry {
+    pub seq: u64,
+    pub record: AgentDomainEvent,
+}
+
 /// Coarse events that alter persisted agent state. Streaming observation events
 /// (text/tool-input deltas) are emitted to the event sink but never journaled.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentDomainEvent {
+    SystemPromptRecorded {
+        source: SystemPromptSource,
+        content: String,
+    },
+    AgentInitialized,
+    ConnectionCompleted,
+    /// Its assigned history sequence is both step identity and callback fence.
+    StepStarted { kind: StepKind },
+    StepFailed { reason: StepFailure },
+    StopHookCompleted { outcome: String },
+    RunEnded { reason: RunEnd, at_ms: u64 },
     /// This agent was seeded from another session: `state` is the history it
     /// adopts, `seed` a synthetic message appended after it.
     ///
@@ -47,8 +95,12 @@ pub enum AgentDomainEvent {
         ids: Vec<String>,
         at_ms: u64,
     },
+    /// One provider step completed. Usage is part of the same durable fact as
+    /// the assistant message, so no later failure can lose what this call
+    /// spent.
     MessageComplete {
         message: Message,
+        usage: Usage,
     },
     /// An assistant message the run never got to finish, rebuilt from the text
     /// it had already streamed when the turn was cancelled.
@@ -89,23 +141,15 @@ pub enum AgentDomainEvent {
         seq: usize,
         at_ms: u64,
     },
+    /// A run loop reached its normal boundary. Provider usage was already
+    /// banked by each `MessageComplete`; this event carries no bill.
     RunComplete {
-        usage: Usage,
         iterations: u32,
-        /// The last provider call's prompt size alone (not summed across
-        /// iterations like `usage`) — what's actually in context now.
-        context_tokens: u32,
         at_ms: u64,
     },
-    /// A run that ended badly, and what it had spent by then.
-    ///
-    /// The accounting half of `RunComplete` without the turn half: no turn
-    /// completed, so there is no `last_turn_usage` to set and no iteration
-    /// count worth recording. Exactly one of the two ends a run, so folding
-    /// both into `usage_total` cannot double-count.
+    /// A run loop ended badly. Completed provider steps already banked their
+    /// own usage, so cancellation or failure cannot lose or double-count it.
     RunAborted {
-        usage: Usage,
-        context_tokens: u32,
         at_ms: u64,
     },
     RunCancelled {
@@ -218,4 +262,3 @@ pub enum AgentDomainEvent {
         at_ms: u64,
     },
 }
-

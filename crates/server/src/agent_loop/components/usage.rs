@@ -45,16 +45,13 @@ impl UsageState {
         self.total.add(usage);
     }
 
-    /// Record the end of a turn: its own cost, and where it left the context.
-    pub(crate) fn turn_ended(&mut self, usage: Usage, context_tokens: u32, keep: bool) {
+    /// Bank one completed provider step immediately. The public field keeps
+    /// its historical `last_turn` name, but now means the newest provider
+    /// step: a multi-step loop exposes every call before the loop ends.
+    pub(crate) fn step_completed(&mut self, usage: Usage) {
+        self.context_tokens = usage.input_tokens;
         self.total.add(&usage);
-        self.context_tokens = context_tokens;
-        // A turn that never finished has no "last turn" figure to show: the
-        // number is a completed turn's cost, and half of one would read as a
-        // cheap turn rather than an interrupted one.
-        if keep {
-            self.last_turn = Some(usage);
-        }
+        self.last_turn = Some(usage);
     }
 
     /// What the newest provider call was charged for its prompt.
