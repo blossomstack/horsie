@@ -30,6 +30,7 @@ fn tool_name(call: &ToolCall) -> &'static str {
         ToolCall::ReadFile(_) => "read_file",
         ToolCall::ReadImage(_) => "read_image",
         ToolCall::WriteFile(_) => "write_file",
+        ToolCall::ApplyPatch(_) => "apply_patch",
         ToolCall::FindAndReplace(_) => "find_and_replace",
         ToolCall::ReplaceLines(_) => "replace_lines",
         ToolCall::ListFiles(_) => "list_files",

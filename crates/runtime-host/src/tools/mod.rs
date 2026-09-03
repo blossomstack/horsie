@@ -1,3 +1,4 @@
+mod apply_patch;
 mod bash;
 mod find_and_replace;
 mod glob;
@@ -9,6 +10,7 @@ mod set_env;
 mod set_working_dir;
 mod write_file;
 
+pub use apply_patch::ApplyPatchTool;
 pub use bash::BashTool;
 pub use find_and_replace::FindAndReplaceTool;
 pub use glob::GlobTool;
@@ -57,6 +59,7 @@ pub fn add_runtime_tools(toolbox: ToolboxImpl, client: RuntimeClient) -> Toolbox
         .add(BashTool::new(client.clone()))
         .add(ReadFileTool::new(client.clone()))
         .add(WriteFileTool::new(client.clone()))
+        .add(ApplyPatchTool::new(client.clone()))
         .add(FindAndReplaceTool::new(client.clone()))
         .add(ReplaceLinesTool::new(client.clone()))
         .add(ListFilesTool::new(client.clone()))

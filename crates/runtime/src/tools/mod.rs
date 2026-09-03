@@ -1,3 +1,4 @@
+pub mod apply_patch;
 pub mod bash;
 pub mod find_and_replace;
 pub mod glob;
@@ -62,6 +63,10 @@ pub async fn dispatch(
         },
         ToolCall::WriteFile(i) => match dir {
             Ok(d) => write_file::exec(&d, i).await,
+            Err(reason) => return ToolResult::Err(ToolError { reason }),
+        },
+        ToolCall::ApplyPatch(i) => match dir {
+            Ok(d) => apply_patch::exec(&d, i).await,
             Err(reason) => return ToolResult::Err(ToolError { reason }),
         },
         ToolCall::FindAndReplace(i) => match dir {

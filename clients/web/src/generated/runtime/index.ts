@@ -3,6 +3,7 @@ export * from './bashInput';
 export * from './readFileInput';
 export * from './readImageInput';
 export * from './writeFileInput';
+export * from './applyPatchInput';
 export * from './findAndReplaceInput';
 export * from './replaceLinesInput';
 export * from './listFilesInput';

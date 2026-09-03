@@ -1,4 +1,5 @@
 
+import { ApplyPatchInput } from './applyPatchInput';
 import { BashInput } from './bashInput';
 import { FindAndReplaceInput } from './findAndReplaceInput';
 import { GlobInput } from './globInput';
@@ -18,6 +19,7 @@ export type ToolCall =
   | { tool: "ReadFile"; value: ReadFileInput }
   | { tool: "ReadImage"; value: ReadImageInput }
   | { tool: "WriteFile"; value: WriteFileInput }
+  | { tool: "ApplyPatch"; value: ApplyPatchInput }
   | { tool: "FindAndReplace"; value: FindAndReplaceInput }
   | { tool: "ReplaceLines"; value: ReplaceLinesInput }
   | { tool: "ListFiles"; value: ListFilesInput }
