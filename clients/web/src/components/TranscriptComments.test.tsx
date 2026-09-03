@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { useState } from "react";
 import type {
@@ -87,21 +87,23 @@ describe("transcript comments", () => {
     makeSelection(assistant.text, 5, 20);
     fireEvent(document, new Event("selectionchange"));
 
-    expect(await screen.findByTestId("transcript-comment-draft")).toBeTruthy();
+    expect(await screen.findByTestId("transcript-comment-panel")).toBeTruthy();
+    expect(screen.getByTestId("transcript-comment-marker")).toBeTruthy();
   });
 
   it("does not comment on text that is still streaming", () => {
     render(<CommentableTranscript showLive streaming="unfinished response" />);
     selectText("unfinished response", 0, 10);
 
-    expect(screen.queryByTestId("transcript-comment-draft")).toBeNull();
+    expect(screen.queryByTestId("transcript-comment-panel")).toBeNull();
+    expect(screen.queryByTestId("transcript-comment-marker")).toBeNull();
   });
 
-  it("attaches a comment field to selected text and keeps the saved comment", () => {
+  it("opens a floating field for selected text and leaves a marker when saved", () => {
     render(<CommentableTranscript />);
 
     selectText(assistant.text, 5, 20);
-    expect(screen.getByTestId("transcript-comment-draft").textContent).toContain(
+    expect(screen.getByTestId("transcript-comment-panel").textContent).toContain(
       "the retry limit",
     );
 
@@ -110,12 +112,14 @@ describe("transcript comments", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
 
-    const saved = screen.getByTestId("transcript-comment");
-    expect(saved.textContent).toContain("Make this five.");
-    expect(saved.textContent).toContain("the retry limit");
+    expect(screen.queryByTestId("transcript-comment-panel")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Open comment on “the retry limit”" }));
+    const panel = screen.getByTestId("transcript-comment-panel");
+    expect(panel.textContent).toContain("Make this five.");
+    expect(panel.textContent).toContain("the retry limit");
   });
 
-  it("edits and removes a saved comment", () => {
+  it("edits and removes a saved comment from its marker", () => {
     render(<CommentableTranscript />);
     selectText(assistant.text, 5, 20);
     fireEvent.change(screen.getByLabelText("Add a comment…"), {
@@ -123,7 +127,7 @@ describe("transcript comments", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
 
-    fireEvent.click(screen.getByRole("button", { name: "Edit comment" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open comment on “the retry limit”" }));
     const editor = screen.getByLabelText("Edit comment");
     fireEvent.change(editor, {
       target: { value: "Keep this at four.\nDocument the limit." },
@@ -132,14 +136,15 @@ describe("transcript comments", () => {
       "Keep this at four.\nDocument the limit.",
     );
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    const saved = screen.getByTestId("transcript-comment");
-    expect(saved.textContent).toContain("Keep this at four.\nDocument the limit.");
-    expect(saved.querySelector("p")?.className).toContain("whitespace-pre-wrap");
 
-    fireEvent.click(screen.getByRole("button", { name: "Remove comment" }));
-    expect(screen.queryByTestId("transcript-comment")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Open comment on “the retry limit”" }));
+    const panel = screen.getByTestId("transcript-comment-panel");
+    expect(panel.textContent).toContain("Keep this at four.\nDocument the limit.");
+    expect(panel.querySelector("p")?.className).toContain("whitespace-pre-wrap");
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    expect(screen.queryByTestId("transcript-comment-marker")).toBeNull();
+    expect(screen.queryByTestId("transcript-comment-panel")).toBeNull();
   });
-
   it("keeps an in-progress edit when older assistant history is prepended", () => {
     const { rerender } = render(<CommentableTranscript />);
     selectText(assistant.text, 5, 20);
@@ -147,7 +152,7 @@ describe("transcript comments", () => {
       target: { value: "Make this five." },
     });
     fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
-    fireEvent.click(screen.getByRole("button", { name: "Edit comment" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open comment on “the retry limit”" }));
     fireEvent.change(screen.getByLabelText("Edit comment"), {
       target: { value: "Unsaved wording" },
     });
@@ -179,7 +184,7 @@ describe("transcript comments", () => {
       target: { value: "Make this five." },
     });
     fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
-    fireEvent.click(screen.getByRole("button", { name: "Edit comment" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open comment on “the retry limit”" }));
     fireEvent.change(screen.getByLabelText("Edit comment"), {
       target: { value: "Edit while the next call starts" },
     });
@@ -211,6 +216,45 @@ describe("transcript comments", () => {
     );
   });
 
+  it("keeps multiple comments collapsed behind markers and opens only one", () => {
+    render(<CommentableTranscript />);
+    selectText(assistant.text, 5, 20);
+    fireEvent.change(screen.getByLabelText("Add a comment…"), {
+      target: { value: "First comment" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
+
+    const secondStart = assistant.text.indexOf("three attempts");
+    selectText(
+      assistant.text,
+      secondStart,
+      secondStart + "three attempts".length,
+    );
+    fireEvent.change(screen.getByLabelText("Add a comment…"), {
+      target: { value: "Second comment" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
+
+    expect(screen.getAllByTestId("transcript-comment-marker")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "Open comment on “the retry limit”" }));
+    expect(screen.getAllByTestId("transcript-comment-panel")).toHaveLength(1);
+    expect(screen.getByTestId("transcript-comment-panel").textContent).toContain(
+      "First comment",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Open comment on “three attempts”" }));
+    expect(screen.getAllByTestId("transcript-comment-panel")).toHaveLength(1);
+    expect(screen.getByTestId("transcript-comment-panel").textContent).toContain(
+      "Second comment",
+    );
+    fireEvent.click(
+      within(screen.getByTestId("transcript-comment-panel")).getByRole("button", {
+        name: "Collapse comment",
+      }),
+    );
+    expect(screen.queryByTestId("transcript-comment-panel")).toBeNull();
+  });
+
   it("rejects a selection that crosses transcript turns", () => {
     const root = document.createElement("div");
     root.innerHTML =
@@ -232,27 +276,24 @@ describe("transcript comments", () => {
 });
 
 describe("formatTranscriptComments", () => {
-  it("builds one readable input message from every excerpt and comment", () => {
-    const text = formatTranscriptComments(
-      [
-        {
-          id: "c1",
-          anchorId: "a1",
-          quote: "first line\nsecond line",
-          comment: "Please revise this.",
-        },
-        {
-          id: "c2",
-          anchorId: "a2",
-          quote: "another excerpt",
-          comment: "Keep this part.",
-        },
-      ],
-      { intro: "Review these.", excerpt: "Excerpt", comment: "Comment" },
-    );
+  it("pairs every blockquoted excerpt with its comment", () => {
+    const text = formatTranscriptComments([
+      {
+        id: "c1",
+        anchorId: "a1",
+        quote: "first line\nsecond line",
+        comment: "Please revise this.",
+      },
+      {
+        id: "c2",
+        anchorId: "a2",
+        quote: "another excerpt",
+        comment: "Keep this part.",
+      },
+    ]);
 
     expect(text).toBe(
-      "Review these.\n\nExcerpt 1:\n> first line\n> second line\n\nComment:\nPlease revise this.\n\nExcerpt 2:\n> another excerpt\n\nComment:\nKeep this part.",
+      "> first line\n> second line\nPlease revise this.\n\n> another excerpt\nKeep this part.",
     );
   });
 });

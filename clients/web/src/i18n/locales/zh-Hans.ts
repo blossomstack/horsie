@@ -341,13 +341,12 @@ const zhHans: typeof en = {
     commentPlaceholder: "添加评论…",
     addComment: "添加评论",
     editComment: "编辑评论",
-    removeComment: "删除评论",
+    commentPanelTitle: "评论摘录",
+    collapseComment: "收起评论",
+    openComment: "打开“{{excerpt}}”的评论",
     sendComments_one: "发送 1 条评论",
     sendComments_other: "发送 {{count}} 条评论",
     sendCommentsShort: "发送 · {{count}}",
-    commentPrompt: "我对对话记录中的这些摘录有一些评论。",
-    excerpt: "摘录",
-    comment: "评论",
   },
 
   workGroup: {

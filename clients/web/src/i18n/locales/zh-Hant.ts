@@ -341,13 +341,12 @@ const zhHant: typeof en = {
     commentPlaceholder: "新增評論…",
     addComment: "新增評論",
     editComment: "編輯評論",
-    removeComment: "刪除評論",
+    commentPanelTitle: "評論摘錄",
+    collapseComment: "收合評論",
+    openComment: "開啟「{{excerpt}}」的評論",
     sendComments_one: "送出 1 則評論",
     sendComments_other: "送出 {{count}} 則評論",
     sendCommentsShort: "送出 · {{count}}",
-    commentPrompt: "我對對話紀錄中的這些摘錄有一些評論。",
-    excerpt: "摘錄",
-    comment: "評論",
   },
 
   workGroup: {

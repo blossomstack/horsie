@@ -510,11 +510,7 @@ export function SessionView() {
       return;
     const sending = transcriptComments;
     const sendingScope = transcriptCommentScope;
-    const text = formatTranscriptComments(sending, {
-      intro: t("transcript.commentPrompt"),
-      excerpt: t("transcript.excerpt"),
-      comment: t("transcript.comment"),
-    });
+    const text = formatTranscriptComments(sending);
     // The outgoing set stops being editable at send; a failed request restores it.
     const sent = new Set(sending.map((item) => item.id));
     setTranscriptComments((current) =>

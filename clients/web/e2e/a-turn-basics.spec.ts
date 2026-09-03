@@ -145,10 +145,15 @@ test("A5: selected transcript text can be commented on and sent from the header"
 
   await page.getByLabel("Add a comment…").fill("Increase this to five attempts.");
   await page.getByRole("button", { name: "Add comment" }).click();
-  await expect(page.getByTestId("transcript-comment")).toHaveCount(2);
-  await expect(page.getByTestId("transcript-comment").last()).toContainText(
+  await expect(page.getByTestId("transcript-comment-marker")).toHaveCount(2);
+  await page.getByTestId("transcript-comment-marker").last().click();
+  await expect(page.getByTestId("transcript-comment-panel")).toContainText(
     "Increase this to five attempts.",
   );
+  await page
+    .getByTestId("transcript-comment-panel")
+    .getByRole("button", { name: "Collapse comment" })
+    .click();
 
   const sendComments = page.getByTestId("send-transcript-comments");
   await expect(sendComments).toHaveAccessibleName("Send 2 comments");
@@ -159,6 +164,7 @@ test("A5: selected transcript text can be commented on and sent from the header"
   await expect(sentMessage).toContainText("Keep this request in scope.");
   await expect(sentMessage).toContainText("Increase this to five attempts.");
   await expect(page.getByTestId("send-transcript-comments")).toHaveCount(0);
+  await expect(page.getByTestId("transcript-comment-marker")).toHaveCount(0);
   await expect(page.getByTestId("assistant-text").last()).toContainText(
     "The retry limit is now five attempts.",
   );

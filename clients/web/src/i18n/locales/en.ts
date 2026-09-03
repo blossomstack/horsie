@@ -349,13 +349,12 @@ const en = {
     commentPlaceholder: "Add a comment…",
     addComment: "Add comment",
     editComment: "Edit comment",
-    removeComment: "Remove comment",
+    commentPanelTitle: "Comment on excerpt",
+    collapseComment: "Collapse comment",
+    openComment: "Open comment on “{{excerpt}}”",
     sendComments_one: "Send 1 comment",
     sendComments_other: "Send {{count}} comments",
     sendCommentsShort: "Send · {{count}}",
-    commentPrompt: "I have comments on these excerpts from the transcript.",
-    excerpt: "Excerpt",
-    comment: "Comment",
   },
 
   workGroup: {
