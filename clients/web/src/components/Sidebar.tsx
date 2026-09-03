@@ -7,6 +7,7 @@ import {
   ListFilter,
   Plus,
   PanelLeftClose,
+  PanelLeftOpen,
   Settings,
   ShieldCheck,
   Trash2,
@@ -126,6 +127,100 @@ function FooterLink({
     >
       {icon}
     </NavLink>
+  );
+}
+
+function CollapsedLink({
+  to,
+  icon,
+  label,
+  testId,
+}: {
+  to: string;
+  icon: ReactNode;
+  label: string;
+  testId: string;
+}) {
+  return (
+    <NavLink
+      to={to}
+      data-testid={testId}
+      title={label}
+      aria-label={label}
+      className="key-icon"
+    >
+      {icon}
+    </NavLink>
+  );
+}
+
+export function CollapsedSidebar({ onShow }: { onShow: () => void }) {
+  const { t } = useTranslation();
+
+  return (
+    <aside className="column-edge-r absolute inset-0 hidden w-12 flex-col items-center bg-chassis md:flex">
+      <button
+        className="group flex h-[var(--header-h)] w-full shrink-0 items-center justify-center"
+        onClick={onShow}
+        data-testid="show-sidebar-button"
+        title={t("rail.showSessions")}
+        aria-label={t("rail.showSessions")}
+      >
+        <span
+          aria-hidden
+          className="flex h-6 w-6 items-center justify-center rounded-[4px] bg-accent font-mono text-[0.8125rem] font-bold text-accent-ink group-hover:hidden group-focus-visible:hidden"
+        >
+          h
+        </span>
+        <PanelLeftOpen
+          size={16}
+          aria-hidden
+          className="hidden group-hover:block group-focus-visible:block"
+        />
+      </button>
+
+      <nav className="flex flex-col items-center gap-px pt-1">
+        <CollapsedLink
+          to="/inbox"
+          testId="collapsed-inbox-link"
+          icon={<Inbox size={16} aria-hidden />}
+          label={t("nav.inbox")}
+        />
+        <CollapsedLink
+          to="/agents"
+          testId="collapsed-agents-link"
+          icon={<Bot size={16} aria-hidden />}
+          label={t("nav.agents")}
+        />
+        <CollapsedLink
+          to="/environments"
+          testId="collapsed-environments-link"
+          icon={<Container size={16} aria-hidden />}
+          label={t("nav.environments")}
+        />
+        <CollapsedLink
+          to="/routines"
+          testId="collapsed-routines-link"
+          icon={<CalendarClock size={16} aria-hidden />}
+          label={t("nav.routines")}
+        />
+        <CollapsedLink
+          to="/workflows"
+          testId="collapsed-workflows-link"
+          icon={<Workflow size={16} aria-hidden />}
+          label={t("nav.workflows")}
+        />
+      </nav>
+
+      <div className="mt-auto pb-1.5">
+        <CollapsedLink
+          to="/settings"
+          testId="collapsed-settings-link"
+          icon={<Settings size={16} aria-hidden />}
+          label={t("nav.settings")}
+        />
+      </div>
+    </aside>
   );
 }
 

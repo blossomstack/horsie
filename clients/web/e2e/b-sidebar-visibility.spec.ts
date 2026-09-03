@@ -17,6 +17,16 @@ test("B1: the desktop sidebar can be hidden and restored", async ({
   await page.getByTestId("hide-sidebar-button").click();
   await expect(page.getByTestId("show-sidebar-button")).toBeVisible();
   await expect(page.getByTestId("hide-sidebar-button")).not.toBeVisible();
+  for (const destination of [
+    "inbox",
+    "agents",
+    "environments",
+    "routines",
+    "workflows",
+    "settings",
+  ]) {
+    await expect(page.getByTestId(`collapsed-${destination}-link`)).toBeVisible();
+  }
 
   await page.waitForTimeout(300);
   const collapsed = testInfo.outputPath("sidebar-collapsed.png");
