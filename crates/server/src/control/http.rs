@@ -113,9 +113,10 @@ pub const NON_OPERATIONS: &[(&str, &str)] = &[
         "/memories/{id}",
         "MemoryToolbox owns this, scoped to the session's spaces",
     ),
-    // Deployment-wide catalogue, not an account's to manage.
-    ("/admin/model-cards", "deployment administration"),
-    ("/admin/model-cards/{model_id}", "deployment administration"),
+    // An account's own model-card catalogue, edited from Settings rather than
+    // driven by an agent.
+    ("/settings/model-cards", "settings management"),
+    ("/settings/model-cards/{model_id}", "settings management"),
     // The 404 catch-all.
     (
         "/api/{*rest}",

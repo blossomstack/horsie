@@ -14,6 +14,7 @@ test.describe("settings navigation", () => {
     const nav = page.getByTestId("settings-nav");
     for (const label of [
       "Models",
+      "Model cards",
       "Runtimes",
       "Skills",
       "Memory",
@@ -35,6 +36,13 @@ test.describe("settings navigation", () => {
     await expect(
       page.getByRole("heading", { name: "Memory", level: 1 }),
     ).toBeVisible();
+
+    // Model cards now lives here rather than under Admin.
+    await nav.getByTestId("settings-nav-model-cards").click();
+    await expect(page).toHaveURL(/\/settings\/model-cards$/);
+    await expect(
+      page.getByRole("heading", { name: "Model cards", level: 1 }),
+    ).toBeVisible();
   });
 
   test("legacy top-level paths redirect into settings", async ({
@@ -47,13 +55,20 @@ test.describe("settings navigation", () => {
     await page.goto(`${appBase}/memory`);
     await expect(page).toHaveURL(/\/settings\/memory$/);
 
+    // Model cards moved to Settings; its old Admin path still lands there.
+    await page.goto(`${appBase}/admin/model-cards`);
+    await expect(page).toHaveURL(/\/settings\/model-cards$/);
+
     await page.goto(`${appBase}/admin`);
-    await expect(page).toHaveURL(/\/admin\/model-cards$/);
+    await expect(page).toHaveURL(/\/admin\/github-app$/);
   });
 
   // The guard now protects exactly one page. Settings save per item, so there
   // is nothing there to lose on navigation; the GitHub App credentials form is
   // the last batched form in the product, and the worst one to lose input on.
+  // Admin is down to this single page since Model cards moved to Settings, so
+  // the guard is exercised by re-clicking its own nav entry: any nav click
+  // while dirty prompts, and dismissing keeps the edit.
   test("leaving the credentials form with unsaved edits prompts first", async ({
     page,
     appBase,
@@ -64,13 +79,9 @@ test.describe("settings navigation", () => {
 
     // Dismiss the prompt: stay put, edit intact.
     page.once("dialog", (d) => d.dismiss());
-    await page.getByTestId("settings-nav-model-cards").click();
+    await page.getByTestId("settings-nav-github-app").click();
     await expect(page).toHaveURL(/\/admin\/github-app$/);
-
-    // Accept it: navigate away and drop the edit.
-    page.once("dialog", (d) => d.accept());
-    await page.getByTestId("settings-nav-model-cards").click();
-    await expect(page).toHaveURL(/\/admin\/model-cards$/);
+    await expect(page.getByLabel("Client ID")).toHaveValue("Iv1.abc123");
   });
 
   // An unmatched route used to render a blank white page: zero DOM, not even

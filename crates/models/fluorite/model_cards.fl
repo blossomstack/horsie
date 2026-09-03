@@ -1,6 +1,6 @@
 /// Wire types for the model-card catalog: reference records of well-known
 /// models (official model id + token limits). Managed via
-/// /api/admin/model-cards and searched via /api/model-cards. Cards are
+/// /api/settings/model-cards and searched via /api/model-cards. Cards are
 /// prefill templates for the Settings model form — never linked to
 /// configured models.
 package model_cards;

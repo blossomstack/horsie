@@ -1,7 +1,8 @@
-//! Admin API: operator-facing management surfaces. v1 is the model-card
-//! catalog; future admin settings add handlers here and routes under
-//! `/api/admin`. Unauthenticated like the rest of `/api/*` (single-user,
-//! localhost-bound deployment).
+//! Model-card catalog management, backing Settings → Model cards. The cards
+//! are per-account (project-scoped) rather than deployment-wide, so these live
+//! under `/api/settings/model-cards`, next to the rest of a user's settings.
+//! Unauthenticated like the rest of `/api/*` (single-user, localhost-bound
+//! deployment).
 
 use crate::config::model_cards::ModelCardError;
 use crate::http::error::Api;
@@ -21,8 +22,8 @@ pub(crate) fn map_card_err(e: ModelCardError) -> Api {
     }
 }
 
-/// `GET /api/admin/model-cards` — the full catalog (kept separate from the
-/// public search so admin-only fields can be added later without touching
+/// `GET /api/settings/model-cards` — the full catalog (kept separate from the
+/// public search so management-only fields can be added later without touching
 /// the public contract).
 pub async fn list_cards(Scope(state): Scope) -> Result<Json<Vec<ModelCard>>, Api> {
     state
@@ -33,7 +34,7 @@ pub async fn list_cards(Scope(state): Scope) -> Result<Json<Vec<ModelCard>>, Api
         .map_err(map_card_err)
 }
 
-/// `POST /api/admin/model-cards` — create a card; 409 on duplicate `model_id`.
+/// `POST /api/settings/model-cards` — create a card; 409 on duplicate `model_id`.
 pub async fn create_card(
     Scope(state): Scope,
     Json(input): Json<ModelCardInput>,
@@ -46,7 +47,7 @@ pub async fn create_card(
         .map_err(map_card_err)
 }
 
-/// `PUT /api/admin/model-cards/:model_id` — update name/limits. `model_id`
+/// `PUT /api/settings/model-cards/:model_id` — update name/limits. `model_id`
 /// itself is immutable (rename = delete + create).
 pub async fn update_card(
     Scope(state): Scope,
@@ -61,7 +62,7 @@ pub async fn update_card(
         .map_err(map_card_err)
 }
 
-/// `DELETE /api/admin/model-cards/:model_id` — 204 on success, 404 when absent.
+/// `DELETE /api/settings/model-cards/:model_id` — 204 on success, 404 when absent.
 pub async fn delete_card(
     Scope(state): Scope,
     Scoped(model_id): Scoped<String>,

@@ -13,18 +13,18 @@ export function useModelCardSearch(prefix: string, enabled = true) {
   });
 }
 
-/** The full catalog, for the admin page. */
-export function useAdminModelCards() {
+/** The full catalog, for the Settings model-cards page. */
+export function useModelCards() {
   return useQuery({
-    queryKey: [...modelCardsKey, "admin"],
-    queryFn: () => api.admin.modelCards.list(),
+    queryKey: [...modelCardsKey, "list"],
+    queryFn: () => api.modelCards.list(),
   });
 }
 
 export function useCreateModelCard() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (body: ModelCardInput) => api.admin.modelCards.create(body),
+    mutationFn: (body: ModelCardInput) => api.modelCards.create(body),
     onSuccess: () => client.invalidateQueries({ queryKey: modelCardsKey }),
   });
 }
@@ -38,7 +38,7 @@ export function useUpdateModelCard() {
     }: {
       modelId: string;
       body: ModelCardUpdate;
-    }) => api.admin.modelCards.update(modelId, body),
+    }) => api.modelCards.update(modelId, body),
     onSuccess: () => client.invalidateQueries({ queryKey: modelCardsKey }),
   });
 }
@@ -46,7 +46,7 @@ export function useUpdateModelCard() {
 export function useDeleteModelCard() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (modelId: string) => api.admin.modelCards.remove(modelId),
+    mutationFn: (modelId: string) => api.modelCards.remove(modelId),
     onSuccess: () => client.invalidateQueries({ queryKey: modelCardsKey }),
   });
 }

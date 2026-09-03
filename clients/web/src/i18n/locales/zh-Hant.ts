@@ -705,6 +705,7 @@ const zhHant: typeof en = {
   settingsNav: {
     projects: "專案",
     models: "模型",
+    modelCards: "模型卡",
     runtimes: "執行環境",
     skills: "技能",
     memory: "記憶",
@@ -714,7 +715,6 @@ const zhHant: typeof en = {
   },
 
   adminNav: {
-    modelCards: "模型卡",
     githubApp: "GitHub App",
   },
 

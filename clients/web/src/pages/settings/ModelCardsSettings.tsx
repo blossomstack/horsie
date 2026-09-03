@@ -3,21 +3,21 @@ import { useState } from "react";
 import { ApiRequestError } from "../../api/client";
 import type { ModelCard } from "../../api/types";
 import {
-  useAdminModelCards,
+  useModelCards,
   useCreateModelCard,
   useDeleteModelCard,
   useUpdateModelCard,
 } from "../../hooks/useModelCards";
 import { compactNumber } from "../../lib/format";
-import { ListRow, RowAction, RowLabel, Section, SettingsPage } from "../settings/fields";
+import { ListRow, RowAction, RowLabel, Section, SettingsPage } from "./fields";
 import { askConfirm } from "../../lib/confirm";
 import { Trans, useTranslation } from "react-i18next";
 
-export function ModelCardsPage() {
+export function ModelCardsSettings() {
   const { t } = useTranslation();
   return (
     <SettingsPage
-        title={t("adminNav.modelCards")}
+        title={t("settingsNav.modelCards")}
     >
         <ModelCardsSection />
       </SettingsPage>
@@ -35,7 +35,7 @@ export function ModelCardsPage() {
  */
 function ModelCardsSection() {
   const { t } = useTranslation();
-  const { data: cards, isLoading, isError } = useAdminModelCards();
+  const { data: cards, isLoading, isError } = useModelCards();
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);

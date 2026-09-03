@@ -2,7 +2,7 @@
 //! model id + token limits). Reference data, NOT runtime config — lives
 //! outside `DbConfigStore`/`SettingsView`, and no registry rebuild is needed
 //! when cards change. Seeded on an account's first touch (insert-if-missing),
-//! managed via /api/admin/model-cards, searched via /api/model-cards.
+//! managed via /api/settings/model-cards, searched via /api/model-cards.
 
 use crate::db::Db;
 use crate::projects::ProjectId;

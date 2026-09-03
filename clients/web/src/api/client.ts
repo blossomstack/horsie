@@ -691,6 +691,27 @@ export const api = {
       request(
         `/model-cards${prefix ? `?prefix=${encodeURIComponent(prefix)}` : ""}`,
       ),
+
+    /** The full catalog, backing Settings → Model cards. */
+    list: (): Promise<ModelCard[]> => request("/settings/model-cards"),
+
+    create: (body: ModelCardInput): Promise<ModelCard> =>
+      request("/settings/model-cards", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+
+    /** Update name/limits; `modelId` is immutable. */
+    update: (modelId: string, body: ModelCardUpdate): Promise<ModelCard> =>
+      request(`/settings/model-cards/${encodeURIComponent(modelId)}`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }),
+
+    remove: (modelId: string): Promise<void> =>
+      request(`/settings/model-cards/${encodeURIComponent(modelId)}`, {
+        method: "DELETE",
+      }),
   },
 
   admin: {
@@ -717,28 +738,6 @@ export const api = {
 
       signOut: (provider: string): Promise<void> =>
         request(`/config/model-providers/${encodeURIComponent(provider)}/chatgpt/login`, {
-          method: "DELETE",
-        }),
-    },
-
-    modelCards: {
-      list: (): Promise<ModelCard[]> => request("/admin/model-cards"),
-
-      create: (body: ModelCardInput): Promise<ModelCard> =>
-        request("/admin/model-cards", {
-          method: "POST",
-          body: JSON.stringify(body),
-        }),
-
-      /** Update name/limits; `modelId` is immutable. */
-      update: (modelId: string, body: ModelCardUpdate): Promise<ModelCard> =>
-        request(`/admin/model-cards/${encodeURIComponent(modelId)}`, {
-          method: "PUT",
-          body: JSON.stringify(body),
-        }),
-
-      remove: (modelId: string): Promise<void> =>
-        request(`/admin/model-cards/${encodeURIComponent(modelId)}`, {
           method: "DELETE",
         }),
     },

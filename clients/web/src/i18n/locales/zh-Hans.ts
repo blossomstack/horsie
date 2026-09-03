@@ -706,6 +706,7 @@ const zhHans: typeof en = {
   settingsNav: {
     projects: "项目",
     models: "模型",
+    modelCards: "模型卡",
     runtimes: "运行时",
     skills: "技能",
     memory: "记忆",
@@ -715,7 +716,6 @@ const zhHans: typeof en = {
   },
 
   adminNav: {
-    modelCards: "模型卡",
     githubApp: "GitHub App",
   },
 

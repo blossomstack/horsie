@@ -1,14 +1,14 @@
-// Model cards: admin-page CRUD over the seeded catalog, and the Settings
+// Model cards: Settings-page CRUD over the seeded catalog, and the Settings
 // model form's id autocomplete + limit prefill.
 
 import { test, expect } from "./fixtures";
 
 test.describe("model cards", () => {
-  test("admin page lists seeded cards and supports CRUD", async ({
+  test("settings page lists seeded cards and supports CRUD", async ({
     page,
     appBase,
   }) => {
-    await page.goto(`${appBase}/admin/model-cards`);
+    await page.goto(`${appBase}/settings/model-cards`);
 
     // The catalog reads as a list now: each row states the card, and the
     // editor opens on request rather than every card rendering as a form.
@@ -63,7 +63,7 @@ test.describe("model cards", () => {
     page,
     appBase,
   }) => {
-    await page.goto(`${appBase}/admin/model-cards`);
+    await page.goto(`${appBase}/settings/model-cards`);
 
     const row = page.getByTestId("model-card-row-claude-sonnet-4-6");
     await row.getByTestId("model-card-edit-claude-sonnet-4-6").click();
@@ -162,7 +162,7 @@ test.describe("model cards", () => {
     page,
     appBase,
   }) => {
-    await page.goto(`${appBase}/admin/model-cards`);
+    await page.goto(`${appBase}/settings/model-cards`);
 
     const row = page.getByTestId("model-card-row-claude-sonnet-4-6");
     await row.getByTestId("model-card-info-claude-sonnet-4-6").click();
