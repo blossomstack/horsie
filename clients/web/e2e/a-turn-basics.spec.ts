@@ -117,6 +117,9 @@ test("A5: selected transcript text can be commented on and sent from the header"
   await mock.queueText("Keep the retry limit at three attempts.");
   await createSession(page, appBase);
   await sendMessage(page, "Review the retry policy");
+  await expect(page.getByTestId("assistant-text")).toContainText(
+    "Keep the retry limit at three attempts.",
+  );
   await expectStatus(page, "Idle");
 
   const prompt = page
