@@ -242,8 +242,8 @@ export function groupTurns(items: TranscriptItem[]): TurnGroup[] {
     const last = turns[turns.length - 1];
     if (last?.kind === "assistant") {
       last.msgs.push(m);
-      // The newest message remains stable when pagination prepends history.
-      last.id = m.id;
+      // Keep the first message as the turn's React identity: new thinking and
+      // tool-call messages append here, and must not remount open work groups.
     } else turns.push({ kind: "assistant", id: m.id, msgs: [m] });
   };
   for (const item of items) {

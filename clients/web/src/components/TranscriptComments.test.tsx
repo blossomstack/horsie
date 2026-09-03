@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
 import type {
   RenderedMessage,
+  RenderedToolCall,
   TranscriptItem,
 } from "../hooks/useSessionStream";
 import { Transcript } from "./Transcript";
@@ -34,6 +35,17 @@ const assistant: RenderedMessage = {
   artifacts: [],
   createdAtMs: 1_000,
 };
+
+function tool(id: string): RenderedToolCall {
+  return {
+    id,
+    name: "read_file",
+    input: {},
+    running: false,
+    hooks: [],
+    artifacts: [],
+  };
+}
 
 function CommentableTranscript({
   items = [{ kind: "message", value: assistant }],
@@ -97,6 +109,52 @@ function selectText(text: string, start: number, end: number) {
 }
 
 describe("transcript comments", () => {
+  it("keeps a work group open while new work is appended", () => {
+    const first: RenderedMessage = {
+      ...assistant,
+      id: "a1",
+      text: "",
+      thinking: ["finding the config"],
+      toolCalls: [tool("t1")],
+    };
+    const next: RenderedMessage = {
+      ...assistant,
+      id: "a2",
+      text: "",
+      thinking: ["checking the result"],
+      toolCalls: [tool("t2")],
+    };
+    const props = {
+      streaming: "",
+      orphanTools: [],
+      showLive: false,
+      showThinking: true,
+      sessionId: "s1",
+    };
+    const { rerender } = render(
+      <Transcript items={[{ kind: "message", value: first }]} {...props} />,
+    );
+
+    fireEvent.click(screen.getByTestId("work-group-toggle"));
+    expect(screen.getByTestId("work-group-toggle").getAttribute("aria-expanded")).toBe(
+      "true",
+    );
+
+    rerender(
+      <Transcript
+        items={[
+          { kind: "message", value: first },
+          { kind: "message", value: next },
+        ]}
+        {...props}
+      />,
+    );
+
+    expect(screen.getByTestId("work-group-toggle").getAttribute("aria-expanded")).toBe(
+      "true",
+    );
+  });
+
   it("opens the comment field when a keyboard or touch selection settles", async () => {
     vi.useFakeTimers();
     render(<CommentableTranscript />);
