@@ -1141,6 +1141,10 @@ mod tests {
         // The source's turn is held open too, so nothing about this test can
         // pass by stopping the main agent instead.
         send(&session, "the original question").await;
+        wait_for_state(&journal, id, "the source is working", |s| {
+            s.status() == crate::sessions::spec::SessionStatus::Running
+        })
+        .await;
 
         let sub_session = branch_via(&session, None, "/fork try the other migration")
             .await
