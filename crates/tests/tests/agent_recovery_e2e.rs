@@ -18,17 +18,17 @@ use horsie_actor::ReplyTo;
 use horsie_actor::{ActorSystem, InMemoryJournal, Journal};
 use horsie_agentcore::{
     ContentPart, LlmProvider, Message, Role, ToolCallError, ToolCallPart, ToolOutcome, ToolSpec,
-    Toolbox,
+    Toolbox, Usage,
 };
 use horsie_llm_providers::anthropic::AnthropicProvider;
 use horsie_models::agent::TextPart;
 use horsie_server::agent_loop::{
     AgentActor, AgentCommand, AgentDomainEvent, AgentOutcome, AgentOutcomeSink, AgentParams,
-    AgentRuntimeContext, FixedContextProvider,
+    AgentRuntimeContext, ContextManifest, FixedContextProvider, StepKind,
 };
 use horsie_server::agent_loop::{
-    QueueCommand as AgentQueueCommand, ReadCommand as AgentReadCommand,
-    RunCommand as AgentRunCommand,
+    CoreCommand as AgentCoreCommand, QueueCommand as AgentQueueCommand,
+    ReadCommand as AgentReadCommand,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -206,6 +206,7 @@ async fn recovered_agent_repairs_a_stopped_mid_history_tool_call() {
             // never was.
             AgentDomainEvent::MessageComplete {
                 message: assistant_tool_call("a1", "stopped-call"),
+                usage: Usage::without_cache(1, 1),
             },
             AgentDomainEvent::RunCancelled { at_ms: 0 },
             // Later turns completed on top of it, burying it mid-history.
@@ -214,6 +215,7 @@ async fn recovered_agent_repairs_a_stopped_mid_history_tool_call() {
             },
             AgentDomainEvent::MessageComplete {
                 message: assistant_text("a2", "hi"),
+                usage: Usage::without_cache(1, 1),
             },
         ],
     )
@@ -324,6 +326,7 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
             },
             AgentDomainEvent::MessageComplete {
                 message: assistant_ask("a1", "ask-1"),
+                usage: Usage::without_cache(1, 1),
             },
             // What the agent journals when it parks. Recovered, it is what
             // makes the answer below answerable — a park is durable agent
@@ -442,6 +445,14 @@ async fn cancelling_a_run_stuck_in_provide_returns_promptly() {
         {
             std::future::pending().await
         }
+
+        async fn reconnect(
+            &self,
+            _manifest: &ContextManifest,
+        ) -> Result<horsie_server::agent_loop::Contexts, horsie_server::agent_loop::ContextError>
+        {
+            std::future::pending().await
+        }
     }
 
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -486,7 +497,7 @@ async fn cancelling_a_run_stuck_in_provide_returns_promptly() {
         // genuinely over, not when the token was merely flipped.
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
         agent
-            .tell(AgentCommand::Run(AgentRunCommand::Cancel {
+            .tell(AgentCommand::Core(AgentCoreCommand::Cancel {
                 ack: Some(ReplyTo::from_sender(ack_tx)),
             }))
             .await
@@ -517,9 +528,13 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
             AgentDomainEvent::InputMessage {
                 message: Message::user("u1", "read the readme", 0),
             },
+            AgentDomainEvent::StepStarted {
+                kind: StepKind::Agent,
+            },
             // The process died here: the call is journaled, its result is not.
             AgentDomainEvent::MessageComplete {
                 message: assistant_tool_call("a1", "interrupted-call"),
+                usage: Usage::without_cache(1, 1),
             },
         ],
     )
