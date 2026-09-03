@@ -3,6 +3,7 @@ import {
   Brain,
   FolderTree,
   Cpu,
+  Layers,
   Palette,
   Plug,
   SlidersHorizontal,
@@ -20,6 +21,7 @@ import { SettingsScrollProvider } from "./scrollShadow";
 const ITEMS = [
   { to: "projects", labelKey: "settingsNav.projects", icon: FolderTree },
   { to: "models", labelKey: "settingsNav.models", icon: SlidersHorizontal },
+  { to: "model-cards", labelKey: "settingsNav.modelCards", icon: Layers },
   { to: "runtimes", labelKey: "settingsNav.runtimes", icon: Cpu },
   { to: "skills", labelKey: "settingsNav.skills", icon: Boxes },
   { to: "memory", labelKey: "settingsNav.memory", icon: Brain },

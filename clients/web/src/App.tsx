@@ -25,6 +25,7 @@ import { SessionsLayout } from "./pages/SessionsLayout";
 import { SessionView } from "./pages/SessionView";
 import { SettingsLayout } from "./pages/settings/SettingsLayout";
 import { ModelsSettings } from "./pages/settings/ModelsSettings";
+import { ModelCardsSettings } from "./pages/settings/ModelCardsSettings";
 import { RuntimesSettings } from "./pages/settings/RuntimesSettings";
 import { IntegrationsSettings } from "./pages/settings/IntegrationsSettings";
 import { MemorySettings } from "./pages/settings/MemorySettings";
@@ -32,7 +33,6 @@ import { SkillsSettings } from "./pages/settings/SkillsSettings";
 import { AccountSettings } from "./pages/settings/AccountSettings";
 import { AppearanceSettings } from "./pages/settings/AppearanceSettings";
 import { AdminLayout } from "./pages/admin/AdminLayout";
-import { ModelCardsPage } from "./pages/admin/ModelCardsPage";
 import { GithubAppPage } from "./pages/admin/GithubAppPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
 import { ProjectRedirect, projectFromPath } from "./pages/ProjectScope";
@@ -156,6 +156,7 @@ function ProjectApp({ project }: { project: string }) {
               <Route path="settings" element={<SettingsLayout />}>
                 <Route index element={<Navigate to="models" replace />} />
                 <Route path="models" element={<ModelsSettings />} />
+                <Route path="model-cards" element={<ModelCardsSettings />} />
                 <Route path="runtimes" element={<RuntimesSettings />} />
                 <Route path="skills" element={<SkillsSettings />} />
                 <Route path="memory" element={<MemorySettings />} />
@@ -169,9 +170,12 @@ function ProjectApp({ project }: { project: string }) {
                   inside this project rather than at the root. */}
               <Route path="skills" element={<Navigate to="settings/skills" replace />} />
               <Route path="memory" element={<Navigate to="settings/memory" replace />} />
+              <Route
+                path="admin/model-cards"
+                element={<Navigate to="settings/model-cards" replace />}
+              />
               <Route path="admin" element={<AdminLayout />}>
-                <Route index element={<Navigate to="model-cards" replace />} />
-                <Route path="model-cards" element={<ModelCardsPage />} />
+                <Route index element={<Navigate to="github-app" replace />} />
                 <Route path="github-app" element={<GithubAppPage />} />
               </Route>
               {/* Inside the layout, so an unmatched route keeps the rail.

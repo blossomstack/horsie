@@ -1,8 +1,6 @@
 //! The session server's HTTP surface: REST handlers + SSE streams over the
 //! `SessionSupervisor`. All request/response bodies are fluorite wire types.
 
-mod admin;
-
 mod annotations;
 mod artifacts;
 pub mod auth;
@@ -14,6 +12,7 @@ pub(crate) mod inbox;
 mod mcp;
 mod memory;
 pub(crate) mod messages;
+mod model_cards;
 mod plugins;
 mod projects;
 pub mod runtime_connect;
@@ -365,12 +364,12 @@ fn scoped() -> Router<AppState> {
             post(chatgpt::poll),
         )
         .route(
-            "/admin/model-cards",
-            get(admin::list_cards).post(admin::create_card),
+            "/settings/model-cards",
+            get(model_cards::list_cards).post(model_cards::create_card),
         )
         .route(
-            "/admin/model-cards/{model_id}",
-            put(admin::update_card).delete(admin::delete_card),
+            "/settings/model-cards/{model_id}",
+            put(model_cards::update_card).delete(model_cards::delete_card),
         )
         .route("/github/status", get(github::status))
         .route("/github/auth", get(github::auth))
@@ -2398,7 +2397,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_model_cards_crud_over_http() {
+    async fn settings_model_cards_crud_over_http() {
         use horsie_models::model_cards::ModelCard;
         let tmp = tempfile::tempdir().unwrap();
         let t = test_state(&tmp).await;
@@ -2407,7 +2406,7 @@ mod tests {
         // Empty catalog (test_state does not seed).
         let res = app
             .clone()
-            .oneshot(get(&t.url("/admin/model-cards")))
+            .oneshot(get(&t.url("/settings/model-cards")))
             .await
             .unwrap();
         let list: Vec<ModelCard> = read_json(res).await;
@@ -2417,7 +2416,7 @@ mod tests {
         let body = serde_json::json!({"modelId": "m1", "name": "Model One", "contextWindow": 8192});
         let res = app
             .clone()
-            .oneshot(post_json(&t.url("/admin/model-cards"), &body))
+            .oneshot(post_json(&t.url("/settings/model-cards"), &body))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
@@ -2428,7 +2427,7 @@ mod tests {
         // Duplicate → 409.
         let res = app
             .clone()
-            .oneshot(post_json(&t.url("/admin/model-cards"), &body))
+            .oneshot(post_json(&t.url("/settings/model-cards"), &body))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::CONFLICT);
@@ -2437,7 +2436,7 @@ mod tests {
         let bad = serde_json::json!({"modelId": "", "name": "x"});
         let res = app
             .clone()
-            .oneshot(post_json(&t.url("/admin/model-cards"), &bad))
+            .oneshot(post_json(&t.url("/settings/model-cards"), &bad))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -2446,7 +2445,7 @@ mod tests {
         let upd = serde_json::json!({"name": "Model 1 Renamed", "maxTokens": 2048});
         let res = app
             .clone()
-            .oneshot(put_json(&t.url("/admin/model-cards/m1"), &upd))
+            .oneshot(put_json(&t.url("/settings/model-cards/m1"), &upd))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -2457,7 +2456,7 @@ mod tests {
         // Update of unknown → 404.
         let res = app
             .clone()
-            .oneshot(put_json(&t.url("/admin/model-cards/ghost"), &upd))
+            .oneshot(put_json(&t.url("/settings/model-cards/ghost"), &upd))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
@@ -2465,12 +2464,12 @@ mod tests {
         // Delete → 204; second delete → 404.
         let res = app
             .clone()
-            .oneshot(delete(&t.url("/admin/model-cards/m1")))
+            .oneshot(delete(&t.url("/settings/model-cards/m1")))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
         let res = app
-            .oneshot(delete(&t.url("/admin/model-cards/m1")))
+            .oneshot(delete(&t.url("/settings/model-cards/m1")))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);

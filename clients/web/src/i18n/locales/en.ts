@@ -725,6 +725,7 @@ const en = {
   settingsNav: {
     projects: "Projects",
     models: "Models",
+    modelCards: "Model cards",
     runtimes: "Runtimes",
     skills: "Skills",
     memory: "Memory",
@@ -734,7 +735,6 @@ const en = {
   },
 
   adminNav: {
-    modelCards: "Model cards",
     githubApp: "GitHub App",
   },
 

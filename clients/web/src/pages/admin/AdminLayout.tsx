@@ -1,11 +1,10 @@
-import { GitBranch, Layers } from "lucide-react";
+import { GitBranch } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Outlet } from "react-router-dom";
 import { SettingsNav, type NavItem } from "../../components/SettingsNav";
 import { SettingsDirtyProvider } from "../settings/dirty";
 
 const ITEMS = [
-  { to: "model-cards", labelKey: "adminNav.modelCards", icon: Layers },
   { to: "github-app", labelKey: "adminNav.githubApp", icon: GitBranch },
 ] as const;
 
