@@ -13,7 +13,6 @@
 
 #[cfg(test)]
 pub(crate) use crate::agent_loop::AgentActor;
-pub(crate) use crate::agent_loop::boundary::Blocked;
 pub(crate) use crate::agent_loop::commands::{
     AbandonedStart, AgentCommand, CompactJob, CompactLanding, CompactOutcome, CompactedData,
     CompactionCommand, CoreCommand, LogCommand, PreparedStart, ProvidedOutcome, ProvisionCommand,
@@ -23,7 +22,7 @@ pub(crate) use crate::agent_loop::component::{
     Component, Cx, Part, PartState, StepPhase, StepRun, TurnCtx, answer_tool_call,
 };
 pub(crate) use crate::agent_loop::components::{
-    ComponentState, Components, QueueState, TaskListPart, TimerState, TurnState,
+    ComponentState, Components, TaskListPart, TimerState,
 };
 pub(crate) use crate::agent_loop::context::ContextManifest;
 pub(crate) use crate::agent_loop::events::{

@@ -37,90 +37,9 @@ const MAX_ITERATIONS: u32 = 100;
 const STUCK_THRESHOLD: usize = 5;
 const NUDGE_THRESHOLD: usize = 3;
 
-/// What survives a turn: whether one is owed a provider call, and how many
-/// times in a row this agent has ended one without the result it owed.
-///
-/// Private fields, so nothing else can decide a turn is over. Everything else
-/// a turn produces is either a transcript entry or a number the usage part
-/// keeps.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
-pub struct TurnState {
-    /// True between a turn beginning and that turn reaching a boundary.
-    ///
-    /// Durable because only a crash can leave one open: every boundary an
-    /// agent reaches under its own power journals something, so a fold that
-    /// still reads `true` at recovery describes a turn no process is running
-    /// any more. That is the whole of how an interruption is detected, and it
-    /// is detected here because this is the only place the fact exists.
-    in_flight: bool,
-    /// Consecutive turns this agent ended without the result it owed.
-    ///
-    /// Durable, and reset by any turn that ends properly: it is the budget
-    /// behind the nudge, and a process that dies mid-nudge must not hand the
-    /// model a fresh one every restart.
-    nudges: u32,
-}
-
-impl TurnState {
-    pub(crate) fn in_flight(&self) -> bool {
-        self.in_flight
-    }
-
-    pub(crate) fn nudges(&self) -> u32 {
-        self.nudges
-    }
-
-    /// A turn began. Told by the queue, which is what takes the input that
-    /// makes the agent owe a call — the flag is this component's, the decision
-    /// is not.
-    pub(crate) fn began(&mut self) {
-        self.in_flight = true;
-    }
-
-    /// A turn reached a boundary, however it got there.
-    pub(crate) fn ended(&mut self) {
-        self.in_flight = false;
-    }
-
-    /// A turn ended the way it should have: the nudge budget is spent on
-    /// turns that end with nothing to wake them, and this was not one.
-    pub(crate) fn ended_properly(&mut self) {
-        self.in_flight = false;
-        self.nudges = 0;
-    }
-
-    /// The model was told to try again.
-    pub(crate) fn nudged(&mut self) {
-        self.in_flight = false;
-        self.nudges = self.nudges.saturating_add(1);
-    }
-}
-
-impl PartState for TurnState {
-    /// A call the model made that nothing has answered.
-    ///
-    /// Only while a call is owed. A turn that *ended* on a dangling call —
-    /// `submit_result` never gets a result — is history, and the prompt builder
-    /// repairs it; treating it as outstanding would leave the agent unable to
-    /// ever start another turn.
-    fn blocks(&self, state: &AgentState) -> Option<Blocked> {
-        if !self.in_flight {
-            return None;
-        }
-        let open = state.open_tool_calls();
-        (!open.is_empty()).then_some(Blocked::ToolCalls(open))
-    }
-
-    /// Nothing: a sub session that inherited `in_flight` would be reported
-    /// interrupted before it had ever run.
-    fn carried(&self) -> Option<Self> {
-        None
-    }
-}
-
-/// One turn's bookkeeping, all in memory on purpose: a crash mid-turn is an
-/// interrupted turn, and recovery already treats it as one.
+/// Process-local bookkeeping for normal provider steps. Durable run state,
+/// open calls, and correction counts are all derived from history; a crash
+/// reconstructs them rather than recovering this value.
 #[derive(Default)]
 pub(crate) struct Turn {
     /// The turn in flight, if any. Created lazily at the first call of a turn
@@ -610,21 +529,10 @@ impl Component for Turn {
                 }
                 state.push(at_ms, AgentLogBody::Llm(message));
             }
-            AgentDomainEvent::RunComplete { .. } | AgentDomainEvent::RunAborted { .. } => {
-                if let Some(part) = state.part_mut::<TurnState>() {
-                    part.ended();
-                }
-            }
-            AgentDomainEvent::RunCancelled { .. } => {
-                if let Some(part) = state.part_mut::<TurnState>() {
-                    part.ended();
-                }
-            }
-            AgentDomainEvent::Nudged { .. } => {
-                if let Some(part) = state.part_mut::<TurnState>() {
-                    part.nudged();
-                }
-            }
+            AgentDomainEvent::RunComplete { .. }
+            | AgentDomainEvent::RunAborted { .. }
+            | AgentDomainEvent::RunCancelled { .. }
+            | AgentDomainEvent::Nudged { .. } => {}
             _ => {}
         }
     }
@@ -674,7 +582,7 @@ impl Turn {
                 // finishing is what wakes it, and its next conclusion is the
                 // report.
                 if cx.params.park_on_outstanding_work {
-                    if crate::agent_loop::queued_offer(state.inbox(), state.asks()).is_some() {
+                    if state.queued_offer().is_some() {
                         return CommandEffect::none();
                     }
                     if !state.timers().is_empty()
@@ -874,7 +782,7 @@ impl Turn {
     ) -> CommandEffect<AgentDomainEvent> {
         // The queue first: a subagent report that landed while the turn was
         // ending starts the next turn, and nothing needs classifying at all.
-        if crate::agent_loop::queued_offer(state.inbox(), state.asks()).is_some() {
+        if state.queued_offer().is_some() {
             return CommandEffect::none();
         }
         if !state.timers().is_empty()

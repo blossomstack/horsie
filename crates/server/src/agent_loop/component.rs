@@ -249,21 +249,9 @@ impl horsie_agentcore::Toolbox for ActorToolbox {
     }
 }
 
-/// What every component's state can be asked, by code that does not know which
-/// one it is holding.
-///
-/// Both questions are polls over the whole list, and both are things a
-/// component added later must be able to answer without anyone editing a
-/// central rule. The defaults are the common case: most state neither blocks
-/// anything nor survives a branch.
+/// What each component state contributes when history is branched. The common
+/// case contributes nothing; timers and task-list state opt in explicitly.
 pub(crate) trait PartState: Sized {
-    /// Why this part says the agent must not act yet. Vetoes commute — the
-    /// order the parts are asked in cannot matter — which is what makes this a
-    /// poll rather than another ordered decision.
-    fn blocks(&self, _state: &AgentState) -> Option<Blocked> {
-        None
-    }
-
     /// What this part contributes to a sub session branched from here, if
     /// anything. Everything that is *about the session* carries; everything in
     /// flight, or that is a bill, does not.

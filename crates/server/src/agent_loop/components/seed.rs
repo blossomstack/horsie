@@ -50,7 +50,7 @@ impl Component for Seeding {
                 // message: the other two modes leave the queued brief as the
                 // whole of this write's trace, and a brief that is not a
                 // person's message would not even log a `MessageQueued`.
-                if !state.log().is_empty() || !state.inbox().is_empty() {
+                if !state.log().is_empty() || !state.pending_incoming().is_empty() {
                     let _ = reply.send(Ok(()));
                     return CommandEffect::none();
                 }

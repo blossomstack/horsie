@@ -37,12 +37,12 @@ use serde::{Deserialize, Serialize};
 pub(crate) use compaction::Compaction;
 pub(crate) use log::LogWrites;
 pub(crate) use provision::Provision;
-pub(crate) use queue::{Queue, QueueState};
+pub(crate) use queue::Queue;
 pub(crate) use reads::Reads;
 pub(crate) use seed::Seeding;
 pub(crate) use task_list::{TaskListPart, TaskLists};
 pub(crate) use timers::{TimerState, Timers};
-pub(crate) use turn::{Turn, TurnState};
+pub(crate) use turn::Turn;
 
 /// One component's durable state, tagged by the component that owns it.
 ///
@@ -63,8 +63,6 @@ pub(crate) use turn::{Turn, TurnState};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum ComponentState {
-    Queue(QueueState),
-    Turn(TurnState),
     Timers(TimerState),
     TaskList(TaskListPart),
 }
@@ -74,13 +72,6 @@ pub enum ComponentState {
 macro_rules! parts {
     ($($variant:ident($ty:ty)),+ $(,)?) => {
         impl ComponentState {
-            /// Why this part says the agent must not act yet.
-            pub(crate) fn blocks(&self, state: &AgentState) -> Option<Blocked> {
-                match self {
-                    $(Self::$variant(part) => part.blocks(state),)+
-                }
-            }
-
             /// This part as a sub session inherits it.
             pub(crate) fn carried(&self) -> Option<Self> {
                 match self {
@@ -117,12 +108,7 @@ macro_rules! parts {
     };
 }
 
-parts!(
-    Queue(QueueState),
-    Turn(TurnState),
-    Timers(TimerState),
-    TaskList(TaskListPart),
-);
+parts!(Timers(TimerState), TaskList(TaskListPart));
 
 /// The component registry: every component an agent runs, held and named in
 /// exactly one place.

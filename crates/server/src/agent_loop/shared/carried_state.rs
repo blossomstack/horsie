@@ -53,9 +53,10 @@ pub fn render_carried_state(state: &AgentState) -> String {
         sections.push(block);
     }
 
-    if !state.asks().is_empty() {
+    let asks = state.pending_asks();
+    if !asks.is_empty() {
         let mut block = String::from("Questions you are waiting on an answer to:");
-        for a in state.asks() {
+        for a in asks {
             block.push_str(&format!(
                 "\n- [{}] {}",
                 a.tool_call_id.as_deref().unwrap_or("unknown call"),

@@ -174,9 +174,7 @@ fn recovery_repairs(state: &AgentState) -> Vec<AgentDomainEvent> {
             let mut events = vec![AgentDomainEvent::StepFailed {
                 reason: StepFailure::Interrupted,
             }];
-            if let Some(crate::agent_loop::Offer::Compact { consumed, .. }) =
-                crate::agent_loop::queued_offer(state.inbox(), state.asks())
-            {
+            if let Some(crate::agent_loop::Offer::Compact { consumed, .. }) = state.queued_offer() {
                 events.push(AgentDomainEvent::Consumed {
                     ids: consumed,
                     at_ms,
@@ -188,7 +186,7 @@ fn recovery_repairs(state: &AgentState) -> Vec<AgentDomainEvent> {
             let Some(crate::agent_loop::Offer::Summary {
                 consumed,
                 sub_sessions,
-            }) = crate::agent_loop::queued_offer(state.inbox(), state.asks())
+            }) = state.queued_offer()
             else {
                 return vec![AgentDomainEvent::StepFailed {
                     reason: StepFailure::Interrupted,

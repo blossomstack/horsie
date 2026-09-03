@@ -93,8 +93,7 @@ impl Components {
         if !cx.step_run.ready {
             return CommandEffect::none();
         }
-        let work_due = cx.state.turn_in_flight()
-            || crate::agent_loop::queued_offer(cx.state.inbox(), cx.state.asks()).is_some();
+        let work_due = cx.state.turn_in_flight() || cx.state.queued_offer().is_some();
         if work_due && let Some(effect) = self.ensure_contexts(cx) {
             return effect;
         }
@@ -110,7 +109,7 @@ impl Components {
             return CommandEffect::none();
         }
         // 3. Whatever the queue is offering, in its order of precedence.
-        match crate::agent_loop::queued_offer(cx.state.inbox(), cx.state.asks()) {
+        match cx.state.queued_offer() {
             Some(crate::agent_loop::Offer::Summary {
                 consumed,
                 sub_sessions,
@@ -318,7 +317,7 @@ impl Components {
             .zip(records)
             .map(|(seq, record)| AgentDomainEvent::HookRan { record, seq, at_ms })
             .collect();
-        let pending = crate::agent_loop::queued_offer(cx.state.inbox(), cx.state.asks()).is_some();
+        let pending = cx.state.queued_offer().is_some();
         let outcome = match outcome {
             StopHookOutcome::Continue { message }
                 if cx.state.stop_continuations() < MAX_STOP_CONTINUATIONS =>
@@ -473,7 +472,14 @@ impl Components {
     }
 
     fn blocked(&self, cx: &Cx<'_>) -> Option<Blocked> {
-        cx.state.vetoes().next()
+        if cx.state.turn_in_flight() {
+            let open = cx.state.open_tool_calls();
+            if !open.is_empty() {
+                return Some(Blocked::ToolCalls(open));
+            }
+        }
+        let asks = cx.state.pending_asks();
+        (!asks.is_empty() && cx.state.queued_offer().is_none()).then_some(Blocked::Parked)
     }
 
     /// Stop current foreground work. Acknowledgement follows the durable

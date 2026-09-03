@@ -149,7 +149,7 @@ impl Transcript {
 impl AgentState {
     /// This component's own state, or `None` if it has never had any.
     ///
-    /// Typed by the caller: `state.part::<QueueState>()`. No downcast, and no
+    /// Typed by the caller: `state.part::<TimerState>()`. No downcast, and no
     /// way to name a part that does not exist.
     #[must_use]
     pub(crate) fn part<T: Part>(&self) -> Option<&T> {
@@ -311,13 +311,6 @@ impl AgentState {
             .iter()
             .filter(|e| matches!(e.body, AgentLogBody::Hook(_)))
             .count()
-    }
-
-    /// Every part's reason the agent must not act yet, in registry order.
-    ///
-    /// The parts are asked; nothing here knows which of them has an opinion.
-    pub(crate) fn vetoes(&self) -> impl Iterator<Item = Blocked> + '_ {
-        self.parts.iter().filter_map(|part| part.blocks(self))
     }
 
     /// Every durable record, including control records hidden from the
@@ -549,7 +542,7 @@ impl AgentState {
                 }
             }
         }
-        let parked = self.asks();
+        let parked = self.pending_asks();
         open.retain(|id| {
             !parked
                 .iter()
@@ -608,36 +601,129 @@ impl AgentState {
 ///
 /// Every one of these forwards to a method on the owning component's state;
 /// none of them reaches a field. Adding a reader means adding a method there,
-/// which is the point: the owner decides what is knowable about it.
 impl AgentState {
-    /// Accepted-but-undelivered things addressed to this agent, oldest first.
+    /// Accepted-but-undelivered things, derived from append and consume
+    /// records. This is the queue; there is no second durable container.
     #[must_use]
-    pub fn inbox(&self) -> &[crate::agent_loop::Incoming] {
-        self.part::<QueueState>().map_or(&[], QueueState::inbox)
+    pub fn pending_incoming(&self) -> Vec<crate::agent_loop::Incoming> {
+        let mut pending = Vec::new();
+        for entry in &self.history {
+            if let AgentDomainEvent::Received { item, .. } = &entry.record {
+                pending.push(item.clone());
+            }
+            let consumed = if let AgentDomainEvent::Consumed { ids, .. } = &entry.record {
+                Some(ids)
+            } else if let AgentDomainEvent::TurnBegan { consumed, .. } = &entry.record {
+                Some(consumed)
+            } else {
+                None
+            };
+            if let Some(ids) = consumed {
+                pending.retain(|item| !ids.iter().any(|id| id == item.id()));
+            }
+        }
+        pending
     }
 
-    /// Every question this agent is parked on, oldest first.
+    /// Questions still awaiting answers, derived from history.
     #[must_use]
-    pub fn asks(&self) -> &[crate::agent_loop::AskedQuestion] {
-        self.part::<QueueState>().map_or(&[], QueueState::asks)
+    pub fn pending_asks(&self) -> Vec<crate::agent_loop::AskedQuestion> {
+        let mut asks = Vec::new();
+        for entry in &self.history {
+            if let AgentDomainEvent::AskRecorded { asks: recorded, .. } = &entry.record {
+                asks.clone_from(recorded);
+            }
+            if let AgentDomainEvent::RunEnded {
+                reason: RunEnd::AwaitingInput { asks: recorded },
+                ..
+            } = &entry.record
+            {
+                asks.clone_from(recorded);
+            }
+            if matches!(&entry.record, AgentDomainEvent::TurnBegan { .. }) {
+                asks.clear();
+            }
+        }
+        asks
     }
 
-    /// Whether the agent has parked itself awaiting something that will wake it.
+    /// The next history-backed offer, if one can run now.
+    #[must_use]
+    pub fn queued_offer(&self) -> Option<crate::agent_loop::Offer> {
+        let incoming = self.pending_incoming();
+        let asks = self.pending_asks();
+        crate::agent_loop::queued_offer(&incoming, &asks)
+    }
+
+    /// Whether the latest durable boundary parked on background work.
     #[must_use]
     pub fn parked(&self) -> bool {
-        self.part::<QueueState>().is_some_and(QueueState::parked)
+        let mut parked = false;
+        for entry in &self.history {
+            if matches!(
+                &entry.record,
+                AgentDomainEvent::Parked { .. }
+                    | AgentDomainEvent::RunEnded {
+                        reason: RunEnd::Parked,
+                        ..
+                    }
+            ) {
+                parked = true;
+            } else if matches!(
+                &entry.record,
+                AgentDomainEvent::InputMessage { .. }
+                    | AgentDomainEvent::TurnBegan { .. }
+                    | AgentDomainEvent::StepStarted {
+                        kind: StepKind::Agent,
+                    }
+            ) {
+                parked = false;
+            }
+        }
+        parked
     }
 
-    /// True between a turn beginning and that turn reaching a boundary.
+    /// True between a durable turn start and its newest boundary.
     #[must_use]
     pub fn turn_in_flight(&self) -> bool {
-        self.part::<TurnState>().is_some_and(TurnState::in_flight)
+        let mut running = false;
+        for entry in &self.history {
+            if matches!(&entry.record, AgentDomainEvent::TurnBegan { .. }) {
+                running = true;
+            } else if matches!(
+                &entry.record,
+                AgentDomainEvent::RunComplete { .. }
+                    | AgentDomainEvent::RunAborted { .. }
+                    | AgentDomainEvent::RunCancelled { .. }
+                    | AgentDomainEvent::AskRecorded { .. }
+                    | AgentDomainEvent::Parked { .. }
+                    | AgentDomainEvent::RunEnded { .. }
+            ) {
+                running = false;
+            }
+        }
+        running
     }
 
-    /// Consecutive turns this agent ended without the result it owed.
+    /// Consecutive corrections recorded for a run that owes a result.
     #[must_use]
     pub fn nudges(&self) -> u32 {
-        self.part::<TurnState>().map_or(0, TurnState::nudges)
+        let mut nudges = 0_u32;
+        for entry in &self.history {
+            if matches!(&entry.record, AgentDomainEvent::Nudged { .. }) {
+                nudges = nudges.saturating_add(1);
+            } else if matches!(
+                &entry.record,
+                AgentDomainEvent::Parked { .. }
+                    | AgentDomainEvent::RunEnded {
+                        reason: RunEnd::Complete { .. } | RunEnd::Parked,
+                        ..
+                    }
+            ) {
+                nudges = 0;
+            }
+        }
+        nudges
     }
 
     /// Active timers, durable so they re-arm on recovery.
@@ -748,6 +834,42 @@ mod history_tests {
 
     fn fold(state: AgentState, event: AgentDomainEvent) -> AgentState {
         AgentActor::apply_event(state, event)
+    }
+
+    fn incoming(id: &str, text: &str) -> crate::agent_loop::Incoming {
+        crate::agent_loop::Incoming::User {
+            id: id.into(),
+            text: text.into(),
+            artifacts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn pending_input_is_derived_from_history_without_queue_state() {
+        let state = [
+            AgentDomainEvent::Received {
+                item: incoming("one", "first"),
+                at_ms: 1,
+            },
+            AgentDomainEvent::Received {
+                item: incoming("two", "second"),
+                at_ms: 2,
+            },
+            AgentDomainEvent::TurnBegan {
+                consumed: vec!["one".into()],
+                answered: Vec::new(),
+                at_ms: 3,
+            },
+        ]
+        .into_iter()
+        .fold(AgentActor::initial_state(), fold);
+
+        assert_eq!(state.pending_incoming(), vec![incoming("two", "second")]);
+        assert!(state.turn_in_flight());
+        assert!(matches!(
+            state.queued_offer(),
+            Some(crate::agent_loop::Offer::Input(_))
+        ));
     }
 
     #[test]
