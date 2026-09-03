@@ -177,19 +177,11 @@ impl AgentState {
     #[must_use]
     pub fn snapshot_at(&self, at_seq: u64) -> Self {
         Self {
-            history: self
-                .history
-                .iter()
-                .filter(|entry| {
-                    matches!(
-                        &entry.record,
-                        AgentDomainEvent::SystemPromptRecorded { .. }
-                            | AgentDomainEvent::AgentInitialized { .. }
-                    )
-                })
-                .cloned()
-                .collect(),
-            next_history_seq: self.next_history_seq,
+            // A branch is a new agent. It carries conversation context, not
+            // the source agent's initialization identity or immutable prompt.
+            // Its first step initializes and records its own prompt once.
+            history: Vec::new(),
+            next_history_seq: 0,
             usage_total: UsageTotal::default(),
             last_step_usage: None,
             context_tokens: self.context_tokens,

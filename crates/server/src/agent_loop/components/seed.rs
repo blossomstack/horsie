@@ -60,21 +60,26 @@ impl Seeding {
                     };
                     let _ = reply.send(answer);
                 });
-                CommandEffect::persist(vec![
-                    AgentDomainEvent::Seeded {
-                        state: seeded,
-                        seed,
-                    },
-                    AgentDomainEvent::Received {
-                        item: message,
-                        at_ms: now_ms(),
-                    },
-                ])
-                .and_ack(ReplyTo::from_sender(tx))
-                // A whole session in one event is exactly the case a
-                // snapshot exists for: without one, every later recovery
-                // replays it.
-                .and_snapshot()
+                let repairs = missing_tool_results(&seeded.prompt_messages(), &[]);
+                let mut events = vec![AgentDomainEvent::Seeded {
+                    state: seeded,
+                    seed,
+                }];
+                events.extend(
+                    repairs
+                        .into_iter()
+                        .map(|message| AgentDomainEvent::InputMessage { message }),
+                );
+                events.push(AgentDomainEvent::Received {
+                    item: message,
+                    at_ms: now_ms(),
+                });
+                CommandEffect::persist(events)
+                    .and_ack(ReplyTo::from_sender(tx))
+                    // A whole session in one event is exactly the case a
+                    // snapshot exists for: without one, every later recovery
+                    // replays it.
+                    .and_snapshot()
             }
             SeedCommand::SummaryTaken {
                 marker_seq,
