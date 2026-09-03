@@ -257,6 +257,63 @@ describe("Sidebar sessions", () => {
     expect(api.sessions.remove).not.toHaveBeenCalled();
   });
 
+  it("selects individual sessions and deletes them together after confirmation", async () => {
+    vi.mocked(api.sessions.list).mockResolvedValue({
+      sessions: [session("1"), session("2"), session("3")],
+    });
+    vi.mocked(api.sessions.remove).mockResolvedValue({ ok: true });
+    renderSidebar();
+    await waitFor(() =>
+      expect(screen.getAllByTestId("session-row")).toHaveLength(3),
+    );
+
+    fireEvent.click(screen.getByTestId("session-selection-button"));
+    expect(screen.getByTestId("session-selection-toolbar")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("session-select-1"));
+    fireEvent.click(screen.getByTestId("session-select-3"));
+    expect(screen.getByText("2 selected")).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("delete-selected-sessions"));
+    expect(api.sessions.remove).not.toHaveBeenCalled();
+    expect(confirmSnapshot()?.message).toContain("2 selected sessions");
+
+    answerConfirm(true);
+    await waitFor(() =>
+      expect(api.sessions.remove).toHaveBeenCalledTimes(2),
+    );
+    expect(api.sessions.remove).toHaveBeenCalledWith("1");
+    expect(api.sessions.remove).toHaveBeenCalledWith("3");
+    expect(screen.queryByTestId("session-selection-toolbar")).toBeNull();
+  });
+
+  it("selects every visible session and leaves them alone when deletion is cancelled", async () => {
+    vi.mocked(api.sessions.list).mockResolvedValue({
+      sessions: [session("1"), session("2")],
+    });
+    renderSidebar();
+    await waitFor(() =>
+      expect(screen.getAllByTestId("session-row")).toHaveLength(2),
+    );
+
+    fireEvent.click(screen.getByTestId("session-selection-button"));
+    fireEvent.click(screen.getByTestId("select-all-sessions"));
+    expect(screen.getByText("2 selected")).toBeTruthy();
+    expect(screen.getByTestId("session-select-1")).toHaveProperty(
+      "checked",
+      true,
+    );
+    expect(screen.getByTestId("session-select-2")).toHaveProperty(
+      "checked",
+      true,
+    );
+
+    fireEvent.click(screen.getByTestId("delete-selected-sessions"));
+    answerConfirm(false);
+    await waitFor(() => expect(confirmSnapshot()).toBeNull());
+    expect(api.sessions.remove).not.toHaveBeenCalled();
+    expect(screen.getByTestId("session-selection-toolbar")).toBeTruthy();
+  });
+
   it("filters the rail by session title once there is enough to search", async () => {
     vi.mocked(api.sessions.list).mockResolvedValue({
       sessions: Array.from({ length: 9 }, (_, i) => session(String(i))),

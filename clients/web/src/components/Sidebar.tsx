@@ -3,17 +3,21 @@ import {
   CalendarClock,
   Container,
   Inbox,
+  ListChecks,
   ListFilter,
   Plus,
   PanelLeftClose,
   Settings,
   ShieldCheck,
+  Trash2,
   Workflow,
+  X,
 } from "lucide-react";
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Trans, useTranslation } from "react-i18next";
-import { Link, NavLink, useNavigate } from "react-router-dom";
+import { Link, NavLink, useMatch, useNavigate } from "react-router-dom";
 import { cn } from "../lib/cn";
+import { askConfirm } from "../lib/confirm";
 import { ProjectSwitcher } from "./ProjectSwitcher";
 import {
   allTags,
@@ -25,7 +29,10 @@ import {
 } from "../lib/sessionTags";
 import { usePersistentState } from "../hooks/usePersistentState";
 import { useInbox } from "../hooks/useInbox";
-import { useSessionList } from "../hooks/useSessions";
+import {
+  useDeleteSessions,
+  useSessionList,
+} from "../hooks/useSessions";
 import { sessionTitle } from "../lib/format";
 import { SessionRow } from "./SessionRow";
 import { TagFilterPanel } from "./TagFilterPanel";
@@ -144,6 +151,8 @@ export function Sidebar({ onHide }: { onHide?: () => void }) {
   );
   const [panelOpen, setPanelOpen] = useState(false);
   const [filterText, setFilterText] = useState("");
+  const [selecting, setSelecting] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
 
   const tags = useMemo(() => allTags(sessions ?? []), [sessions]);
   // Read through the live universe: a constraint naming a tag whose last
@@ -170,6 +179,55 @@ export function Sidebar({ onHide }: { onHide?: () => void }) {
     [sessions, filter, needle],
   );
   const navigate = useNavigate();
+  const openSessionId = useMatch("/sessions/:id/*")?.params.id;
+  const del = useDeleteSessions();
+  const allShownSelected =
+    shown.length > 0 && shown.every((session) => selected.has(session.id));
+
+  useEffect(() => {
+    const visible = new Set(shown.map((session) => session.id));
+    setSelected((current) => {
+      const next = new Set([...current].filter((id) => visible.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [shown]);
+
+  const toggleSelectionMode = () => {
+    setSelecting((current) => !current);
+    setSelected(new Set());
+    setPanelOpen(false);
+  };
+
+  const toggleSession = (id: string) => {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+  };
+
+  const toggleAllShown = () => {
+    setSelected(
+      allShownSelected ? new Set() : new Set(shown.map((session) => session.id)),
+    );
+  };
+
+  const removeSelected = async () => {
+    const ids = [...selected];
+    if (
+      !(await askConfirm(t("rail.confirmDeleteSelected", { count: ids.length })))
+    )
+      return;
+
+    try {
+      await del.mutateAsync(ids);
+      if (openSessionId && selected.has(openSessionId)) navigate("/");
+      setSelected(new Set());
+      setSelecting(false);
+    } catch {
+      /* reported by the global failure notice */
+    }
+  };
 
   return (
     <aside className="column-edge-r flex h-full w-[17.5rem] shrink-0 flex-col bg-chassis">
@@ -255,40 +313,92 @@ export function Sidebar({ onHide }: { onHide?: () => void }) {
       </div>
 
       <div className="flex items-center justify-between pb-1 pl-3.5 pr-2 pt-3">
-        <span className="legend">{t("rail.sessions")}</span>
+        <span className="legend">
+          {selecting
+            ? t("rail.selected", { count: selected.size })
+            : t("rail.sessions")}
+        </span>
         <div className="flex items-center gap-0.5">
-          {/* Nothing to filter by until a tag exists, and an empty panel
-              behind a button is a control with no job. */}
-          {tags.length > 0 && (
+          {!selecting && (
+            <>
+              {/* Nothing to filter by until a tag exists, and an empty panel
+                  behind a button is a control with no job. */}
+              {tags.length > 0 && (
+                <button
+                  className="key-icon !h-6 !w-6"
+                  data-marked={filterIsActive(filter) ? "true" : undefined}
+                  onClick={() => setPanelOpen((v) => !v)}
+                  aria-expanded={panelOpen}
+                  data-testid="tag-filter-button"
+                  title={t("rail.filterByTag")}
+                  aria-label={t("rail.filterByTag")}
+                >
+                  <ListFilter size={14} aria-hidden />
+                </button>
+              )}
+              <button
+                className="key-icon !h-6 !w-6"
+                onClick={() => navigate("/")}
+                data-testid="new-session-button"
+                title={t("rail.newSession")}
+                aria-label={t("rail.newSession")}
+              >
+                <Plus size={14} aria-hidden />
+              </button>
+            </>
+          )}
+          {(sessions?.length ?? 0) > 0 && (
             <button
               className="key-icon !h-6 !w-6"
-              // A filtered list must never look like the whole list: the one
-              // failure mode of a collapsible filter is a short rail read as
-              // an account that has lost its sessions. The key is holding a
-              // value, so it says so the way every other key holding one
-              // does — and it outranks `aria-expanded`, because a shut panel
-              // over a live filter is exactly the case this is for.
-              data-marked={filterIsActive(filter) ? "true" : undefined}
-              onClick={() => setPanelOpen((v) => !v)}
-              aria-expanded={panelOpen}
-              data-testid="tag-filter-button"
-              title={t("rail.filterByTag")}
-              aria-label={t("rail.filterByTag")}
+              onClick={toggleSelectionMode}
+              aria-pressed={selecting}
+              data-testid="session-selection-button"
+              title={t(selecting ? "rail.exitSelection" : "rail.selectSessions")}
+              aria-label={t(
+                selecting ? "rail.exitSelection" : "rail.selectSessions",
+              )}
             >
-              <ListFilter size={14} aria-hidden />
+              {selecting ? (
+                <X size={14} aria-hidden />
+              ) : (
+                <ListChecks size={14} aria-hidden />
+              )}
             </button>
           )}
-          <button
-            className="key-icon !h-6 !w-6"
-            onClick={() => navigate("/")}
-            data-testid="new-session-button"
-            title={t("rail.newSession")}
-            aria-label={t("rail.newSession")}
-          >
-            <Plus size={14} aria-hidden />
-          </button>
         </div>
       </div>
+
+      {selecting && (
+        <div
+          className="flex items-center gap-2 px-2 pb-1.5"
+          data-testid="session-selection-toolbar"
+        >
+          <label className="row row-quiet min-w-0 flex-1 px-2 py-1.5 text-[0.75rem]">
+            <input
+              type="checkbox"
+              checked={allShownSelected}
+              ref={(node) => {
+                if (node)
+                  node.indeterminate = selected.size > 0 && !allShownSelected;
+              }}
+              onChange={toggleAllShown}
+              aria-label={t("rail.selectAllSessions")}
+              data-testid="select-all-sessions"
+            />
+            <span className="truncate">{t("rail.selectAll")}</span>
+          </label>
+          <button
+            type="button"
+            className="key key-stop key-sm shrink-0"
+            onClick={() => void removeSelected()}
+            disabled={selected.size === 0 || del.isPending}
+            data-testid="delete-selected-sessions"
+          >
+            <Trash2 size={13} aria-hidden />
+            {t("common.delete")}
+          </button>
+        </div>
+      )}
 
       {panelOpen && tags.length > 0 && (
         <TagFilterPanel
@@ -356,7 +466,15 @@ export function Sidebar({ onHide }: { onHide?: () => void }) {
           // graph draws that — lineage, what each one is doing, and what each
           // one spawned — so listing them here as well was a second structural
           // view of the same thing, and the one with less to say.
-          shown.map((s) => <SessionRow key={s.id} s={s} tags={tags} />)}
+          shown.map((s) => (
+            <SessionRow
+              key={s.id}
+              s={s}
+              tags={tags}
+              selected={selected.has(s.id)}
+              onToggle={selecting ? () => toggleSession(s.id) : undefined}
+            />
+          ))}
       </nav>
 
       {/* The scope everything above belongs to, and the server-level
