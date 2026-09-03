@@ -9,9 +9,9 @@
 //! its own, and this type is what sits on the far end of one of that trait's
 //! implementations — never an implementation of it.
 //!
-//! Only lifecycle is decoded here. Anything addressed to a runtime is forwarded
-//! untouched in both directions, so a new runtime capability needs no change in
-//! this file.
+//! Only lifecycle is interpreted here. Runtime messages this build understands
+//! are forwarded untouched; a newer message is refused from its stable envelope
+//! so its caller is not left waiting for a reply that cannot arrive.
 //!
 //! Everything vendor-specific lives behind two seams — the `RuntimeProvider`
 //! (spawn a process, schedule a container, …) and the [`WorkspaceResolver`]
@@ -28,7 +28,7 @@ use crate::{
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::capabilities::{Access, DirGrant, Grant};
 use horsie_models::executor::{EnvVar, RuntimeConfig, RuntimeInfo, RuntimeState, WorkspaceConfig};
-use horsie_models::runtime::RuntimeInboundMessage;
+use horsie_models::runtime::{RequestRefused, RuntimeInboundMessage, RuntimeOutboundMessage};
 use horsie_models::runtime_vendor::{
     CreateRuntimeResponse, DeleteRuntimeResponse, GetRuntimeResponse, HibernateRuntimeResponse,
     QueryRuntimesResponse, RequestFailed, RuntimeRelayRequest, RuntimeRelayResponse, RuntimeSpec,
@@ -575,6 +575,26 @@ impl RuntimeVendorClient {
         }
     }
 
+    /// Recover enough of a newer runtime request to reject it by correlation id.
+    fn refuse_undecodable_relay(text: &str) -> Option<RuntimeVendorOutboundMessage> {
+        let frame: serde_json::Value = serde_json::from_str(text).ok()?;
+        let command = frame.get("command")?;
+        if command.get("type")?.as_str()? != "Runtime" {
+            return None;
+        }
+        let relay = command.get("value")?;
+        let request_id = frame.get("requestId")?.as_str()?.to_string();
+        let runtime_id = relay.get("runtimeId")?.as_str()?.to_string();
+        let refusal = RequestRefused::for_undecodable_request(relay.get("message")?)?;
+        Some(RuntimeVendorOutboundMessage {
+            request_id,
+            event: RuntimeVendorEvent::Runtime(RuntimeRelayResponse {
+                runtime_id,
+                message: RuntimeOutboundMessage::RequestRefused(refusal),
+            }),
+        })
+    }
+
     /// Serve commands over one live link until it dies or `cancel` fires.
     async fn serve(
         self: &Arc<Self>,
@@ -606,9 +626,17 @@ impl RuntimeVendorClient {
                         | Ok(Message::Frame(_)) => continue,
                         Ok(Message::Close(_)) | Err(_) => return LinkEnd::Disconnected,
                     };
-                    let Ok(inbound) = serde_json::from_str::<RuntimeVendorInboundMessage>(&text) else {
-                        note("vendor process: undecodable command, ignoring");
-                        continue;
+                    let inbound = match serde_json::from_str::<RuntimeVendorInboundMessage>(&text) {
+                        Ok(inbound) => inbound,
+                        Err(_) => {
+                            if let Some(refusal) = Self::refuse_undecodable_relay(&text) {
+                                note("vendor process: unsupported runtime request, refusing");
+                                let _ = send(&sink, refusal).await;
+                            } else {
+                                note("vendor process: undecodable command, ignoring");
+                            }
+                            continue;
+                        }
                     };
                     // Each command runs on its own task: a bash tool call can
                     // legitimately run for minutes, and blocking the read loop
@@ -1142,6 +1170,46 @@ mod tests {
             std::time::Duration::from_secs(60),
             std::time::Duration::from_secs(60),
         ))
+    }
+
+    #[test]
+    fn an_unknown_relayed_tool_is_refused_with_both_correlation_ids() {
+        let frame = serde_json::json!({
+            "requestId": "vendor-request",
+            "command": {
+                "type": "Runtime",
+                "value": {
+                    "runtimeId": "runtime-1",
+                    "message": {
+                        "type": "ToolCall",
+                        "value": {
+                            "callId": "tool-call",
+                            "agentId": "agent-1",
+                            "call": { "tool": "FutureTool", "value": {} }
+                        }
+                    }
+                }
+            }
+        });
+        let text = frame.to_string();
+        assert!(serde_json::from_str::<RuntimeVendorInboundMessage>(&text).is_err());
+
+        let refusal = RuntimeVendorClient::refuse_undecodable_relay(&text)
+            .expect("the relay envelope remains readable");
+        assert_eq!(refusal.request_id, "vendor-request");
+        match refusal.event {
+            RuntimeVendorEvent::Runtime(response) => {
+                assert_eq!(response.runtime_id, "runtime-1");
+                match response.message {
+                    RuntimeOutboundMessage::RequestRefused(refusal) => {
+                        assert_eq!(refusal.call_id, "tool-call");
+                        assert!(refusal.reason.contains("does not support"));
+                    }
+                    other => panic!("expected RequestRefused, got {other:?}"),
+                }
+            }
+            other => panic!("expected runtime response, got {other:?}"),
+        }
     }
 
     /// A shared bundles directory would let one session scan another's skills,

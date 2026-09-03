@@ -23,7 +23,7 @@ use horsie_models::runtime::{RuntimeInboundMessage, RuntimeOutboundMessage};
 use horsie_models::runtime_vendor::{
     RuntimeRelayRequest, RuntimeVendorCommand, RuntimeVendorEvent,
 };
-use horsie_runtime_host::{RuntimeTransport, TransportError};
+use horsie_runtime_host::{RuntimeTransport, TransportError, inbound_call_id};
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -120,9 +120,10 @@ impl RuntimeTransport for RuntimeVendorTransport {
         // written is never re-sent on a fresh link: the message may already have
         // reached the runtime and run, and `bash` is not idempotent. Re-linking
         // is for the next call, not for retrying this one.
+        let call_id = inbound_call_id(&message).to_string();
         let link = self.link().await?;
         let event = link
-            .request(self.addressed(message))
+            .request_runtime(&self.runtime_id, &call_id, self.addressed(message))
             .await
             .map_err(|e| TransportError::SendFailed(e.to_string()))?;
         match event {
@@ -146,6 +147,18 @@ impl RuntimeTransport for RuntimeVendorTransport {
             .send_oneway(self.addressed(message))
             .await
             .map_err(|e| TransportError::SendFailed(e.to_string()))
+    }
+
+    async fn abandon(&self, call_id: &str) {
+        let Some(link) = self.current_link() else {
+            return;
+        };
+        link.fail_runtime_request(
+            &self.runtime_id,
+            call_id,
+            format!("runtime stopped reporting call '{call_id}' before answering"),
+        )
+        .await;
     }
 
     async fn closed(&self) {
@@ -242,6 +255,44 @@ mod tests {
             .unwrap()
     }
 
+    /// A connected vendor that receives commands but never answers them — the
+    /// shape of an older process dropping a request it cannot decode.
+    async fn boot_silent_agent() -> (
+        Arc<WebsocketRuntimeVendor>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let (a, b) = tokio::io::duplex(64 * 1024);
+        let server = WebSocketStream::from_raw_socket(a, Role::Server, None).await;
+        let mut agent = WebSocketStream::from_raw_socket(b, Role::Client, None).await;
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let boot = RuntimeVendorOutboundMessage {
+                request_id: "boot".to_string(),
+                event: RuntimeVendorEvent::Ready(RuntimeVendorReady {
+                    vendor_name: "v".to_string(),
+                    instance_id: "v-instance".to_string(),
+                    capabilities: RuntimeVendorCapabilities {
+                        supports_provisioning: true,
+                    },
+                }),
+            };
+            agent
+                .send(Message::Text(serde_json::to_string(&boot).unwrap().into()))
+                .await
+                .unwrap();
+            if let Some(Ok(Message::Text(_))) = agent.next().await {
+                let _ = seen_tx.send(());
+            }
+            while agent.next().await.is_some() {}
+        });
+        (
+            WebsocketRuntimeVendor::start(server, Principal::Anonymous, test_links())
+                .await
+                .unwrap(),
+            seen_rx,
+        )
+    }
+
     /// The table the transport reads, holding one vendor.
     fn published(
         name: &str,
@@ -306,6 +357,32 @@ mod tests {
             ToolResult::Ok(out) => assert_eq!(out.stdout, "back-again"),
             ToolResult::Err(ToolError { reason }) => panic!("expected success, got {reason}"),
         }
+    }
+
+    /// The manager's reconciler and a later run hold different transport
+    /// handles, so abandonment must reach the waiter shared by their live link.
+    #[tokio::test]
+    async fn one_handle_can_abandon_a_relay_started_by_another() {
+        let (link, seen) = boot_silent_agent().await;
+        let vendors = published("v", link);
+        let invoking_transport = Arc::new(transport(&vendors));
+        let reconciling_transport = transport(&vendors);
+        let invoking =
+            tokio::spawn(
+                async move { invoking_transport.invoke("call-1", "agent-1", bash()).await },
+            );
+
+        seen.await.expect("the vendor received the request");
+        reconciling_transport.abandon("call-1").await;
+
+        let error = tokio::time::timeout(Duration::from_secs(1), invoking)
+            .await
+            .expect("abandon must release the waiter")
+            .expect("invoke task")
+            .expect_err("an abandoned call cannot succeed");
+        assert!(
+            matches!(error, TransportError::SendFailed(message) if message.contains("stopped reporting"))
+        );
     }
 
     /// A vendor that is away is a *transient* failure. Reporting `Disconnected`
