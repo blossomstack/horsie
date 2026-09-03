@@ -338,6 +338,15 @@ const zhHant: typeof en = {
   transcript: {
     working: "智慧代理正在工作",
     queued: "尚未送出 —— 將隨下一輪一起送出",
+    commentPlaceholder: "新增評論…",
+    addComment: "新增評論",
+    editComment: "編輯評論",
+    commentPanelTitle: "評論摘錄",
+    collapseComment: "收合評論",
+    openComment: "開啟「{{excerpt}}」的評論",
+    sendComments_one: "送出 1 則評論",
+    sendComments_other: "送出 {{count}} 則評論",
+    sendCommentsShort: "送出 · {{count}}",
   },
 
   workGroup: {

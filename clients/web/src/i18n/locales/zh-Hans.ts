@@ -338,6 +338,15 @@ const zhHans: typeof en = {
   transcript: {
     working: "智能体正在工作",
     queued: "尚未发送 —— 将随下一轮一起送出",
+    commentPlaceholder: "添加评论…",
+    addComment: "添加评论",
+    editComment: "编辑评论",
+    commentPanelTitle: "评论摘录",
+    collapseComment: "收起评论",
+    openComment: "打开“{{excerpt}}”的评论",
+    sendComments_one: "发送 1 条评论",
+    sendComments_other: "发送 {{count}} 条评论",
+    sendCommentsShort: "发送 · {{count}}",
   },
 
   workGroup: {

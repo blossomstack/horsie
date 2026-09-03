@@ -12,7 +12,14 @@ export type WorkItem =
   | { kind: "subagent"; result: RenderedSubAgent };
 
 export type Segment =
-  | { kind: "text"; key: string; text: string; streaming?: boolean }
+  | {
+      kind: "text";
+      key: string;
+      text: string;
+      /** The settled message this text came from; absent for the live tail. */
+      anchorId?: string;
+      streaming?: boolean;
+    }
   | {
       kind: "work";
       key: string;
@@ -106,7 +113,12 @@ export function buildSegments(
     }
     if (m.text) {
       flushWork(false);
-      segments.push({ kind: "text", key: `text${seq++}`, text: m.text });
+      segments.push({
+        kind: "text",
+        key: `text${seq++}`,
+        text: m.text,
+        anchorId: m.id,
+      });
     }
     for (const tc of m.toolCalls) pushToolCall(tc);
   }
