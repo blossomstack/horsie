@@ -212,6 +212,7 @@ impl StepRun {
             }
         }
         self.foreground = ForegroundStep::Idle;
+        self.pending_tool_choice = None;
         self.ctx_stale = true;
     }
 }
@@ -465,5 +466,54 @@ pub(crate) trait Component {
         _actor: horsie_actor::ActorRef<AgentCommand>,
     ) -> Option<std::sync::Arc<dyn horsie_agentcore::Toolbox>> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn call(id: &str) -> DispatchedCall {
+        DispatchedCall {
+            id: id.into(),
+            name: "bash".into(),
+            input: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn a_stale_marker_cannot_finish_foreground_work() {
+        let mut step = StepRun::new(true);
+        let cancel = step.begin(StepPhase::CallingProvider, 7);
+        assert!(step.is_running());
+        assert!(step.live(7));
+        assert!(!step.finished(6));
+        assert!(step.is_running());
+        assert!(step.finished(7));
+        assert!(!step.is_running());
+        assert!(!cancel.is_cancelled());
+    }
+
+    #[test]
+    fn a_tool_batch_settles_only_after_every_call_returns() {
+        let mut step = StepRun::new(true);
+        step.begin_tools(9, vec![call("a"), call("b")]);
+        assert!(step.take_tool(9, "a").is_some());
+        assert!(step.settle_tools(9).is_none());
+        assert!(step.take_tool(9, "b").is_some());
+        assert_eq!(step.settle_tools(9).map(|stopped| stopped.len()), Some(0));
+        assert!(!step.is_running());
+    }
+
+    #[test]
+    fn cancel_makes_the_marker_stale_and_clears_one_step_tool_choice() {
+        let mut step = StepRun::new(true);
+        let cancel = step.begin(StepPhase::StopHook, 11);
+        step.pending_tool_choice = Some(horsie_agentcore::ToolChoice::Required("submit".into()));
+        step.stop();
+        assert!(cancel.is_cancelled());
+        assert!(!step.live(11));
+        assert!(!step.is_running());
+        assert!(step.pending_tool_choice.is_none());
     }
 }
