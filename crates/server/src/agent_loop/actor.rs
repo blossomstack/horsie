@@ -1,14 +1,10 @@
-//! The actor: one agent's shell.
+//! One event-sourced agent and its transient foreground step.
 //!
-//! It routes every command to [`AgentLoop`], persists whatever they decided,
-//! folds it, and keeps the plumbing they all rely on — the observer, the
-//! revision counter, the snapshot cadence. It decides nothing itself, and it
-//! does not know what components exist.
-//!
-//! Two things deliberately do not happen on this mailbox. No provider call and
-//! no toolbox build: those run on a spawned task, so a thirty-second MCP
-//! connect cannot block a cancel. And no decision about whether this agent
-//! exists: residency belongs to whoever spawned it.
+//! The actor owns [`AgentLoop`], persists its decisions, folds chronological
+//! history, publishes durable outcomes, and reconstructs or repairs the newest
+//! open step after recovery. Provider, tool, hook, compaction, seed-summary,
+//! and connection work run off-mailbox so reads and cancellation remain live.
+//! Residency still belongs to the session or workflow that spawned the actor.
 
 use crate::agent_loop::context::{AgentOutcome, AgentRuntimeContext};
 use crate::agent_loop::prelude::*;

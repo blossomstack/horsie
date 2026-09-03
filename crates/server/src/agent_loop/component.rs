@@ -1,26 +1,11 @@
-//! The contract every component of an agent shares — and everything they are
-//! allowed to share.
+//! Transient foreground-step state and the narrow contract for stateful tool
+//! components.
 //!
-//! A component is an instantiated struct the actor holds. It owns its own
-//! in-memory bookkeeping and the commands routed to it; the actor is a router
-//! and keeps no domain logic. Three things are shared, and nothing else:
-//!
-//! - **[`AgentState`]** — the durable state, moved only by the fold.
-//! - **The command/event vocabulary** — a component acts by returning events
-//!   in a [`CommandEffect`], and reports its own progress by telling *its own*
-//!   commands to the shared mailbox.
-//! - **[`StepRun`]** — the transient half of the state: the few in-memory
-//!   facts more than one component genuinely reads, deliberately unjournaled.
-//!
-//! **A component never names another component.** It cannot ask one for
-//! anything and cannot tell one anything; the one thing it may say to the
-//! world outside itself is [`Cx::advance`] — *something changed, reconsider* —
-//! which names nobody. Deciding what happens next is
-//! [`AgentLoop::advance`]'s job, in [`super::boundary`], and it is the only
-//! code that knows what components exist.
-//!
-//! `apply` folds one component's events into state and must be pure — no I/O,
-//! no clock, no step_run. `on_load` repairs what a dead process left behind.
+//! The actor-owned loop uses [`StepRun`] for process-only execution state. Its
+//! durable counterpart is always reconstructed from [`AgentState`] history.
+//! Timer and task-list components receive the same command context and may
+//! change durable state only by returning events; they do not call each other.
+//! Provider calls and special steps are actor-loop phases, not components.
 
 use crate::agent_loop::prelude::*;
 use async_trait::async_trait;

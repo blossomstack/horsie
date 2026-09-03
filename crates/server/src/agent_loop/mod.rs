@@ -1,34 +1,25 @@
-//! One agent: what it is, what it can be told, and what it decides.
+//! One agent: an append-only history, one transient foreground step, and one
+//! decision about what happens next.
 //!
-//! An [`AgentActor`] runs one agent. It is event-sourced, so a restarted
-//! process recovers an in-flight session from the journal: everything durable
-//! about it is [`AgentState`], everything it can be told is [`AgentCommand`],
-//! and every change is an [`AgentDomainEvent`] journaled before it is believed.
+//! [`AgentActor`] owns a process-local `StepRun`; [`AgentState`] owns durable
+//! history. A restart repairs the newest open marker without replaying provider,
+//! tool, hook, compaction, seed-summary, or workspace-scan side effects.
 //!
-//! Read this module top down. The files beside this one are the architecture:
+//! Read this module top down:
 //!
-//! - [`actor`] — the shell. It routes commands, persists what a component
-//!   decided, and keeps the plumbing (the observer, the revision counter, the
-//!   snapshot cadence). It decides nothing.
-//! - [`boundary`] — what happens next, in one ordered decision, re-taken after
-//!   every durable write. The only code that knows what components exist.
-//! - [`component`] — the contract: what a component is, what it is handed, and
-//!   everything components share.
-//! - [`state`] — the transcript, plus one opaque part per component.
-//! - [`commands`] and [`events`] — the vocabulary.
-//! - [`params`] — how this incarnation was configured.
-//! - [`context`] — the contract with whoever spawned this agent: what it is
-//!   given (a provider, a toolbox, a workspace) and what it reports back.
+//! - [`actor`] — persistence, recovery, observation, and the transient top step.
+//! - [`boundary`] — the one ordered decision that drives normal and special steps.
+//! - [`component`] — transient step state and the contract used only by genuine
+//!   stateful tool components.
+//! - [`state`] — chronological history plus timer and task-list component state.
+//! - [`commands`] and [`events`] — the exhaustive vocabulary.
+//! - [`context`] — one-time initialization and repeatable connection contracts.
+//! - [`components`] — the actor-owned driver, its small handlers, and the timer
+//!   and task-list components.
+//! - [`shared`] — pure helpers used by more than one handler.
 //!
-//! Below that, [`components`] holds the implementations — one module each,
-//! pluggable, and secondary to the architecture above. [`shared`] holds what
-//! more than one of them needs.
-//!
-//! Sequencing several agents — an interactive session's main agent and its
-//! subagents, or a workflow run's steps — belongs to the owner that spawns
-//! them, not here. That owner is [`crate::sessions`]; the workflow *graph*
-//! feature that schedules runs is [`crate::workflows`], which is a different
-//! thing despite the adjacent name.
+//! Sequencing several agents remains the responsibility of the session or
+//! workflow that spawned them.
 
 mod actor;
 mod boundary;

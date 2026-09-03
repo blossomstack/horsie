@@ -1,24 +1,16 @@
-//! The components an agent runs, and everything that is true of all of them.
+//! The actor-owned run-loop driver and its stateful tool components.
 //!
-//! This file is the roster. It names every component exactly once, in four
-//! places that are checked against each other at compile time: the struct that
-//! holds them, the command routing, the event routing, and the list of durable
-//! states. A component added later fails to build *here* — where it has to be
-//! classified — rather than silently doing nothing.
+//! [`AgentLoop`] coordinates normal provider steps, initialization, connection,
+//! Stop hooks, compaction, seed summaries, incoming records, and reads. Those
+//! are phases or handlers, not components: their durable truth is the shared
+//! history and they own no independent state machine.
 //!
-//! Nothing above this module names a component, and no component names
-//! another. What happens next is decided by
-//! [`AgentLoop::advance`](crate::agent_loop::boundary), which is the only
-//! code that knows they all exist.
+//! Only [`timers`] and [`task_list`] are components. Each owns durable state,
+//! commands, events, recovery behavior, and a toolbox. Their states are the
+//! only variants of [`ComponentState`].
 //!
-//! One component, one module: [`provision`] the runtime and context setup they
-//! all share, [`queue`] what this agent has accepted and how it becomes input,
-//! [`turn`] one provider call and what an ending means, [`compaction`] folding
-//! old history behind a summary boundary, [`timers`] and [`task_list`] the
-//! tools whose state is the agent's own, [`seed`] branching and the
-//! sub-session summary, [`usage`] what everything cost, [`reads`] the
-//! questions that wake nothing, and [`log`] what others write into this
-//! agent's transcript.
+//! Command and event routing remains exhaustive here so adding a variant must
+//! still be classified in one place.
 
 pub mod compaction;
 pub mod log;
@@ -56,10 +48,8 @@ pub(crate) use turn::Turn;
 /// code that wrote it and positions in a list do not survive a component being
 /// removed.
 ///
-/// Not every component has one. Provisioning, compaction, seeding and the read
-/// paths keep nothing durable of their own — a compaction boundary is a
-/// transcript entry, not a field — and a component with no state simply has no
-/// variant.
+/// Only genuine components appear here. Run-loop phases record their state in
+/// history instead of adding another durable part.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum ComponentState {
@@ -110,18 +100,9 @@ macro_rules! parts {
 
 parts!(Timers(TimerState), TaskList(TaskListPart));
 
-/// The component registry: every component an agent runs, held and named in
-/// exactly one place.
-///
-/// The actor holds one of these and delegates wholesale — it never names a
-/// component. Adding a component means editing this struct and its three
-/// exhaustive routings below, all in this file, all checked at compile time:
-/// a new command group or event variant that is not routed fails to build
-/// *here*, where it has to be classified.
-///
-/// This is also the seam for building an agent's components from its spec
-/// later: construction is centralized in [`AgentLoop::new`], so a spec-driven
-/// variant changes this file and nothing above it.
+/// The actor's run-loop driver. Stateless handlers live beside the two real
+/// components so command routing, event folding, and the next-step decision
+/// remain one exhaustive unit rather than leaking into the actor shell.
 pub(crate) struct AgentLoop {
     pub(crate) provision: Provision,
     pub(crate) timers: Timers,
