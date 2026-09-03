@@ -1,5 +1,12 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
 import type {
   RenderedMessage,
@@ -12,7 +19,10 @@ import {
   type TranscriptComment,
 } from "./TranscriptComments";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 const assistant: RenderedMessage = {
   id: "a1",
@@ -35,6 +45,7 @@ function CommentableTranscript({
   showLive?: boolean;
 }) {
   const [comments, setComments] = useState<TranscriptComment[]>([]);
+  const [pending, setPending] = useState(false);
   return (
     <>
       <Transcript
@@ -55,10 +66,14 @@ function CommentableTranscript({
             ),
           onRemove: (id) =>
             setComments((current) => current.filter((item) => item.id !== id)),
+          onPendingChange: setPending,
         }}
       />
       <output data-testid="comment-state" hidden>
         {comments.map((item) => item.comment).join("|")}
+      </output>
+      <output data-testid="comment-pending" hidden>
+        {String(pending)}
       </output>
     </>
   );
@@ -83,11 +98,13 @@ function selectText(text: string, start: number, end: number) {
 
 describe("transcript comments", () => {
   it("opens the comment field when a keyboard or touch selection settles", async () => {
+    vi.useFakeTimers();
     render(<CommentableTranscript />);
     makeSelection(assistant.text, 5, 20);
     fireEvent(document, new Event("selectionchange"));
+    await act(async () => vi.advanceTimersByTimeAsync(250));
 
-    expect(await screen.findByTestId("transcript-comment-panel")).toBeTruthy();
+    expect(screen.getByTestId("transcript-comment-panel")).toBeTruthy();
     expect(screen.getByTestId("transcript-comment-marker")).toBeTruthy();
   });
 
@@ -119,7 +136,7 @@ describe("transcript comments", () => {
     expect(panel.textContent).toContain("the retry limit");
   });
 
-  it("edits and removes a saved comment from its marker", () => {
+  it("edits and removes a saved comment from its marker", async () => {
     render(<CommentableTranscript />);
     selectText(assistant.text, 5, 20);
     fireEvent.change(screen.getByLabelText("Add a comment…"), {
@@ -132,10 +149,13 @@ describe("transcript comments", () => {
     fireEvent.change(editor, {
       target: { value: "Keep this at four.\nDocument the limit." },
     });
+    expect(screen.getByTestId("comment-state").textContent).toBe("Make this five.");
+    expect(screen.getByTestId("comment-pending").textContent).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(screen.getByTestId("comment-state").textContent).toBe(
       "Keep this at four.\nDocument the limit.",
     );
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(screen.getByTestId("comment-pending").textContent).toBe("false");
 
     fireEvent.click(screen.getByRole("button", { name: "Open comment on “the retry limit”" }));
     const panel = screen.getByTestId("transcript-comment-panel");
@@ -144,7 +164,27 @@ describe("transcript comments", () => {
     fireEvent.click(screen.getByRole("button", { name: "Remove" }));
     expect(screen.queryByTestId("transcript-comment-marker")).toBeNull();
     expect(screen.queryByTestId("transcript-comment-panel")).toBeNull();
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect((document.activeElement as HTMLElement).dataset.commentAnchor).toBe("a1");
   });
+  it("collapses from Escape when a panel action has focus", () => {
+    render(<CommentableTranscript />);
+    selectText(assistant.text, 5, 20);
+    fireEvent.change(screen.getByLabelText("Add a comment…"), {
+      target: { value: "Make this five." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open comment on “the retry limit”" }),
+    );
+
+    fireEvent.keyDown(screen.getByRole("button", { name: "Remove" }), {
+      key: "Escape",
+    });
+    expect(screen.queryByTestId("transcript-comment-panel")).toBeNull();
+    expect(screen.getByTestId("transcript-comment-marker")).toBeTruthy();
+  });
+
   it("keeps an in-progress edit when older assistant history is prepended", () => {
     const { rerender } = render(<CommentableTranscript />);
     selectText(assistant.text, 5, 20);
@@ -241,6 +281,9 @@ describe("transcript comments", () => {
     expect(screen.getByTestId("transcript-comment-panel").textContent).toContain(
       "First comment",
     );
+    fireEvent.change(screen.getByLabelText("Edit comment"), {
+      target: { value: "First comment, revised" },
+    });
 
     fireEvent.click(screen.getByRole("button", { name: "Open comment on “three attempts”" }));
     expect(screen.getAllByTestId("transcript-comment-panel")).toHaveLength(1);
@@ -248,11 +291,30 @@ describe("transcript comments", () => {
       "Second comment",
     );
     fireEvent.click(
+      screen.getByRole("button", { name: "Open comment on “the retry limit”" }),
+    );
+    expect((screen.getByLabelText("Edit comment") as HTMLTextAreaElement).value).toBe(
+      "First comment, revised",
+    );
+    fireEvent.click(
       within(screen.getByTestId("transcript-comment-panel")).getByRole("button", {
         name: "Collapse comment",
       }),
     );
     expect(screen.queryByTestId("transcript-comment-panel")).toBeNull();
+    expect(screen.getByTestId("comment-state").textContent).toBe(
+      "First comment|Second comment",
+    );
+    expect(screen.getByTestId("comment-pending").textContent).toBe("true");
+    expect(
+      screen.getByRole("button", { name: "Open comment on “the retry limit”" })
+        .dataset.pending,
+    ).toBe("true");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open comment on “the retry limit”" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByTestId("comment-pending").textContent).toBe("false");
   });
 
   it("rejects a selection that crosses transcript turns", () => {

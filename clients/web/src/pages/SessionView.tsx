@@ -445,11 +445,13 @@ export function SessionView() {
   // has been handed over.
   const [pendingSubSession, setPendingSubSession] = useState<string | null>(null);
   const [transcriptComments, setTranscriptComments] = useState<TranscriptComment[]>([]);
+  const [transcriptCommentsPending, setTranscriptCommentsPending] = useState(false);
   const transcriptCommentScope = `${id ?? ""}:${agentId ?? MAIN_AGENT}`;
   const transcriptCommentScopeRef = useRef(transcriptCommentScope);
   transcriptCommentScopeRef.current = transcriptCommentScope;
   useEffect(() => {
     setTranscriptComments([]);
+    setTranscriptCommentsPending(false);
   }, [transcriptCommentScope]);
   useEffect(() => {
     if (!pendingSubSession || !id) return;
@@ -505,6 +507,7 @@ export function SessionView() {
     if (
       !id ||
       transcriptComments.length === 0 ||
+      transcriptCommentsPending ||
       transcriptComments.some((item) => !item.comment.trim())
     )
       return;
@@ -1009,6 +1012,7 @@ export function SessionView() {
                   disabled={
                     overlayOpen ||
                     send.isPending ||
+                    transcriptCommentsPending ||
                     transcriptComments.some((item) => !item.comment.trim()) ||
                     (status !== undefined && !statusMeta(status).canSend)
                   }
@@ -1219,7 +1223,7 @@ export function SessionView() {
                   showThinking={uiSettings.showThinking}
                   sessionId={id}
                   commenting={
-                    isRun
+                    isRun || overlayOpen
                       ? undefined
                       : {
                           comments: transcriptComments,
@@ -1235,6 +1239,7 @@ export function SessionView() {
                             setTranscriptComments((current) =>
                               current.filter((item) => item.id !== commentId),
                             ),
+                          onPendingChange: setTranscriptCommentsPending,
                         }
                   }
                 />

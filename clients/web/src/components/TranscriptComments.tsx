@@ -5,9 +5,11 @@ import {
   useEffect,
   useRef,
   useState,
+  type Dispatch,
   type KeyboardEvent,
   type ReactNode,
   type RefObject,
+  type SetStateAction,
 } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
@@ -26,6 +28,7 @@ export interface TranscriptCommenting {
   onAdd: (comment: TranscriptComment) => void;
   onUpdate: (id: string, comment: string) => void;
   onRemove: (id: string) => void;
+  onPendingChange: (pending: boolean) => void;
 }
 
 export function formatTranscriptComments(
@@ -54,14 +57,20 @@ interface PanelPosition {
 
 interface ActiveComment {
   id: string;
+  position: PanelPosition;
+}
+
+interface CommentDraft {
+  value: string;
   original: string;
   isNew: boolean;
-  position: PanelPosition;
 }
 
 interface CommentContextValue extends TranscriptCommenting {
   active: ActiveComment | null;
   setActive: (active: ActiveComment | null) => void;
+  drafts: Readonly<Record<string, CommentDraft>>;
+  setDrafts: Dispatch<SetStateAction<Record<string, CommentDraft>>>;
 }
 
 const CommentContext = createContext<CommentContextValue | null>(null);
@@ -103,16 +112,25 @@ const PANEL_HEIGHT = 280;
 const PANEL_GAP = 8;
 
 function positionPanel(rect: Pick<DOMRect, "bottom" | "left" | "top">): PanelPosition {
-  const width = Math.min(PANEL_WIDTH, window.innerWidth - PANEL_GAP * 2);
+  const viewport = window.visualViewport;
+  const viewportLeft = viewport?.offsetLeft ?? 0;
+  const viewportTop = viewport?.offsetTop ?? 0;
+  const viewportWidth = viewport?.width ?? window.innerWidth;
+  const viewportHeight = viewport?.height ?? window.innerHeight;
+  const width = Math.min(PANEL_WIDTH, viewportWidth - PANEL_GAP * 2);
   const left = Math.min(
-    Math.max(PANEL_GAP, rect.left),
-    Math.max(PANEL_GAP, window.innerWidth - width - PANEL_GAP),
+    Math.max(viewportLeft + PANEL_GAP, rect.left),
+    Math.max(
+      viewportLeft + PANEL_GAP,
+      viewportLeft + viewportWidth - width - PANEL_GAP,
+    ),
   );
   const below = rect.bottom + PANEL_GAP;
+  const viewportBottom = viewportTop + viewportHeight;
   const top =
-    below + PANEL_HEIGHT <= window.innerHeight
+    below + PANEL_HEIGHT <= viewportBottom
       ? below
-      : Math.max(PANEL_GAP, rect.top - PANEL_HEIGHT - PANEL_GAP);
+      : Math.max(viewportTop + PANEL_GAP, rect.top - PANEL_HEIGHT - PANEL_GAP);
   return { left, top };
 }
 
@@ -135,7 +153,6 @@ function CommentEditor({
   onSubmit,
   onCancel,
   onDelete,
-  onCollapse,
 }: {
   value: string;
   submitLabel: string;
@@ -144,14 +161,10 @@ function CommentEditor({
   onSubmit: () => void;
   onCancel: () => void;
   onDelete?: () => void;
-  onCollapse: () => void;
 }) {
   const { t } = useTranslation();
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      onCollapse();
-    } else if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
       event.preventDefault();
       if (value.trim()) onSubmit();
     }
@@ -167,7 +180,7 @@ function CommentEditor({
         onKeyDown={onKeyDown}
         aria-label={ariaLabel}
         placeholder={t("transcript.commentPlaceholder")}
-        className="screen w-full resize-y px-2.5 py-2 text-sm leading-relaxed text-legend outline-none transition-shadow placeholder:text-faint focus:shadow-[0_0_0_2px_var(--focus-ring)]"
+        className="screen w-full resize-none px-2.5 py-2 text-sm leading-relaxed text-legend outline-none transition-shadow placeholder:text-faint focus:shadow-[0_0_0_2px_var(--focus-ring)]"
       />
       <div className="mt-2 flex justify-end gap-1.5">
         {onDelete && (
@@ -198,28 +211,23 @@ function CommentEditor({
 function FloatingCommentPanel({
   item,
   active,
-  onUpdate,
+  draft,
+  onDraftChange,
+  onSave,
+  onCancel,
   onRemove,
   onClose,
 }: {
   item: TranscriptComment;
   active: ActiveComment;
-  onUpdate: (id: string, comment: string) => void;
-  onRemove: (id: string) => void;
+  draft: CommentDraft;
+  onDraftChange: (value: string) => void;
+  onSave: () => void;
+  onCancel: () => void;
+  onRemove: () => void;
   onClose: () => void;
 }) {
   const { t } = useTranslation();
-  const cancel = () => {
-    if (active.isNew) onRemove(item.id);
-    else onUpdate(item.id, active.original);
-    onClose();
-  };
-  const save = () => {
-    const comment = item.comment.trim();
-    if (!comment) return;
-    onUpdate(item.id, comment);
-    onClose();
-  };
 
   return (
     <div
@@ -227,8 +235,14 @@ function FloatingCommentPanel({
       aria-label={t("transcript.commentPanelTitle")}
       data-testid="transcript-comment-panel"
       data-comment-ui=""
-      className="floating fixed z-[60] w-[min(22rem,calc(100vw-1rem))] p-3 shadow-[0_12px_36px_oklch(0_0_0/0.28)]"
+      className="floating fixed z-[60] max-h-[calc(100dvh-1rem)] w-[min(22rem,calc(100vw-1rem))] overflow-y-auto p-3 shadow-[0_12px_36px_oklch(0_0_0/0.28)]"
       style={{ left: active.position.left, top: active.position.top }}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        event.stopPropagation();
+        onClose();
+      }}
     >
       <div className="mb-2 flex items-start gap-2">
         <p className="max-h-24 min-w-0 flex-1 overflow-y-auto whitespace-pre-wrap text-xs leading-relaxed text-faint">
@@ -245,27 +259,17 @@ function FloatingCommentPanel({
         </button>
       </div>
       <CommentEditor
-        value={item.comment}
-        submitLabel={
-          active.isNew ? t("transcript.addComment") : t("common.save")
-        }
+        value={draft.value}
+        submitLabel={draft.isNew ? t("transcript.addComment") : t("common.save")}
         ariaLabel={
-          active.isNew
+          draft.isNew
             ? t("transcript.commentPlaceholder")
             : t("transcript.editComment")
         }
-        onChange={(comment) => onUpdate(item.id, comment)}
-        onSubmit={save}
-        onCancel={cancel}
-        onDelete={
-          active.isNew
-            ? undefined
-            : () => {
-                onRemove(item.id);
-                onClose();
-              }
-        }
-        onCollapse={onClose}
+        onChange={onDraftChange}
+        onSubmit={onSave}
+        onCancel={onCancel}
+        onDelete={draft.isNew ? undefined : onRemove}
       />
     </div>
   );
@@ -283,6 +287,7 @@ export function TranscriptCommentProvider({
   children: ReactNode;
 }) {
   const [active, setActive] = useState<ActiveComment | null>(null);
+  const [drafts, setDrafts] = useState<Record<string, CommentDraft>>({});
   const selectionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pointerSelecting = useRef(false);
   const commentingRef = useRef(commenting);
@@ -299,12 +304,11 @@ export function TranscriptCommentProvider({
     if (!excerpt) return;
     const id = `transcript-comment-${++commentSequence}`;
     current.onAdd({ id, ...excerpt, comment: "" });
-    setActive({
-      id,
-      original: "",
-      isNew: true,
-      position: selectionPosition(selection),
-    });
+    setDrafts((saved) => ({
+      ...saved,
+      [id]: { value: "", original: "", isNew: true },
+    }));
+    setActive({ id, position: selectionPosition(selection) });
     selection.removeAllRanges();
   };
 
@@ -323,6 +327,40 @@ export function TranscriptCommentProvider({
       if (selectionTimer.current) clearTimeout(selectionTimer.current);
     };
   }, [enabled, rootRef]);
+
+  const hasPendingDraft = Object.values(drafts).some(
+    (draft) => draft.isNew || draft.value !== draft.original,
+  );
+  useEffect(() => {
+    commenting?.onPendingChange(hasPendingDraft);
+  }, [commenting?.onPendingChange, hasPendingDraft]);
+
+  useEffect(() => {
+    if (!active) return;
+    const place = () => {
+      const markers = rootRef.current?.querySelectorAll<HTMLButtonElement>(
+        "[data-comment-id]",
+      );
+      const marker = Array.from(markers ?? []).find(
+        (candidate) => candidate.dataset.commentId === active.id,
+      );
+      if (!marker) return;
+      const position = positionPanel(marker.getBoundingClientRect());
+      setActive((current) =>
+        current?.id === active.id ? { ...current, position } : current,
+      );
+    };
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    window.visualViewport?.addEventListener("resize", place);
+    window.visualViewport?.addEventListener("scroll", place);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+      window.visualViewport?.removeEventListener("resize", place);
+      window.visualViewport?.removeEventListener("scroll", place);
+    };
+  }, [active?.id, rootRef]);
 
   const body = (
     <div
@@ -357,34 +395,78 @@ export function TranscriptCommentProvider({
     </div>
   );
   if (!commenting) return body;
-
   const activeItem = active
     ? commenting.comments.find((item) => item.id === active.id)
     : undefined;
+  const activeDraft = active ? drafts[active.id] : undefined;
+  const removeDraft = (id: string) =>
+    setDrafts((current) => {
+      const { [id]: _removed, ...remaining } = current;
+      return remaining;
+    });
   const closeActive = () => {
     const id = active?.id;
+    const anchorId = activeItem?.anchorId;
     setActive(null);
     if (!id) return;
     setTimeout(() => {
       const markers = rootRef.current?.querySelectorAll<HTMLButtonElement>(
         "[data-comment-id]",
       );
-      Array.from(markers ?? []).find(
-        (marker) => marker.dataset.commentId === id,
-      )?.focus();
+      const marker = Array.from(markers ?? []).find(
+        (candidate) => candidate.dataset.commentId === id,
+      );
+      if (marker) {
+        marker.focus();
+        return;
+      }
+      const anchors = rootRef.current?.querySelectorAll<HTMLElement>(
+        "[data-comment-anchor]",
+      );
+      const anchor = Array.from(anchors ?? []).find(
+        (candidate) => candidate.dataset.commentAnchor === anchorId,
+      );
+      if (anchor) {
+        anchor.tabIndex = -1;
+        anchor.focus();
+      }
     });
   };
 
   return (
-    <CommentContext.Provider value={{ ...commenting, active, setActive }}>
+    <CommentContext.Provider
+      value={{ ...commenting, active, setActive, drafts, setDrafts }}
+    >
       {body}
-      {active && activeItem
+      {active && activeItem && activeDraft
         ? createPortal(
             <FloatingCommentPanel
               item={activeItem}
               active={active}
-              onUpdate={commenting.onUpdate}
-              onRemove={commenting.onRemove}
+              draft={activeDraft}
+              onDraftChange={(value) =>
+                setDrafts((current) => ({
+                  ...current,
+                  [active.id]: { ...activeDraft, value },
+                }))
+              }
+              onSave={() => {
+                const value = activeDraft.value.trim();
+                if (!value) return;
+                commenting.onUpdate(active.id, value);
+                removeDraft(active.id);
+                closeActive();
+              }}
+              onCancel={() => {
+                if (activeDraft.isNew) commenting.onRemove(active.id);
+                removeDraft(active.id);
+                closeActive();
+              }}
+              onRemove={() => {
+                commenting.onRemove(active.id);
+                removeDraft(active.id);
+                closeActive();
+              }}
               onClose={closeActive}
             />,
             document.body,
@@ -409,12 +491,14 @@ export function TranscriptTurnComments({
 
   return (
     <div
-      className="absolute -top-6 right-0 z-20 flex gap-1 sm:-right-2 sm:top-0 sm:translate-x-full"
+      className="absolute -top-6 right-0 z-20 flex gap-1 sm:top-0 sm:translate-x-full sm:flex-col"
       data-testid="transcript-comment-markers"
       data-comment-ui=""
     >
       {comments.map((item) => {
         const open = context.active?.id === item.id;
+        const draft = context.drafts[item.id];
+        const pending = draft?.isNew || draft?.value !== draft?.original;
         const number = context.comments.findIndex((comment) => comment.id === item.id) + 1;
         const markerLabel = t("transcript.openComment", {
           excerpt: item.quote.length > 48 ? `${item.quote.slice(0, 48)}…` : item.quote,
@@ -425,6 +509,8 @@ export function TranscriptTurnComments({
             type="button"
             className={cn(
               "key-icon !h-6 !w-6 bg-raised text-legend shadow-[0_2px_10px_oklch(0_0_0/0.16)]",
+              pending &&
+                "shadow-[inset_0_0_0_1px_var(--rule-strong),0_2px_10px_oklch(0_0_0/0.16)]",
               open && "!bg-accent-quiet !text-legend",
             )}
             aria-pressed={open}
@@ -440,16 +526,27 @@ export function TranscriptTurnComments({
             }
             data-testid="transcript-comment-marker"
             data-comment-id={item.id}
+            data-pending={pending ? "true" : undefined}
             onClick={(event) => {
               if (open) {
                 context.setActive(null);
                 return;
               }
               const rect = event.currentTarget.getBoundingClientRect();
+              context.setDrafts((current) =>
+                current[item.id]
+                  ? current
+                  : {
+                      ...current,
+                      [item.id]: {
+                        value: item.comment,
+                        original: item.comment,
+                        isNew: item.comment.trim().length === 0,
+                      },
+                    },
+              );
               context.setActive({
                 id: item.id,
-                original: item.comment,
-                isNew: item.comment.trim().length === 0,
                 position: positionPanel(rect),
               });
             }}

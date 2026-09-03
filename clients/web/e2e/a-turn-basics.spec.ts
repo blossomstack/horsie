@@ -150,6 +150,10 @@ test("A5: selected transcript text can be commented on and sent from the header"
   await expect(page.getByTestId("transcript-comment-panel")).toContainText(
     "Increase this to five attempts.",
   );
+  await page.getByTestId("timeline-toggle").click();
+  await expect(page.getByTestId("transcript-comment-panel")).toHaveCount(0);
+  await page.getByTestId("transcript-toggle").click();
+  await expect(page.getByTestId("transcript-comment-panel")).toBeVisible();
   await page
     .getByTestId("transcript-comment-panel")
     .getByRole("button", { name: "Collapse comment" })
