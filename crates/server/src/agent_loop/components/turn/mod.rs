@@ -466,23 +466,22 @@ impl Component for Turn {
                 marker_seq,
                 response,
             } => {
-                if !open_agent_marker(cx.state, marker_seq) {
+                if !open_agent_marker(cx.state, marker_seq) || !cx.step_run.finished(marker_seq) {
                     tracing::warn!(marker_seq, "dropping a callback for a closed agent step");
                     return CommandEffect::none();
                 }
-                cx.step_run.running = None;
                 self.handle_responded(*response, cx).await
             }
             RunCommand::StepFailed { marker_seq, error } => {
-                if !open_agent_marker(cx.state, marker_seq) {
+                if !open_agent_marker(cx.state, marker_seq) || !cx.step_run.finished(marker_seq) {
                     return CommandEffect::none();
                 }
-                cx.step_run.running = None;
                 self.handle_llm_failed(error, cx).await
             }
             RunCommand::StreamDelta { marker_seq, text } => {
-                if open_agent_marker(cx.state, marker_seq) {
-                    cx.step_run.deltas.push(text);
+                if open_agent_marker(cx.state, marker_seq)
+                    && cx.step_run.push_delta(marker_seq, text)
+                {
                     cx.publish_revision();
                 }
                 CommandEffect::none()

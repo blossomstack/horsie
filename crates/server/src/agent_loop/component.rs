@@ -27,67 +27,54 @@ use async_trait::async_trait;
 use horsie_actor::{ActorContext, CommandEffect};
 use tokio_util::sync::CancellationToken;
 
-/// What an agent can be doing off its own mailbox — one thing at a time.
-///
-/// The mailbox is never blocked, so anything that waits on the outside world
-/// runs on a spawned task and reports back. This names which task that is;
-/// `None` means the agent is between jobs, which is the only moment
-/// [`Components::advance`] may start a new one.
+/// Non-tool foreground work. Tool execution has its own variant because only
+/// that phase may carry dispatched and stopped calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StepPhase {
-    /// Rehydrating the runtime, reconnecting MCP, composing the toolbox.
     Initialize,
     Connect,
-    /// A turn's pre-start hooks.
     StartHooks,
-    /// One provider call for the current Agent marker.
     CallingProvider,
-    /// The current Agent marker's tool batch.
-    RunningTools,
-    /// The Stop/SubagentStop hook at a settled boundary.
     StopHook,
-    /// A tool-less compaction provider call.
     Compaction,
-    /// A tool-less seed-summary provider call.
     SeedSummary,
 }
 
-/// The transient half of an agent's state: in-memory facts more than one
-/// component reads. Everything here is rebuilt or re-decided on recovery,
-/// which is exactly why none of it is journaled.
+/// One tool call dispatched by this process and not yet answered.
+#[derive(Clone)]
+pub(crate) struct DispatchedCall {
+    pub id: String,
+    pub name: String,
+    pub input: serde_json::Value,
+}
+
+/// The one foreground activity this process is running. `Idle` has no stale
+/// marker or cancellation handle; only `Tools` can hold call bookkeeping.
+enum ForegroundStep {
+    Idle,
+    Running {
+        marker_seq: u64,
+        phase: StepPhase,
+        cancel: CancellationToken,
+    },
+    Tools {
+        marker_seq: u64,
+        cancel: CancellationToken,
+        calls: Vec<DispatchedCall>,
+        stopped: Vec<horsie_agentcore::StoppedCall>,
+    },
+}
+
+/// The transient top of the durable history. It owns process-only execution
+/// state; recovery rebuilds meaning from history and always starts here idle.
 pub(crate) struct StepRun {
-    /// Whether this agent's session has a runtime to run on. Seeded at spawn
-    /// and moved by the `Runtime` lifecycle records the owner already sends.
     pub ready: bool,
-    /// The open history marker every callback must name.
-    pub marker_seq: Option<u64>,
-    /// The job running off the mailbox, if any. This is the busy gate.
-    pub running: Option<StepPhase>,
-    /// Cancels everything running for the current marker.
-    pub cancel: CancellationToken,
-    /// The contexts every kind of work runs against — the provider, the
-    /// composed toolbox, the budget, the hooks — published by the provision
-    /// component. Shared rather than owned by anyone because a turn, a
-    /// compaction and a summary all read the same one.
+    foreground: ForegroundStep,
     pub ctx: Option<std::sync::Arc<TurnCtx>>,
-    /// Whether they must be rebuilt before the next work runs. Contexts are
-    /// per turn: a rehydrated runtime, a reconnected MCP server or a changed
-    /// prompt all arrive this way.
     pub ctx_stale: bool,
-    /// The tool calls the actor has dispatched and not yet heard back from.
-    /// In-memory only: a crash mid-batch recovers by repairing the journal,
-    /// never by re-running a side effect.
-    pub calls: Vec<DispatchedCall>,
-    /// Calls that ended the run (`ask_user`, `submit_result`), collected as
-    /// the batch settles; the turn interprets them once nothing is in flight.
-    pub stopped: Vec<horsie_agentcore::StoppedCall>,
-    /// What the next provider call should say about tool use. Taken when a
-    /// turn starts, so it applies to exactly one turn. Set only when re-running
-    /// a turn that ended without the result it owed.
     pub pending_tool_choice: Option<horsie_agentcore::ToolChoice>,
-    /// Chunks of the message currently being written, since the newest log
-    /// entry. Cleared whenever an entry lands, because the entry supersedes
-    /// them. Written by the turn, read by the read path.
+    /// Streamed text is kept outside `ForegroundStep` so cancellation can
+    /// salvage it after moving the foreground back to `Idle`.
     pub deltas: Vec<String>,
 }
 
@@ -95,49 +82,136 @@ impl StepRun {
     pub fn new(ready: bool) -> Self {
         Self {
             ready,
-            marker_seq: None,
-            running: None,
-            cancel: CancellationToken::new(),
+            foreground: ForegroundStep::Idle,
             ctx: None,
             ctx_stale: true,
-            calls: Vec::new(),
-            stopped: Vec::new(),
             pending_tool_choice: None,
             deltas: Vec::new(),
         }
     }
 
-    /// Claim the foreground slot for the open history marker.
-    pub fn begin(&mut self, kind: StepPhase, marker_seq: u64) -> CancellationToken {
-        self.running = Some(kind);
-        self.marker_seq = Some(marker_seq);
-        self.cancel.clone()
+    pub fn is_running(&self) -> bool {
+        !matches!(self.foreground, ForegroundStep::Idle)
+    }
+
+    /// Claim the foreground slot for non-tool work.
+    pub fn begin(&mut self, phase: StepPhase, marker_seq: u64) -> CancellationToken {
+        let cancel = CancellationToken::new();
+        self.foreground = ForegroundStep::Running {
+            marker_seq,
+            phase,
+            cancel: cancel.clone(),
+        };
+        cancel
+    }
+
+    /// Claim the foreground slot for a whole tool batch.
+    pub fn begin_tools(
+        &mut self,
+        marker_seq: u64,
+        calls: Vec<DispatchedCall>,
+    ) -> CancellationToken {
+        let cancel = CancellationToken::new();
+        self.foreground = ForegroundStep::Tools {
+            marker_seq,
+            cancel: cancel.clone(),
+            calls,
+            stopped: Vec::new(),
+        };
+        cancel
+    }
+
+    pub fn push_delta(&mut self, marker_seq: u64, text: String) -> bool {
+        let ForegroundStep::Running {
+            marker_seq: open,
+            phase: StepPhase::CallingProvider,
+            ..
+        } = &self.foreground
+        else {
+            return false;
+        };
+        if *open != marker_seq {
+            return false;
+        }
+        self.deltas.push(text);
+        true
     }
 
     pub fn live(&self, marker_seq: u64) -> bool {
-        self.marker_seq == Some(marker_seq)
+        match &self.foreground {
+            ForegroundStep::Idle => false,
+            ForegroundStep::Running {
+                marker_seq: open, ..
+            }
+            | ForegroundStep::Tools {
+                marker_seq: open, ..
+            } => *open == marker_seq,
+        }
     }
 
     pub fn finished(&mut self, marker_seq: u64) -> bool {
         if !self.live(marker_seq) {
             return false;
         }
-        self.running = None;
+        self.foreground = ForegroundStep::Idle;
         true
     }
 
-    /// Stop everything and make every callback for the old marker stale.
+    pub fn take_tool(&mut self, marker_seq: u64, tool_call_id: &str) -> Option<DispatchedCall> {
+        let ForegroundStep::Tools {
+            marker_seq: open,
+            calls,
+            ..
+        } = &mut self.foreground
+        else {
+            return None;
+        };
+        if *open != marker_seq {
+            return None;
+        }
+        calls
+            .iter()
+            .position(|call| call.id == tool_call_id)
+            .map(|position| calls.remove(position))
+    }
+
+    pub fn push_stopped(&mut self, stopped_call: horsie_agentcore::StoppedCall) {
+        if let ForegroundStep::Tools { stopped, .. } = &mut self.foreground {
+            stopped.push(stopped_call);
+        }
+    }
+
+    /// Finish an empty tool batch and return every stopper it collected.
+    /// `None` means other calls are still running or this is not a tool step.
+    pub fn settle_tools(&mut self, marker_seq: u64) -> Option<Vec<horsie_agentcore::StoppedCall>> {
+        let ForegroundStep::Tools {
+            marker_seq: open,
+            calls,
+            ..
+        } = &self.foreground
+        else {
+            return None;
+        };
+        if *open != marker_seq || !calls.is_empty() {
+            return None;
+        }
+        let ForegroundStep::Tools { stopped, .. } =
+            std::mem::replace(&mut self.foreground, ForegroundStep::Idle)
+        else {
+            return None;
+        };
+        Some(stopped)
+    }
+
+    /// Stop everything and make callbacks for the old marker stale.
     pub fn stop(&mut self) {
-        self.cancel.cancel();
-        self.cancel = CancellationToken::new();
-        self.marker_seq = None;
-        self.running = None;
-        // The batch died with its turn: the dying tasks' reports are fenced
-        // out, and the conclusion repairs whatever dangles.
-        self.calls.clear();
-        self.stopped.clear();
-        // Whatever the cancel interrupted may have been holding a runtime that
-        // is going away; the next work builds its own.
+        match &self.foreground {
+            ForegroundStep::Idle => {}
+            ForegroundStep::Running { cancel, .. } | ForegroundStep::Tools { cancel, .. } => {
+                cancel.cancel();
+            }
+        }
+        self.foreground = ForegroundStep::Idle;
         self.ctx_stale = true;
     }
 }
@@ -176,14 +250,6 @@ pub struct RoutedToolCall {
     pub input: serde_json::Value,
     /// Answers the toolbox's `execute`, exactly as any remote tool answers.
     pub reply: horsie_actor::ReplyTo<Result<serde_json::Value, horsie_agentcore::ToolCallError>>,
-}
-
-/// One tool call the actor has dispatched, kept until it answers — the name
-/// and input a stopper is reported with.
-pub(crate) struct DispatchedCall {
-    pub id: String,
-    pub name: String,
-    pub input: serde_json::Value,
 }
 
 /// A toolbox whose tools run on the actor's own mailbox.

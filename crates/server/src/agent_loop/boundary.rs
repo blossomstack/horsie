@@ -85,7 +85,7 @@ impl Components {
     pub(crate) async fn advance(&mut self, cx: &mut Cx<'_>) -> CommandEffect<AgentDomainEvent> {
         // 1. One thing at a time. Whatever is running reports back, and the
         //    handler that takes the report advances again.
-        if cx.step_run.running.is_some() {
+        if cx.step_run.is_running() {
             return CommandEffect::none();
         }
         // No runtime, no work. The `Runtime` lifecycle record the owner sends
@@ -301,7 +301,9 @@ impl Components {
         if !marker_is_open {
             return CommandEffect::none();
         }
-        cx.step_run.running = None;
+        if !cx.step_run.finished(marker_seq) {
+            return CommandEffect::none();
+        }
         let at_ms = horsie_models::now_ms();
         let crate::agent_loop::StopHookResult {
             mut records,
@@ -372,10 +374,9 @@ impl Components {
 
     /// Run whichever of the model's open calls has no task yet.
     ///
-    /// Idempotent like everything the boundary does: dispatched calls are in
-    /// `step_run.calls`, stoppers wait in `step_run.stopped`, and asking again
-    /// dispatches only what is genuinely new. Every call goes to the composed
-    /// toolbox — the actor cannot tell a component's tool from a remote one.
+    /// Entering the `Tools` phase dispatches the whole unresolved batch once.
+    /// Recovery never enters it: open calls left by a dead process receive
+    /// interrupted results instead. Every live call uses the composed toolbox.
     fn dispatch_tools(&mut self, open: Vec<String>, cx: &mut Cx<'_>) {
         let Some(tctx) = cx.step_run.ctx.clone() else {
             return;
@@ -383,30 +384,28 @@ impl Components {
         let Some((marker_seq, StepKind::Agent)) = cx.state.open_step() else {
             return;
         };
-        cx.step_run.marker_seq = Some(marker_seq);
-        cx.step_run.running = Some(StepPhase::RunningTools);
-        for id in open {
-            let in_flight = cx.step_run.calls.iter().any(|c| c.id == id)
-                || cx.step_run.stopped.iter().any(|c| c.tool_call_id == id);
-            if in_flight {
-                continue;
-            }
-            let Some((name, input)) = cx.state.tool_call_named(&id) else {
-                tracing::warn!(id, "an open tool call is not in the transcript");
-                continue;
-            };
-            cx.step_run.calls.push(DispatchedCall {
-                id: id.clone(),
-                name: name.clone(),
-                input: input.clone(),
-            });
+        let calls: Vec<DispatchedCall> = open
+            .into_iter()
+            .filter_map(|id| match cx.state.tool_call_named(&id) {
+                Some((name, input)) => Some(DispatchedCall { id, name, input }),
+                None => {
+                    tracing::warn!(id, "an open tool call is not in the transcript");
+                    None
+                }
+            })
+            .collect();
+        if calls.is_empty() {
+            return;
+        }
+        let cancel = cx.step_run.begin_tools(marker_seq, calls.clone());
+        for call in calls {
             spawn_tool_call(
                 &tctx.toolbox,
-                name,
-                input,
-                id,
+                call.name,
+                call.input,
+                call.id,
                 marker_seq,
-                cx.step_run.cancel.clone(),
+                cancel.clone(),
                 cx.actor.self_ref(),
             );
         }
@@ -434,13 +433,9 @@ impl Components {
             );
             return CommandEffect::none();
         }
-        let position = cx.step_run.calls.iter().position(|c| c.id == tool_call_id);
-        let call = match position {
-            Some(position) => cx.step_run.calls.remove(position),
-            None => {
-                tracing::warn!(tool_call_id, "a tool result answered no dispatched call");
-                return CommandEffect::none();
-            }
+        let Some(call) = cx.step_run.take_tool(marker_seq, &tool_call_id) else {
+            tracing::warn!(tool_call_id, "a tool result answered no dispatched call");
+            return CommandEffect::none();
         };
         let mut events = Vec::new();
         match outcome {
@@ -455,17 +450,16 @@ impl Components {
                 artifacts,
                 at_ms: horsie_models::now_ms(),
             }),
-            ToolReturn::Stopped => cx.step_run.stopped.push(StoppedCall {
+            ToolReturn::Stopped => cx.step_run.push_stopped(StoppedCall {
                 tool: call.name,
                 tool_call_id: call.id,
                 input: call.input,
             }),
         }
-        if cx.step_run.calls.is_empty() {
-            cx.step_run.running = None;
-        }
-        if cx.step_run.calls.is_empty() && !cx.step_run.stopped.is_empty() {
-            let stopped = std::mem::take(&mut cx.step_run.stopped);
+        let settled = cx.step_run.settle_tools(marker_seq);
+        if let Some(stopped) = settled
+            && !stopped.is_empty()
+        {
             return self.turn.ended_by_tools(events, stopped, cx).await;
         }
         CommandEffect::persist(events)

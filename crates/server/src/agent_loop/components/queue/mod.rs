@@ -261,7 +261,7 @@ impl Component for Queue {
                 // beginning is what clears them — so there is nothing to
                 // answer.
                 let asks = cx.state.pending_asks();
-                if cx.step_run.running.is_some() || asks.is_empty() {
+                if cx.step_run.is_running() || asks.is_empty() {
                     let _ = reply.send(Err(crate::agent_loop::AnswerError::NothingPending));
                     return CommandEffect::none();
                 }
