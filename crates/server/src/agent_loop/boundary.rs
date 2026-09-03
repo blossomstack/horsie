@@ -8,7 +8,7 @@
 //! The decision is re-taken at every moment it could have changed, which is
 //! after every durable write ([`AgentActor::on_events_persisted`]) and at the
 //! few points where something moved without one. It is *idempotent*: it reads
-//! the state and the scratch as they stand and does whatever they now call
+//! the state and the step_run as they stand and does whatever they now call
 //! for, so asking twice for one change costs a check and nothing else.
 //!
 //! The order below is the whole design:
@@ -30,6 +30,8 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+const MAX_STOP_CONTINUATIONS: usize = 3;
+
 /// Why the next provider call cannot happen yet.
 ///
 /// A veto, asked of every component that has one. They commute — the order
@@ -44,18 +46,57 @@ pub(crate) enum Blocked {
     Parked,
 }
 
+fn cap_stop_records(records: &mut [horsie_models::hooks::HookRecord]) {
+    use horsie_models::hooks::{HookAction, StopOutcome, SubagentStopOutcome};
+    for record in records {
+        match &mut record.action {
+            HookAction::Stop(stop) => {
+                if let StopOutcome::Blocked(blocked) = &stop.outcome {
+                    stop.outcome = StopOutcome::CapReached(blocked.clone());
+                }
+            }
+            HookAction::SubagentStop(stop) => {
+                if let SubagentStopOutcome::Blocked(blocked) = &stop.outcome {
+                    stop.outcome = SubagentStopOutcome::CapReached(blocked.clone());
+                }
+            }
+            HookAction::PreToolUse(_)
+            | HookAction::PostToolUse(_)
+            | HookAction::PostToolUseFailure(_)
+            | HookAction::PostToolBatch(_)
+            | HookAction::SessionStart(_)
+            | HookAction::SessionEnd(_)
+            | HookAction::UserPromptSubmit(_)
+            | HookAction::UserPromptExpansion(_)
+            | HookAction::StopFailure(_)
+            | HookAction::SubagentStart(_)
+            | HookAction::TaskCreated(_)
+            | HookAction::TaskCompleted(_)
+            | HookAction::Notification(_)
+            | HookAction::PreCompact(_)
+            | HookAction::PostCompact(_)
+            | HookAction::CwdChanged(_) => {}
+        }
+    }
+}
+
 impl Components {
     /// Decide what happens next, and start it.
     pub(crate) async fn advance(&mut self, cx: &mut Cx<'_>) -> CommandEffect<AgentDomainEvent> {
         // 1. One thing at a time. Whatever is running reports back, and the
         //    handler that takes the report advances again.
-        if cx.scratch.running.is_some() {
+        if cx.step_run.running.is_some() {
             return CommandEffect::none();
         }
         // No runtime, no work. The `Runtime` lifecycle record the owner sends
         // is what moves this, and it advances again when it does.
-        if !cx.scratch.ready {
+        if !cx.step_run.ready {
             return CommandEffect::none();
+        }
+        let work_due = cx.state.turn_in_flight()
+            || crate::agent_loop::queued_offer(cx.state.inbox(), cx.state.asks()).is_some();
+        if work_due && let Some(effect) = self.ensure_contexts(cx) {
+            return effect;
         }
         // 2. Anyone's veto. The turn's — calls the model made that have no
         //    answer — is also this actor's work order: whichever of them has
@@ -74,20 +115,38 @@ impl Components {
                 consumed,
                 sub_sessions,
             }) => {
-                if self.needs_contexts(cx) {
-                    return CommandEffect::none();
-                }
-                self.seed.take_summary(consumed, sub_sessions, cx);
+                let request_id = consumed.join(":");
+                let expected = StepKind::SeedSummary { request_id };
+                let marker = cx
+                    .state
+                    .open_step()
+                    .filter(|(_, kind)| **kind == expected)
+                    .map(|(seq, _)| seq);
+                let Some(marker_seq) = marker else {
+                    return CommandEffect::persist(vec![AgentDomainEvent::StepStarted {
+                        kind: expected,
+                    }]);
+                };
+                self.seed
+                    .take_summary(marker_seq, consumed, sub_sessions, cx);
                 return CommandEffect::none();
             }
             Some(crate::agent_loop::Offer::Compact {
                 consumed,
                 instructions,
             }) => {
-                if self.needs_contexts(cx) {
-                    return CommandEffect::none();
-                }
+                let marker = cx
+                    .state
+                    .open_step()
+                    .filter(|(_, kind)| **kind == StepKind::Compaction)
+                    .map(|(seq, _)| seq);
+                let Some(marker_seq) = marker else {
+                    return CommandEffect::persist(vec![AgentDomainEvent::StepStarted {
+                        kind: StepKind::Compaction,
+                    }]);
+                };
                 self.compaction.start(
+                    marker_seq,
                     CompactJob {
                         consumed,
                         manual: true,
@@ -106,69 +165,230 @@ impl Components {
             }
             None => {}
         }
-        // 4. Nothing queued. Either a turn is part-way through — the model
-        //    called tools, they answered, and it is owed another call — or the
-        //    agent is idle and this costs one branch.
+        // A settled provider step with no continuation input proposes an end
+        // through a distinct Stop-hook step. Incoming records that arrived
+        // before this point were offered above and win automatically.
         if !cx.state.turn_in_flight() {
-            return CommandEffect::none();
-        }
-        if self.needs_contexts(cx) {
-            return CommandEffect::none();
+            match cx.state.open_step() {
+                Some((_, StepKind::Agent)) if cx.state.open_step_has_response() => {
+                    return CommandEffect::persist(vec![AgentDomainEvent::StepStarted {
+                        kind: StepKind::StopHook,
+                    }]);
+                }
+                Some((marker_seq, StepKind::StopHook)) if !cx.state.open_step_has_response() => {
+                    self.start_stop_hook(marker_seq, cx);
+                    return CommandEffect::none();
+                }
+                _ => return CommandEffect::none(),
+            }
         }
         // Between calls is the only safe place to fold history away — every
         // tool call is answered, so nothing can be cut across — and it is also
         // the last chance before the call that would overflow the window. The
         // turn is never told: its next call simply reads a shorter history.
         if self.compaction.due(cx) {
-            self.compaction.start(
-                CompactJob {
-                    consumed: Vec::new(),
-                    manual: false,
-                    instructions: None,
-                    tokens_before: cx.state.context_tokens(),
-                },
-                cx,
-            );
-            return CommandEffect::none();
+            let marker = cx
+                .state
+                .open_step()
+                .filter(|(_, kind)| **kind == StepKind::Compaction)
+                .map(|(seq, _)| seq);
+            match marker {
+                None => {
+                    return CommandEffect::persist(vec![AgentDomainEvent::StepStarted {
+                        kind: StepKind::Compaction,
+                    }]);
+                }
+                Some(_) if cx.state.open_step_has_response() => {
+                    // Recovery recorded an interrupted compaction. Keep the
+                    // unchanged history and continue; never replay the call.
+                }
+                Some(marker_seq) => {
+                    self.compaction.start(
+                        marker_seq,
+                        CompactJob {
+                            consumed: Vec::new(),
+                            manual: false,
+                            instructions: None,
+                            tokens_before: cx.state.context_tokens(),
+                        },
+                        cx,
+                    );
+                    return CommandEffect::none();
+                }
+            }
+        }
+        let marker_is_ready = cx
+            .state
+            .open_step()
+            .is_some_and(|(_, kind)| *kind == StepKind::Agent)
+            && !cx.state.open_step_has_response();
+        if !marker_is_ready {
+            return CommandEffect::persist(vec![AgentDomainEvent::StepStarted {
+                kind: StepKind::Agent,
+            }]);
         }
         self.turn.run_step(cx).await
     }
 
-    /// Whether the contexts must be built before anything else can run —
-    /// starting the setup if so.
-    ///
-    /// Every kind of work needs the same one and none of them knows it
-    /// happened: provisioning claims the slot, and the advance that follows it
-    /// arrives back here with the contexts published.
-    fn needs_contexts(&mut self, cx: &mut Cx<'_>) -> bool {
-        if !cx.scratch.ctx_stale && cx.scratch.ctx.is_some() {
-            return false;
+    /// Open or run initialization/connection before foreground work. The
+    /// marker's history sequence is the callback fence.
+    fn ensure_contexts(&mut self, cx: &mut Cx<'_>) -> Option<CommandEffect<AgentDomainEvent>> {
+        if !cx.step_run.ctx_stale && cx.step_run.ctx.is_some() {
+            return None;
         }
-        // The actor gathers every toolbox its components vend and hands the
-        // lot to provisioning — the components never learn who composed them.
-        let vended = self
-            .toolboxes(cx.actor.self_ref(), cx.scratch.work);
-        self.provision.start(vended, cx);
-        true
+        let initializing = !cx.state.initialized();
+        let kind = if initializing {
+            StepKind::Initialize
+        } else {
+            StepKind::Connect
+        };
+        let marker = cx
+            .state
+            .open_step()
+            .filter(|(_, open)| **open == kind)
+            .map(|(seq, _)| seq);
+        let Some(marker_seq) = marker else {
+            return Some(CommandEffect::persist(vec![
+                AgentDomainEvent::StepStarted { kind },
+            ]));
+        };
+        let vended = self.toolboxes(cx.actor.self_ref());
+        self.provision.start(marker_seq, initializing, vended, cx);
+        Some(CommandEffect::none())
+    }
+
+    fn start_stop_hook(&mut self, marker_seq: u64, cx: &mut Cx<'_>) {
+        let provider = cx.runtime.context_provider.clone();
+        let request = crate::agent_loop::StopHookRequest {
+            last_assistant_message: cx.state.last_assistant_text(),
+            active: cx.state.stop_continuations() > 0,
+        };
+        let cancel = cx.step_run.begin(StepPhase::StopHook, marker_seq);
+        let self_ref = cx.actor.self_ref();
+        tokio::spawn(async move {
+            let result = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return,
+                result = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    provider.stop_hook(request),
+                ) => match result {
+                    Ok(result) => result,
+                    Err(_) => crate::agent_loop::StopHookResult {
+                        records: Vec::new(),
+                        outcome: StopHookOutcome::TimedOut,
+                    },
+                },
+            };
+            let _ = self_ref
+                .tell(AgentCommand::Run(RunCommand::StopHookDone {
+                    marker_seq,
+                    result,
+                }))
+                .await;
+        });
+    }
+
+    pub(crate) fn stop_hook_returned(
+        &mut self,
+        marker_seq: u64,
+        result: crate::agent_loop::StopHookResult,
+        cx: &mut Cx<'_>,
+    ) -> CommandEffect<AgentDomainEvent> {
+        let marker_is_open = cx
+            .state
+            .open_step()
+            .is_some_and(|(seq, kind)| seq == marker_seq && *kind == StepKind::StopHook);
+        if !marker_is_open {
+            return CommandEffect::none();
+        }
+        cx.step_run.running = None;
+        let at_ms = horsie_models::now_ms();
+        let crate::agent_loop::StopHookResult {
+            mut records,
+            mut outcome,
+        } = result;
+        if matches!(outcome, StopHookOutcome::Continue { .. })
+            && cx.state.stop_continuations() >= MAX_STOP_CONTINUATIONS
+        {
+            cap_stop_records(&mut records);
+            outcome = StopHookOutcome::Allow;
+        }
+        let mut events: Vec<_> = (cx.state.hook_entry_count()..)
+            .zip(records)
+            .map(|(seq, record)| AgentDomainEvent::HookRan { record, seq, at_ms })
+            .collect();
+        let pending = crate::agent_loop::queued_offer(cx.state.inbox(), cx.state.asks()).is_some();
+        let outcome = match outcome {
+            StopHookOutcome::Continue { message }
+                if cx.state.stop_continuations() < MAX_STOP_CONTINUATIONS =>
+            {
+                events.push(AgentDomainEvent::StopHookCompleted {
+                    outcome: StopHookOutcome::Continue {
+                        message: message.clone(),
+                    },
+                });
+                events.push(AgentDomainEvent::Received {
+                    item: crate::agent_loop::Incoming::Continue {
+                        id: format!("stop-hook:{marker_seq}"),
+                        reason: message,
+                    },
+                    at_ms,
+                });
+                return CommandEffect::persist(events);
+            }
+            StopHookOutcome::Continue { .. } | StopHookOutcome::Allow if pending => {
+                StopHookOutcome::Allow
+            }
+            StopHookOutcome::Continue { .. } | StopHookOutcome::Allow => StopHookOutcome::Allow,
+            other @ (StopHookOutcome::Failed { .. }
+            | StopHookOutcome::Interrupted
+            | StopHookOutcome::TimedOut) => other,
+        };
+        events.push(AgentDomainEvent::StopHookCompleted {
+            outcome: outcome.clone(),
+        });
+        let reason = match outcome {
+            StopHookOutcome::Allow => RunEnd::Complete {
+                output: cx.state.stop_candidate(),
+            },
+            StopHookOutcome::Failed { reason } => RunEnd::Failed {
+                error: reason,
+                recoverable: false,
+                terminal: false,
+            },
+            StopHookOutcome::Interrupted => RunEnd::Interrupted,
+            StopHookOutcome::TimedOut => RunEnd::Failed {
+                error: "stop hook timed out".to_string(),
+                recoverable: true,
+                terminal: false,
+            },
+            StopHookOutcome::Continue { .. } => return CommandEffect::persist(events),
+        };
+        if !pending {
+            events.push(AgentDomainEvent::RunEnded { reason, at_ms });
+        }
+        CommandEffect::persist(events)
     }
 
     /// Run whichever of the model's open calls has no task yet.
     ///
     /// Idempotent like everything the boundary does: dispatched calls are in
-    /// `scratch.calls`, stoppers wait in `scratch.stopped`, and asking again
+    /// `step_run.calls`, stoppers wait in `step_run.stopped`, and asking again
     /// dispatches only what is genuinely new. Every call goes to the composed
     /// toolbox — the actor cannot tell a component's tool from a remote one.
     fn dispatch_tools(&mut self, open: Vec<String>, cx: &mut Cx<'_>) {
-        let Some(tctx) = cx.scratch.ctx.clone() else {
-            // A crash can land here: an interrupted turn's calls are repaired
-            // on load, but a raced report may leave one open before contexts
-            // exist. Provisioning first is always safe.
-            let _ = self.needs_contexts(cx);
+        let Some(tctx) = cx.step_run.ctx.clone() else {
             return;
         };
+        let Some((marker_seq, StepKind::Agent)) = cx.state.open_step() else {
+            return;
+        };
+        cx.step_run.marker_seq = Some(marker_seq);
+        cx.step_run.running = Some(StepPhase::RunningTools);
         for id in open {
-            let in_flight = cx.scratch.calls.iter().any(|c| c.id == id)
-                || cx.scratch.stopped.iter().any(|c| c.tool_call_id == id);
+            let in_flight = cx.step_run.calls.iter().any(|c| c.id == id)
+                || cx.step_run.stopped.iter().any(|c| c.tool_call_id == id);
             if in_flight {
                 continue;
             }
@@ -176,7 +396,7 @@ impl Components {
                 tracing::warn!(id, "an open tool call is not in the transcript");
                 continue;
             };
-            cx.scratch.calls.push(DispatchedCall {
+            cx.step_run.calls.push(DispatchedCall {
                 id: id.clone(),
                 name: name.clone(),
                 input: input.clone(),
@@ -186,8 +406,8 @@ impl Components {
                 name,
                 input,
                 id,
-                cx.scratch.work,
-                cx.scratch.cancel.clone(),
+                marker_seq,
+                cx.step_run.cancel.clone(),
                 cx.actor.self_ref(),
             );
         }
@@ -197,18 +417,27 @@ impl Components {
     /// settles on a stopper, hand the turn its ending.
     pub(super) async fn tool_returned(
         &mut self,
-        work: u64,
+        marker_seq: u64,
         tool_call_id: String,
         outcome: ToolReturn,
         cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
-        if !cx.scratch.live(work) {
-            tracing::warn!(work, tool_call_id, "dropping a superseded tool result");
+        if !cx.step_run.live(marker_seq)
+            || !cx
+                .state
+                .open_step()
+                .is_some_and(|(seq, kind)| seq == marker_seq && *kind == StepKind::Agent)
+        {
+            tracing::warn!(
+                marker_seq,
+                tool_call_id,
+                "dropping a callback for a closed tool step"
+            );
             return CommandEffect::none();
         }
-        let position = cx.scratch.calls.iter().position(|c| c.id == tool_call_id);
+        let position = cx.step_run.calls.iter().position(|c| c.id == tool_call_id);
         let call = match position {
-            Some(position) => cx.scratch.calls.remove(position),
+            Some(position) => cx.step_run.calls.remove(position),
             None => {
                 tracing::warn!(tool_call_id, "a tool result answered no dispatched call");
                 return CommandEffect::none();
@@ -227,55 +456,71 @@ impl Components {
                 artifacts,
                 at_ms: horsie_models::now_ms(),
             }),
-            // No result yet for a stopper: what it *means* is the turn's to
-            // decide, once nothing else is in flight.
-            ToolReturn::Stopped => cx.scratch.stopped.push(StoppedCall {
+            ToolReturn::Stopped => cx.step_run.stopped.push(StoppedCall {
                 tool: call.name,
                 tool_call_id: call.id,
                 input: call.input,
             }),
         }
-        if cx.scratch.calls.is_empty() && !cx.scratch.stopped.is_empty() {
-            let stopped = std::mem::take(&mut cx.scratch.stopped);
+        if cx.step_run.calls.is_empty() {
+            cx.step_run.running = None;
+        }
+        if cx.step_run.calls.is_empty() && !cx.step_run.stopped.is_empty() {
+            let stopped = std::mem::take(&mut cx.step_run.stopped);
             return self.turn.ended_by_tools(events, stopped, cx).await;
         }
-        // Ordinary results only: the persist lands, the advance that follows
-        // sees the batch shrink, and the last one clears the veto.
         CommandEffect::persist(events)
     }
 
-    /// Every part's veto, asked of each in turn.
-    ///
-    /// A poll, not a rule: this code does not know what any of them will say,
-    /// or how many there are. A component added later gets a say by
-    /// implementing one method on its own state.
     fn blocked(&self, cx: &Cx<'_>) -> Option<Blocked> {
         cx.state.vetoes().next()
     }
 
-    /// Stop whatever is in flight and answer the canceller.
-    ///
-    /// The ack fires before anything else: a canceller is likely blocking its
-    /// own mailbox on it, and the deliveries a concluded turn makes `tell`
-    /// into that same mailbox. The generation fence is what makes answering
-    /// early honest — a bumped generation cannot be written against.
+    /// Stop current foreground work. Acknowledgement follows the durable
+    /// cancellation boundary; unconsumed incoming history stays pending.
     pub(crate) async fn cancel(
         &mut self,
         ack: Option<ReplyTo<()>>,
         cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
-        cx.scratch.stop();
-        if let Some(ack) = ack {
-            let _ = ack.send(());
-        }
-        // A turn that was owed a call is over, and its dangling calls are
-        // repaired where they belong — under the message that made them.
-        // Anything else in flight simply stops: a cancelled compaction leaves
-        // the history it was going to fold exactly as it was.
-        if !cx.state.turn_in_flight() {
+        cx.step_run.stop();
+        let effect = if cx.state.turn_in_flight() {
+            self.turn.cancelled(cx).await
+        } else if let Some((_, kind)) = cx.state.open_step() {
+            let at_ms = horsie_models::now_ms();
+            let mut events = Vec::new();
+            match kind {
+                StepKind::StopHook => events.push(AgentDomainEvent::StopHookCompleted {
+                    outcome: StopHookOutcome::Interrupted,
+                }),
+                StepKind::Compaction | StepKind::SeedSummary { .. } => {
+                    events.push(AgentDomainEvent::StepFailed {
+                        reason: StepFailure::Interrupted,
+                    });
+                }
+                StepKind::Initialize | StepKind::Connect | StepKind::Agent => {}
+            }
+            events.push(AgentDomainEvent::RunEnded {
+                reason: RunEnd::Cancelled,
+                at_ms,
+            });
+            CommandEffect::persist(events)
+        } else {
+            if let Some(ack) = ack {
+                let _ = ack.send(());
+            }
             return CommandEffect::none();
-        }
-        self.turn.cancelled(cx).await
+        };
+        let Some(ack) = ack else {
+            return effect;
+        };
+        let (durable, persisted) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            if matches!(persisted.await, Ok(Ok(()))) {
+                let _ = ack.send(());
+            }
+        });
+        effect.and_ack(ReplyTo::from_sender(durable))
     }
 }
 
@@ -288,7 +533,7 @@ pub(super) fn spawn_tool_call(
     name: String,
     input: Value,
     tool_call_id: String,
-    work: u64,
+    marker_seq: u64,
     cancel: CancellationToken,
     self_ref: ActorRef<AgentCommand>,
 ) {
@@ -321,11 +566,10 @@ pub(super) fn spawn_tool_call(
         };
         let _ = self_ref
             .tell(AgentCommand::Core(CoreCommand::ToolReturned {
-                work,
+                marker_seq,
                 tool_call_id,
                 outcome,
             }))
             .await;
     });
 }
-

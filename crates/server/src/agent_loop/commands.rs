@@ -81,18 +81,22 @@ pub enum QueueCommand {
 pub enum RunCommand {
     /// Internal: one provider call finished — the assembled assistant message.
     StepDone {
-        work: u64,
+        marker_seq: u64,
         response: Box<horsie_agentcore::StepResponse>,
     },
     /// Internal: one provider call failed.
     StepFailed {
-        work: u64,
+        marker_seq: u64,
         error: horsie_agentcore::LlmError,
     },
-    /// Internal: one chunk of the message a step is streaming. Unjournaled;
-    /// carries the work generation so a cancelled step's stragglers are
-    /// dropped instead of polluting the next message's delta buffer.
-    StreamDelta { work: u64, text: String },
+    /// Internal: one chunk of the message a step is streaming. Unjournaled and
+    /// fenced by the open marker sequence.
+    StreamDelta { marker_seq: u64, text: String },
+    /// Internal: the Stop hook for one special step completed or timed out.
+    StopHookDone {
+        marker_seq: u64,
+        result: crate::agent_loop::StopHookResult,
+    },
     /// Internal: events to journal outside a step's own handler — recovery
     /// repairs, and tests. `ack` reports the durable write.
     PersistProgress {
@@ -143,7 +147,8 @@ pub enum ProvisionCommand {
 
 /// What the spawned setup produced.
 pub struct ProvidedOutcome {
-    pub work: u64,
+    pub marker_seq: u64,
+    pub initializing: bool,
     pub outcome: Result<Box<TurnCtx>, crate::agent_loop::ContextError>,
 }
 
@@ -155,7 +160,7 @@ pub enum CompactionCommand {
 
 /// What a compaction run needs and only its requester knows. Everything
 /// shared — the provider, the budget, the hooks, the cancel token — is read
-/// from the scratch's [`TurnCtx`], so nobody carries another component's
+/// from the step_run's [`TurnCtx`], so nobody carries another component's
 /// context.
 pub struct CompactJob {
     /// Queue items this compaction answers — a typed `/compact`. Empty when
@@ -170,7 +175,7 @@ pub struct CompactJob {
 
 /// What the spawned compaction run produced.
 pub struct CompactLanding {
-    pub work: u64,
+    pub marker_seq: u64,
     /// The queue items to cross off, journaled with the result.
     pub consumed: Vec<String>,
     /// What the summarising call spent, when one was made — journaled on the
@@ -308,7 +313,7 @@ pub enum SeedCommand {
     },
     /// Internal: the spawned summary run finished.
     SummaryTaken {
-        work: u64,
+        marker_seq: u64,
         consumed: Vec<String>,
         sub_sessions: Vec<uuid::Uuid>,
         result: Result<String, String>,
@@ -328,7 +333,7 @@ pub enum CoreCommand {
     /// the answers — the turn only makes provider calls; what the model asked
     /// for is run at the level that holds the composed toolbox.
     ToolReturned {
-        work: u64,
+        marker_seq: u64,
         tool_call_id: String,
         outcome: ToolReturn,
     },
@@ -357,9 +362,8 @@ pub enum CoreCommand {
 /// prepare step decides nothing about what the turn consumes, it only learns
 /// what the hooks said.
 pub struct PreparedStart {
-    /// The generation the hooks ran under, so a cancel between the spawn and
-    /// this landing drops it.
-    pub work: u64,
+    /// The open Agent marker the hooks prepare.
+    pub marker_seq: u64,
     pub turn: crate::agent_loop::Turn,
     /// Records to journal before the turn snapshots its history — which is the
     /// whole reason this round-trip exists. Empty when no hook fired.
@@ -377,4 +381,3 @@ pub enum AbandonedStart {
     /// failure `provide` would have reported one step later.
     Failed(crate::agent_loop::ContextError),
 }
-

@@ -94,7 +94,8 @@ impl AgentState {
             // No position at all: the newest window, capped. A long-running
             // session must not resend its whole history on every open, and the
             // caller is told when the cap bit so it can page back for the rest.
-            let (entries, truncated) = crate::agent_loop::shared::agent_log::replay_window(self.log());
+            let (entries, truncated) =
+                crate::agent_loop::shared::agent_log::replay_window(self.log());
             return ReadOutcome {
                 window: Some(ReplayWindow {
                     has_more_before: truncated,
@@ -110,7 +111,8 @@ impl AgentState {
             };
         };
 
-        let entries = crate::agent_loop::shared::agent_log::since(self.log(), cursor.entry_seq).to_vec();
+        let entries =
+            crate::agent_loop::shared::agent_log::since(self.log(), cursor.entry_seq).to_vec();
         if !entries.is_empty() {
             // Behind the tail. The deltas belong after the entries this reader
             // is only now receiving, so they wait for the next step.
@@ -171,7 +173,7 @@ impl Component for Reads {
         let state = cx.state;
         match cmd {
             ReadCommand::ReadLog { after, reply } => {
-                let _ = reply.send(state.read_from(after, &cx.scratch.deltas));
+                let _ = reply.send(state.read_from(after, &cx.step_run.deltas));
                 CommandEffect::none()
             }
             ReadCommand::PageLog {
@@ -181,7 +183,10 @@ impl Component for Reads {
                 reply,
             } => {
                 let _ = reply.send(crate::agent_loop::shared::agent_log::page(
-                    state.log(), anchor, max, &filter,
+                    state.log(),
+                    anchor,
+                    max,
+                    &filter,
                 ));
                 CommandEffect::none()
             }
@@ -192,12 +197,18 @@ impl Component for Reads {
                 reply,
             } => {
                 let _ = reply.send(crate::agent_loop::shared::agent_log::search(
-                    state.log(), &needle, &filter, max,
+                    state.log(),
+                    &needle,
+                    &filter,
+                    max,
                 ));
                 CommandEffect::none()
             }
             ReadCommand::SeqOfId { id, reply } => {
-                let _ = reply.send(crate::agent_loop::shared::agent_log::seq_of_id(state.log(), &id));
+                let _ = reply.send(crate::agent_loop::shared::agent_log::seq_of_id(
+                    state.log(),
+                    &id,
+                ));
                 CommandEffect::none()
             }
             ReadCommand::GetUsage { reply } => {

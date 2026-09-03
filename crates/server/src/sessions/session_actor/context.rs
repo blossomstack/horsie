@@ -14,11 +14,14 @@
 //! broadcast for everything except a subagent, which is quiet by design.
 
 use super::CoreCommand;
-use super::{AgentKey, SessionCommand, hooks::SessionHookSink};
+use super::{
+    AgentKey, SessionCommand,
+    hooks::{SessionHookSink, halt_reason, stop_verdict},
+};
 use crate::agent_loop::{
     AgentRunDef, CompositeToolbox, ContextError, ContextProvider, Contexts, DefaultToolboxFactory,
-    SharedContext, SharedScan, StartTurn, ToolboxFactory, TurnPreparation, WorkspaceContext,
-    compose_system_prompt, scan_workspace,
+    SharedContext, SharedScan, StartTurn, StopHookOutcome, StopHookRequest, StopHookResult,
+    ToolboxFactory, TurnPreparation, WorkspaceContext, compose_system_prompt, scan_workspace,
 };
 use crate::sessions::addressing::SessionRef;
 use crate::sessions::run_forest::SeedMode;
@@ -35,13 +38,23 @@ use horsie_agentcore::{EmptyToolbox, LlmProvider, Toolbox};
 use horsie_models::{
     hooks::HookRecord,
     runtime::{
-        McpServerFailure, ServerHookEvent, SessionStartInput, SubagentStartInput,
-        UserPromptExpansionInput, UserPromptSubmitInput,
+        McpServerFailure, ServerHookEvent, SessionStartInput, StopInput, SubagentStartInput,
+        SubagentStopInput, UserPromptExpansionInput, UserPromptSubmitInput,
     },
 };
 use horsie_runtime_host::RuntimeClient;
 use std::sync::{Arc, Mutex, PoisonError};
 use uuid::Uuid;
+
+tokio::task_local! {
+    /// True only while rebuilding disposable clients for an already initialized
+    /// agent. The existing context builder then skips semantic discovery.
+    static RECONNECT_ONLY: bool;
+}
+
+fn reconnect_only() -> bool {
+    RECONNECT_ONLY.try_with(|value| *value).unwrap_or(false)
+}
 
 /// Report turn-preparation progress into an agent's log.
 ///
@@ -863,6 +876,48 @@ impl ContextProvider for SessionContextProvider {
         Ok(TurnPreparation { records, message })
     }
 
+    async fn stop_hook(&self, request: StopHookRequest) -> StopHookResult {
+        let Some(client) = self
+            .use_plugins()
+            .then(|| self.cached_client())
+            .flatten()
+            .map(|client| client.without_hook_sink())
+        else {
+            return StopHookResult {
+                records: Vec::new(),
+                outcome: StopHookOutcome::Allow,
+            };
+        };
+        let event = match self.kind {
+            SessionAgentKind::Sub(id) => ServerHookEvent::SubagentStop(SubagentStopInput {
+                agent_id: id.to_string(),
+                agent_type: self.agent_type(),
+                last_assistant_message: request.last_assistant_message,
+                stop_hook_active: request.active,
+            }),
+            SessionAgentKind::Main
+            | SessionAgentKind::Step(_)
+            | SessionAgentKind::SubSession(_) => ServerHookEvent::Stop(StopInput {
+                last_assistant_message: request.last_assistant_message,
+                stop_hook_active: request.active,
+            }),
+        };
+        let records = client.run_hooks(event).await.unwrap_or_default();
+        let outcome = if let Some(reason) = halt_reason(&records) {
+            tracing::info!(reason, "a stop hook set continue: false");
+            StopHookOutcome::Allow
+        } else if let Some(message) = stop_verdict(&records) {
+            StopHookOutcome::Continue { message }
+        } else {
+            StopHookOutcome::Allow
+        };
+        StopHookResult { records, outcome }
+    }
+
+    async fn reconnect(&self) -> Result<Contexts, ContextError> {
+        RECONNECT_ONLY.scope(true, self.provide()).await
+    }
+
     async fn provide(&self) -> Result<Contexts, ContextError> {
         let settings = &self.settings;
         let def = session_run_def(settings);
@@ -915,7 +970,7 @@ impl ContextProvider for SessionContextProvider {
             self.provision_agent(client).await?;
         }
 
-        if broadcast {
+        if broadcast && !reconnect_only() {
             emit_progress(
                 &self.session,
                 self.kind.agent_key(),
@@ -926,13 +981,16 @@ impl ContextProvider for SessionContextProvider {
         }
         // Nothing to scan without a sandbox: no workspaces, and no plugin
         // skills, since those live on the runtime's disk.
-        let (ws, shared_scan) = match &runtime_client {
-            Some(client) => scan_workspace(client, None).await,
-            // Nothing to scan without a sandbox — no workspaces, and no plugin
-            // skills, since those live on the runtime's disk. The empty shape
-            // is what every reader below already handles for a scan that found
-            // nothing.
-            None => (WorkspaceContext::default(), SharedScan::default()),
+        let (ws, shared_scan) = if reconnect_only() {
+            // Prompt meaning was recorded during initialization. Recovery only
+            // restores clients; a later workspace observation must be an
+            // explicit inspect_workspace tool call and result.
+            (WorkspaceContext::default(), SharedScan::default())
+        } else {
+            match &runtime_client {
+                Some(client) => scan_workspace(client, None).await,
+                None => (WorkspaceContext::default(), SharedScan::default()),
+            }
         };
         // No `SessionStart` here any more. It used to fire on this line, once
         // per *run* — `provide` is per-run — so every turn re-ran every start
@@ -949,6 +1007,7 @@ impl ContextProvider for SessionContextProvider {
         // uninstalled between spawn and wake fails loudly.
         let plugin_agent = match (&self.agent_type, shared.as_ref()) {
             (None, _) => None,
+            (Some(_), _) if reconnect_only() => None,
             (Some(name), Some(shared)) => Some(shared.agents.get(name).cloned().ok_or_else(|| {
                 ContextError::retryable(format!(
                     "this subagent runs as agent type '{name}', which no installed plugin declares"
@@ -1906,6 +1965,25 @@ mod tests {
         assert!(
             !sub_prompt.contains("set_session_title"),
             "a subagent has no title tool and must not be told to call one: {sub_prompt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconnect_does_not_scan_the_workspace_again() {
+        let (f, session, id) = agent_harness().await;
+        let mut provider = typed_provider(&f, &session, id, id, None);
+        provider.kind = SessionAgentKind::Main;
+        provider.agent_type = None;
+        let before = f.agent.scan_count();
+        let initial = provider.provide().await.expect("initial contexts");
+        assert!(initial.system_prompt.is_some());
+        let after_initial = f.agent.scan_count();
+        assert_eq!(after_initial, before + 1);
+        let _connected = provider.reconnect().await.expect("reconnected contexts");
+        assert_eq!(
+            f.agent.scan_count(),
+            after_initial,
+            "reconnection restores clients without semantic discovery"
         );
     }
 

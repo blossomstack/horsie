@@ -14,8 +14,8 @@
 
 pub mod inbox;
 
-use crate::agent_loop::prelude::*;
 use crate::agent_loop::context::AgentOutcome;
+use crate::agent_loop::prelude::*;
 use async_trait::async_trait;
 use horsie_actor::CommandEffect;
 use horsie_agentcore::{
@@ -138,11 +138,17 @@ impl Queue {
         state: &AgentState,
         cx: &mut Cx<'_>,
     ) -> Vec<AgentDomainEvent> {
-        let mut events = vec![AgentDomainEvent::TurnBegan {
-            consumed: turn.consumed.clone(),
-            answered: turn.answered.clone(),
-            at_ms: now_ms(),
-        }];
+        let marker_seq = state.next_history_seq().saturating_add(1);
+        let mut events = vec![
+            AgentDomainEvent::TurnBegan {
+                consumed: turn.consumed.clone(),
+                answered: turn.answered.clone(),
+                at_ms: now_ms(),
+            },
+            AgentDomainEvent::StepStarted {
+                kind: StepKind::Agent,
+            },
+        ];
         // The owner no longer learns a turn began by being the thing that began
         // it, so it is told. Before the work, not after: this is what moves a
         // session to `Running`. A message joining a turn already in flight is
@@ -172,7 +178,7 @@ impl Queue {
             events.extend(
                 self.start_prepared(
                     PreparedStart {
-                        work: cx.scratch.work,
+                        marker_seq,
                         turn,
                         records: Vec::new(),
                         abandon: None,
@@ -184,7 +190,7 @@ impl Queue {
             );
             return events;
         }
-        let (work, _) = cx.scratch.begin(WorkKind::Hooks);
+        let cancel = cx.step_run.begin(StepPhase::StartHooks, marker_seq);
         // Set when the prepare task is *spawned*, not when it returns: a
         // failed prepare must not re-fire the start hook on the next turn,
         // which would inject its context a second time.
@@ -192,9 +198,14 @@ impl Queue {
         let provider = cx.runtime.context_provider.clone();
         let self_ref = cx.actor.self_ref();
         tokio::spawn(async move {
-            let prepared = match provider.start_hooks(start).await {
+            let outcome = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return,
+                outcome = provider.start_hooks(start) => outcome,
+            };
+            let prepared = match outcome {
                 Ok(prep) => PreparedStart {
-                    work,
+                    marker_seq,
                     abandon: crate::agent_loop::start_blocked(&prep.records)
                         .map(AbandonedStart::Blocked),
                     records: prep.records,
@@ -206,7 +217,7 @@ impl Queue {
                     },
                 },
                 Err(error) => PreparedStart {
-                    work,
+                    marker_seq,
                     turn,
                     records: Vec::new(),
                     abandon: Some(AbandonedStart::Failed(error)),
@@ -231,7 +242,7 @@ impl Queue {
         &mut self,
         prepared: PreparedStart,
         state: &AgentState,
-        cx: &mut Cx<'_>,
+        _cx: &mut Cx<'_>,
     ) -> Vec<AgentDomainEvent> {
         let PreparedStart {
             turn,
@@ -263,21 +274,20 @@ impl Queue {
                 AbandonedStart::Blocked(reason) => (reason, false, false),
                 AbandonedStart::Failed(e) => (e.message, true, e.terminal),
             };
-            cx.runtime
-                .parent
-                .deliver(AgentOutcome::Failed {
-                    agent: cx.runtime.journal_id,
-                    error,
-                    recoverable,
-                    terminal,
-                })
-                .await;
-            // The records are still journaled: a user whose prompt was refused
-            // must be able to see which plugin refused it and why. The turn
-            // this was preparing is abandoned with them — `TurnBegan` already
-            // took its input, and the agent is left owing a call it will make
-            // with whatever the next message brings.
-            events.push(AgentDomainEvent::RunCancelled { at_ms });
+            events.extend([
+                AgentDomainEvent::StepFailed {
+                    reason: StepFailure::Provider(error.clone()),
+                },
+                AgentDomainEvent::RunCancelled { at_ms },
+                AgentDomainEvent::RunEnded {
+                    reason: RunEnd::Failed {
+                        error,
+                        recoverable,
+                        terminal,
+                    },
+                    at_ms,
+                },
+            ]);
             return events;
         }
 
@@ -332,7 +342,7 @@ impl Component for Queue {
                 // Work in flight means the questions are already gone — a turn
                 // beginning is what clears them — so there is nothing to
                 // answer.
-                if cx.scratch.running.is_some() || cx.state.asks().is_empty() {
+                if cx.step_run.running.is_some() || cx.state.asks().is_empty() {
                     let _ = reply.send(Err(crate::agent_loop::AnswerError::NothingPending));
                     return CommandEffect::none();
                 }
@@ -349,7 +359,7 @@ impl Component for Queue {
                 }
             }
             QueueCommand::StartPrepared(prepared) => {
-                if !cx.scratch.finished(prepared.work) {
+                if !cx.step_run.finished(prepared.marker_seq) {
                     return CommandEffect::none();
                 }
                 let state = cx.state.clone();

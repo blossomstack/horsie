@@ -6,7 +6,7 @@
 //! assistant message, or a turn that is over. It is not this component's to
 //! run — the tool calls a message carries are dispatched by the actor, which
 //! reads them off the persisted state; this file hears nothing until a
-//! stopper hands it an ending. Every report is fenced by the work generation,
+//! stopper hands it an ending. Every report is fenced by the open marker sequence,
 //! so a cancelled turn's stragglers are dropped.
 //!
 //! Between calls this component holds nothing the agent depends on, so a
@@ -17,12 +17,12 @@
 //! a park, an ask, a submitted result, a contradiction — decided here because
 //! only the turn knows what would wake the agent again.
 
-use crate::agent_loop::context::{AgentOutcome, AgentOutcomeSink, AskedQuestion};
+use crate::agent_loop::context::AskedQuestion;
 use crate::agent_loop::prelude::*;
 use crate::sessions::ask_tool::ASK_USER_TOOL;
 use crate::sessions::workflow::SUBMIT_RESULT_TOOL;
 use async_trait::async_trait;
-use horsie_actor::{ActorRef, CommandEffect, ReplyTo};
+use horsie_actor::{ActorRef, CommandEffect};
 use horsie_agentcore::{
     AgentEvent, AgentLogBody, EventSink, EventSinkError, LlmError, Message, StepError, StepRequest,
     StoppedCall, extract_text, extract_tool_calls, tool_fingerprint,
@@ -30,7 +30,6 @@ use horsie_agentcore::{
 use horsie_models::now_ms;
 use serde_json::Value;
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::time::Duration;
 
 /// Defaults the old loop carried in its config; still server policy.
@@ -170,7 +169,7 @@ pub(crate) struct TurnFlight {
 /// the stream.
 struct DeltaSink {
     actor: ActorRef<AgentCommand>,
-    work: u64,
+    marker_seq: u64,
 }
 
 #[async_trait]
@@ -180,13 +179,19 @@ impl EventSink for DeltaSink {
             let _ = self
                 .actor
                 .tell(AgentCommand::Run(RunCommand::StreamDelta {
-                    work: self.work,
+                    marker_seq: self.marker_seq,
                     text: chunk.text.clone(),
                 }))
                 .await;
         }
         Ok(())
     }
+}
+
+fn open_agent_marker(state: &AgentState, marker_seq: u64) -> bool {
+    state
+        .open_step()
+        .is_some_and(|(seq, kind)| seq == marker_seq && *kind == StepKind::Agent)
 }
 
 impl Turn {
@@ -198,7 +203,7 @@ impl Turn {
     fn flight(&mut self, cx: &mut Cx<'_>) -> &mut TurnFlight {
         self.flight.get_or_insert_with(|| TurnFlight {
             tool_choice: cx
-                .scratch
+                .step_run
                 .pending_tool_choice
                 .take()
                 .unwrap_or(horsie_agentcore::ToolChoice::Auto),
@@ -239,7 +244,7 @@ impl Turn {
     /// durable when the provider finishes it, and a cancelled call never
     /// reaches that point.
     pub(crate) fn aborted_message(cx: &Cx<'_>) -> Option<Message> {
-        let text = cx.scratch.deltas.concat();
+        let text = cx.step_run.deltas.concat();
         (!text.trim().is_empty()).then(|| Message::assistant_text(new_message_id(), text, now_ms()))
     }
 
@@ -300,7 +305,7 @@ impl Turn {
 
     /// Spawn one provider call over the state's prompt.
     fn spawn_call(&mut self, folded: &AgentState, cx: &mut Cx<'_>, delay: Option<Duration>) {
-        let Some(tctx) = cx.scratch.ctx.clone() else {
+        let Some(tctx) = cx.step_run.ctx.clone() else {
             return;
         };
         let tool_choice = self.flight(cx).tool_choice.clone();
@@ -318,7 +323,11 @@ impl Turn {
             thinking_effort: tctx.thinking_effort,
             artifact_source: cx.runtime.artifacts.clone(),
         };
-        let (work, cancel) = cx.scratch.begin(WorkKind::Step);
+        let Some((marker_seq, StepKind::Agent)) = folded.open_step() else {
+            tracing::warn!("refusing a provider call without an open Agent marker");
+            return;
+        };
+        let cancel = cx.step_run.begin(StepPhase::CallingProvider, marker_seq);
         let self_ref = cx.actor.self_ref();
         tokio::spawn(async move {
             if let Some(delay) = delay {
@@ -330,17 +339,15 @@ impl Turn {
             }
             let sink = DeltaSink {
                 actor: self_ref.clone(),
-                work,
+                marker_seq,
             };
             let cmd = match horsie_agentcore::run_step(&req, &history, &sink, &cancel).await {
                 Ok(response) => RunCommand::StepDone {
-                    work,
+                    marker_seq,
                     response: Box::new(response),
                 },
-                // The cancel already concluded the turn; reporting would be
-                // answered by the fence anyway.
                 Err(StepError::Cancelled) => return,
-                Err(StepError::Provider(error)) => RunCommand::StepFailed { work, error },
+                Err(StepError::Provider(error)) => RunCommand::StepFailed { marker_seq, error },
             };
             let _ = self_ref.tell(AgentCommand::Run(cmd)).await;
         });
@@ -529,32 +536,34 @@ impl Turn {
 impl Component for Turn {
     type Command = RunCommand;
 
-    /// Every arm is a report from this component's own spawned work, fenced by
-    /// the generation it was issued under. Nothing here starts anything.
+    /// Every callback is accepted only while its marker is the open top step.
     async fn handle(
         &mut self,
         cmd: RunCommand,
         cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
         match cmd {
-            RunCommand::StepDone { work, response } => {
-                if !cx.scratch.finished(work) {
-                    tracing::warn!(work, "dropping a superseded provider response");
+            RunCommand::StepDone {
+                marker_seq,
+                response,
+            } => {
+                if !open_agent_marker(cx.state, marker_seq) {
+                    tracing::warn!(marker_seq, "dropping a callback for a closed agent step");
                     return CommandEffect::none();
                 }
+                cx.step_run.running = None;
                 self.handle_responded(*response, cx).await
             }
-            RunCommand::StepFailed { work, error } => {
-                if !cx.scratch.finished(work) {
+            RunCommand::StepFailed { marker_seq, error } => {
+                if !open_agent_marker(cx.state, marker_seq) {
                     return CommandEffect::none();
                 }
+                cx.step_run.running = None;
                 self.handle_llm_failed(error, cx).await
             }
-            RunCommand::StreamDelta { work, text } => {
-                // The fence again: a dead turn's chunks must not pollute the
-                // next turn's delta buffer.
-                if cx.scratch.live(work) {
-                    cx.scratch.deltas.push(text);
+            RunCommand::StreamDelta { marker_seq, text } => {
+                if open_agent_marker(cx.state, marker_seq) {
+                    cx.step_run.deltas.push(text);
                     cx.publish_revision();
                 }
                 CommandEffect::none()
@@ -562,6 +571,7 @@ impl Component for Turn {
             RunCommand::PersistProgress { events, ack } => {
                 CommandEffect::persist(events).and_ack(ack)
             }
+            RunCommand::StopHookDone { .. } => CommandEffect::none(),
         }
     }
 
@@ -579,9 +589,7 @@ impl Component for Turn {
             AgentDomainEvent::MessageComplete { message, usage } => {
                 let at_ms = message.created_at_ms;
                 state.push(at_ms, AgentLogBody::Llm(message));
-                if let Some(part) = state.part_mut::<UsageState>() {
-                    part.step_completed(usage);
-                }
+                state.bank_step_usage(usage);
             }
             AgentDomainEvent::MessageAborted { message } => {
                 let at_ms = message.created_at_ms;
@@ -620,65 +628,6 @@ impl Component for Turn {
             _ => {}
         }
     }
-
-    /// Repair what a dead process left half-done: the calls it was running,
-    /// and the turn it died inside.
-    ///
-    /// Everything is journaled as an ordinary write. Whether anything then
-    /// *runs* is not decided here — the actor advances once recovery is over,
-    /// and reads the repaired state like any other.
-    async fn on_load(&mut self, cx: &mut Cx<'_>) {
-        let mut events: Vec<AgentDomainEvent> = Vec::new();
-        // A tool call the dead process was running has no result and never
-        // will. Record the repair once, here, where it still belongs at the
-        // end of the transcript.
-        events.extend(
-            missing_tool_results(&cx.state.prompt_messages(), &parked_call_ids(cx.state))
-                .into_iter()
-                .map(|message| AgentDomainEvent::InputMessage { message }),
-        );
-        // A turn still open in the fold is one no process is running any more.
-        // Tell the owner, from here rather than from a command: this hook runs
-        // before the first live command, so the report is ordered ahead of
-        // anything queued while the actor was loading.
-        if cx.state.turn_in_flight() {
-            cx.runtime
-                .parent
-                .deliver(AgentOutcome::Interrupted {
-                    agent: cx.runtime.journal_id,
-                })
-                .await;
-            // And it is over: an incarnation that cannot finish a turn must not
-            // leave the agent owing a provider call, or the first advance would
-            // silently resume a turn nobody asked it to.
-            events.push(AgentDomainEvent::RunCancelled { at_ms: now_ms() });
-            // Interactive sessions never self-continue: the user's next message
-            // is the continuation. An empty history means nothing ran yet, and
-            // a parked agent is waiting for a timer — neither is an interrupted
-            // turn.
-            if !cx.params.interactive && !cx.state.parked() && !cx.state.log().is_empty() {
-                // Queued rather than journaled as input directly: it is
-                // something addressed to this agent, and it becomes a turn the
-                // same way everything else addressed to it does.
-                events.push(AgentDomainEvent::Received {
-                    item: crate::agent_loop::Incoming::Continue {
-                        id: format!("interrupted:{}", cx.state.next_seq()),
-                        reason: "continue the interrupted task".to_string(),
-                    },
-                    at_ms: now_ms(),
-                });
-            }
-        }
-        if events.is_empty() {
-            return;
-        }
-        let (ack, _) = tokio::sync::oneshot::channel();
-        cx.tell(AgentCommand::Run(RunCommand::PersistProgress {
-            events,
-            ack: ReplyTo::from_sender(ack),
-        }))
-        .await;
-    }
 }
 
 /// How many turns an agent that owes a result may end without one before the
@@ -709,18 +658,12 @@ impl Turn {
         state: &AgentState,
         cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
-        // The turn is over before anything below is decided: drop its
-        // bookkeeping and let the contexts go stale, so the next turn builds
-        // its own.
         self.flight = None;
-        cx.scratch.ctx_stale = true;
-        let agent = cx.runtime.journal_id;
-        let parent = cx.runtime.parent.clone();
 
         match report.outcome {
             RunOutcome::Completed { text } => {
                 if cx.params.requires_result {
-                    return self.ended_without_result(state, cx, agent, parent).await;
+                    return self.ended_without_result(state, cx).await;
                 }
                 // An agent that owes its parent one report is not done while
                 // work it delegated is still running: its conclusion would be
@@ -737,26 +680,23 @@ impl Turn {
                     if !state.timers().is_empty()
                         || crate::agent_loop::shared::carried_state::has_outstanding_children(state)
                     {
-                        parent.deliver(AgentOutcome::Parked { agent }).await;
-                        let parked = AgentDomainEvent::Parked { at_ms: now_ms() };
-                        return CommandEffect::persist(vec![parked]).and_snapshot();
+                        let at_ms = now_ms();
+                        return CommandEffect::persist(vec![
+                            AgentDomainEvent::Parked { at_ms },
+                            AgentDomainEvent::RunEnded {
+                                reason: RunEnd::Parked,
+                                at_ms,
+                            },
+                        ])
+                        .and_snapshot();
                     }
                 }
-                parent
-                    .deliver(AgentOutcome::Concluded {
-                        agent,
-                        output: Value::String(text),
-                    })
-                    .await;
-                // Resident: the agent goes idle, it does not die.
+                let _ = text;
                 CommandEffect::none()
             }
             RunOutcome::Stopped { calls } => {
                 match Self::interpret(calls) {
                     Conclusion::Output(output, submitted) => {
-                        parent
-                            .deliver(AgentOutcome::Concluded { agent, output })
-                            .await;
                         // Submitting says the work is done, which makes any
                         // armed timer moot: nothing is left for it to wake.
                         // Dropping them here rather than calling it a
@@ -784,26 +724,27 @@ impl Turn {
                                 at_ms: now_ms(),
                             });
                         }
+                        let _ = output;
                         CommandEffect::persist(events)
                     }
                     Conclusion::Ask(asks) => {
-                        parent
-                            .deliver(AgentOutcome::Asked {
-                                agent,
-                                asks: asks.clone(),
-                            })
-                            .await;
                         // An ask is a turn boundary, but a parked agent only
                         // drains for a person changing their mind — the drain
                         // told here finds the asks folded in and holds
                         // anything queued behind them.
+                        let at_ms = now_ms();
                         let recorded = AgentDomainEvent::AskRecorded {
-                            asks,
-                            at_ms: now_ms(),
+                            asks: asks.clone(),
+                            at_ms,
                         };
-                        // Snapshot to compact the incrementally-persisted log:
-                        // history and streams read state, so it is invisible.
-                        CommandEffect::persist(vec![recorded]).and_snapshot()
+                        CommandEffect::persist(vec![
+                            recorded,
+                            AgentDomainEvent::RunEnded {
+                                reason: RunEnd::AwaitingInput { asks },
+                                at_ms,
+                            },
+                        ])
+                        .and_snapshot()
                     }
                     Conclusion::Contradiction(calls) => self.correct_contradiction(calls, state),
                 }
@@ -832,26 +773,27 @@ impl Turn {
                 if let Some(salvaged) = Turn::aborted_message(cx) {
                     events.push(AgentDomainEvent::MessageAborted { message: salvaged });
                 }
-                events.push(AgentDomainEvent::RunCancelled { at_ms: now_ms() });
+                let at_ms = now_ms();
+                events.push(AgentDomainEvent::RunCancelled { at_ms });
+                events.push(AgentDomainEvent::RunEnded {
+                    reason: RunEnd::Cancelled,
+                    at_ms,
+                });
                 CommandEffect::persist(events).and_snapshot()
             }
-            RunOutcome::Failed { error, recoverable } => {
-                parent
-                    .deliver(AgentOutcome::Failed {
-                        agent,
+            RunOutcome::Failed { error, recoverable } => CommandEffect::persist(vec![
+                AgentDomainEvent::StepFailed {
+                    reason: StepFailure::Provider(error.clone()),
+                },
+                AgentDomainEvent::RunEnded {
+                    reason: RunEnd::Failed {
                         error,
                         recoverable,
-                        // A run that failed inside the loop says nothing about
-                        // whether the sandbox still exists.
                         terminal: false,
-                    })
-                    .await;
-                // The partial turn was already journaled step by step, so the
-                // failed run stays inspectable. The agent stays alive: a
-                // failed turn is not a dead agent, and the next message
-                // reuses it.
-                CommandEffect::none()
-            }
+                    },
+                    at_ms: now_ms(),
+                },
+            ]),
         }
     }
 
@@ -929,8 +871,6 @@ impl Turn {
         &mut self,
         state: &AgentState,
         cx: &mut Cx<'_>,
-        agent: uuid::Uuid,
-        parent: Arc<dyn AgentOutcomeSink>,
     ) -> CommandEffect<AgentDomainEvent> {
         // The queue first: a subagent report that landed while the turn was
         // ending starts the next turn, and nothing needs classifying at all.
@@ -940,31 +880,36 @@ impl Turn {
         if !state.timers().is_empty()
             || crate::agent_loop::shared::carried_state::has_outstanding_children(state)
         {
-            parent.deliver(AgentOutcome::Parked { agent }).await;
-            let parked = AgentDomainEvent::Parked { at_ms: now_ms() };
-            return CommandEffect::persist(vec![parked]).and_snapshot();
+            let at_ms = now_ms();
+            return CommandEffect::persist(vec![
+                AgentDomainEvent::Parked { at_ms },
+                AgentDomainEvent::RunEnded {
+                    reason: RunEnd::Parked,
+                    at_ms,
+                },
+            ])
+            .and_snapshot();
         }
         if state.nudges() >= MAX_RESULT_NUDGES {
-            parent
-                .deliver(AgentOutcome::Failed {
-                    agent,
-                    error: format!(
-                        "the step ended {} turns without calling `{SUBMIT_RESULT_TOOL}`, \
-                         and nothing would wake it",
-                        state.nudges() + 1
-                    ),
+            let error = format!(
+                "the step ended {} turns without calling `{SUBMIT_RESULT_TOOL}`, and nothing would wake it",
+                state.nudges() + 1
+            );
+            return CommandEffect::persist(vec![AgentDomainEvent::RunEnded {
+                reason: RunEnd::Failed {
+                    error,
                     recoverable: false,
                     terminal: false,
-                })
-                .await;
-            return CommandEffect::none();
+                },
+                at_ms: now_ms(),
+            }]);
         }
         // The second attempt names the tool in `tool_choice`, so the model can
         // emit nothing else. Not the first: a model that realises it is *not*
         // finished must still be able to go back to work, and a forcing would
         // forbid that.
         if state.nudges() + 1 >= MAX_RESULT_NUDGES {
-            cx.scratch.pending_tool_choice = Some(horsie_agentcore::ToolChoice::Required(
+            cx.step_run.pending_tool_choice = Some(horsie_agentcore::ToolChoice::Required(
                 SUBMIT_RESULT_TOOL.to_string(),
             ));
         }

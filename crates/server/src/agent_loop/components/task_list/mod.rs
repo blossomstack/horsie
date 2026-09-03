@@ -39,9 +39,11 @@ impl PartState for TaskListPart {
 }
 
 /// The empty list a state with no task-list part answers with.
-pub(crate) fn empty_list() -> &'static crate::agent_loop::components::task_list::domain::TaskListState {
-    static EMPTY: std::sync::OnceLock<crate::agent_loop::components::task_list::domain::TaskListState> =
-        std::sync::OnceLock::new();
+pub(crate) fn empty_list()
+-> &'static crate::agent_loop::components::task_list::domain::TaskListState {
+    static EMPTY: std::sync::OnceLock<
+        crate::agent_loop::components::task_list::domain::TaskListState,
+    > = std::sync::OnceLock::new();
     EMPTY.get_or_init(crate::agent_loop::components::task_list::domain::TaskListState::default)
 }
 
@@ -53,7 +55,8 @@ fn execute_task_list_tool(
     input: &Value,
     _self_ref: ActorRef<AgentCommand>,
 ) -> Result<(Value, Vec<AgentDomainEvent>), horsie_agentcore::ToolCallError> {
-    let action = crate::agent_loop::components::task_list::domain::TaskListAction::from_input(input)?;
+    let action =
+        crate::agent_loop::components::task_list::domain::TaskListAction::from_input(input)?;
     let mut next = folded.task_list().clone();
     match next.apply(action) {
         Ok(()) => {
@@ -91,13 +94,11 @@ impl Component for TaskLists {
     fn toolbox(
         &self,
         actor: horsie_actor::ActorRef<AgentCommand>,
-        work: u64,
     ) -> Option<std::sync::Arc<dyn horsie_agentcore::Toolbox>> {
         Some(crate::agent_loop::component::ActorToolbox::new(
             vec![domain::task_list_tool_spec()],
             |call| AgentCommand::TaskList(TaskListCommand::ToolCall(call)),
             actor,
-            work,
         ))
     }
 }

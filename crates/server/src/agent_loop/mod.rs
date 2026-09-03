@@ -68,10 +68,15 @@ pub use context::compaction_window;
 pub use context::{
     AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, AskedQuestion, ContextError,
     ContextProvider, Contexts, DefaultToolboxFactory, FilteredToolbox, FixedContextProvider,
-    INSPECT_WORKSPACE_TOOL, SKILL_TOOL, StartTurn, ToolboxFactory, TurnPreparation,
+    INSPECT_WORKSPACE_TOOL, SKILL_TOOL, StartTurn, StopHookRequest, StopHookResult, ToolboxFactory,
+    TurnPreparation,
 };
-pub use events::AgentDomainEvent;
+pub use events::{
+    AgentDomainEvent, AgentHistoryEntry, RunEnd, StepFailure, StepKind, StopHookOutcome,
+    SystemPromptSource,
+};
 pub use params::AgentParams;
+pub use read_image_toolbox::{READ_IMAGE_TOOL, ReadImageToolbox};
 pub use shared::agent_log::{
     Anchor, Cursor, LogFilter, LogPage, REPLAY_CAP, kind_of, page, replay_window, search,
     seq_of_id, since,
@@ -80,9 +85,10 @@ pub use shared::hook_translation::{start_blocked, translate};
 pub use shared::mcp_toolbox::{
     ArtifactSink, CompositeToolbox, McpToolbox, McpToolboxes, McpUnavailable, PluginMcpToolbox,
 };
-pub use read_image_toolbox::{READ_IMAGE_TOOL, ReadImageToolbox};
 pub use shared::workspace::{
     AgentCatalog, CatalogAgent, SharedContext, SharedScan, Skill, SkillSet, WorkspaceContext,
     compose_system_prompt, scan as scan_workspace,
 };
-pub use state::{AgentState, AgentStateView, AgentUsageSnapshot, UsageTotal, hook_entry, hook_entry_id};
+pub use state::{
+    AgentState, AgentStateView, AgentUsageSnapshot, UsageTotal, hook_entry, hook_entry_id,
+};

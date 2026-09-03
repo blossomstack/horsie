@@ -80,37 +80,35 @@ impl Component for Seeding {
                 .and_snapshot()
             }
             SeedCommand::SummaryTaken {
-                work,
+                marker_seq,
                 consumed,
                 sub_sessions,
                 result,
                 usage,
             } => {
-                if !cx.scratch.finished(work) {
+                let request_id = consumed.join(":");
+                let marker_is_open = cx.state.open_step().is_some_and(|(seq, kind)| {
+                    seq == marker_seq
+                        && *kind
+                            == (StepKind::SeedSummary {
+                                request_id: request_id.clone(),
+                            })
+                });
+                if !marker_is_open || !cx.step_run.finished(marker_seq) {
                     return CommandEffect::none();
                 }
-                // Delivered whatever became of this agent since: the sub
-                // sessions waiting are a different session's business, and the
-                // summary was taken at the branch point they are entitled to.
-                cx.runtime
-                    .parent
-                    .deliver(crate::agent_loop::context::AgentOutcome::SeedSummary {
-                        agent: cx.runtime.journal_id,
-                        sub_sessions,
-                        result,
-                    })
-                    .await;
-                // The summarising call's cost is journaled here, by its owner,
-                // and aggregated by the fold. The items it answers are crossed
-                // off in the same write.
+                let at_ms = now_ms();
                 CommandEffect::persist(vec![
                     AgentDomainEvent::SeedSummaryTaken {
+                        request_id,
+                        sub_sessions,
+                        result,
                         usage,
-                        at_ms: now_ms(),
+                        at_ms,
                     },
                     AgentDomainEvent::Consumed {
                         ids: consumed,
-                        at_ms: now_ms(),
+                        at_ms,
                     },
                 ])
             }
@@ -124,14 +122,15 @@ impl Seeding {
     /// compaction component's machinery.
     pub(crate) fn take_summary(
         &mut self,
+        marker_seq: u64,
         consumed: Vec<String>,
         sub_sessions: Vec<uuid::Uuid>,
         cx: &mut Cx<'_>,
     ) {
-        let Some(tctx) = cx.scratch.ctx.clone() else {
+        let Some(tctx) = cx.step_run.ctx.clone() else {
             return;
         };
-        let (work, cancel) = cx.scratch.begin(WorkKind::Summary);
+        let cancel = cx.step_run.begin(StepPhase::SeedSummary, marker_seq);
         // The summary must describe the history at the branch point, read
         // before anything can append behind it.
         let history = repair_unanswered_tool_calls(cx.state.prompt_messages());
@@ -152,7 +151,7 @@ impl Seeding {
             };
             let _ = self_ref
                 .tell(AgentCommand::Seed(SeedCommand::SummaryTaken {
-                    work,
+                    marker_seq,
                     consumed,
                     sub_sessions,
                     result,
@@ -172,8 +171,8 @@ impl Seeding {
         if let AgentDomainEvent::SeedSummaryTaken { usage, .. } = &event {
             // The summarising call's cost, banked where every other cost is.
             // Nothing else about this agent changed.
-            if let (Some(usage), Some(part)) = (usage, state.part_mut::<UsageState>()) {
-                part.bank(usage);
+            if let Some(usage) = usage {
+                state.bank_usage(usage);
             }
             return;
         }

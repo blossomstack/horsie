@@ -1,11 +1,8 @@
 //! Where a session meets its agents' plugin hooks.
 //!
-//! Two sinks and the predicates they read. [`SessionHookSink`] carries what the
-//! runtime's inline tool hooks did back into the agent's transcript;
-//! [`StopHookParent`] decorates the outcome sink so a turn's `Stop` hooks run
-//! before the session hears the turn ended. Both are held by the agent rather
-//! than by the session's command loop, which is what keeps a thirty-second hook
-//! from blocking a cancel.
+//! [`SessionHookSink`] carries runtime inline-tool records into the agent's
+//! transcript. The agent actor owns Stop-hook steps; this module also supplies
+//! the pure verdict helpers used by the context provider.
 //!
 //! The predicates below are pure functions over [`HookRecord`], deliberately
 //! written as exhaustive matches: a newly wired event has to be classified here
@@ -14,7 +11,6 @@
 use super::{
     AgentKey, CANCEL_TIMEOUT, CommandEffect, HookCommand, SessionActor, SessionCommand,
     SessionDomainEvent, SessionState,
-    context::{SessionAgentKind, SessionContextProvider},
 };
 use crate::agent_loop::AgentCommand;
 use crate::agent_loop::{AgentOutcome, AgentOutcomeSink, Incoming};
@@ -27,15 +23,11 @@ use crate::sessions::run_forest::{SubAgentStatus, TurnPhase};
 use async_trait::async_trait;
 use horsie_actor::ActorContext;
 use horsie_actor::ReplyTo;
-use horsie_models::{
-    hooks::{HookAction, HookRecord, StopOutcome, SubagentStopOutcome},
-    runtime::{ServerHookEvent, StopInput, SubagentStopInput},
-};
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
+use horsie_models::hooks::{HookAction, HookRecord, StopOutcome, SubagentStopOutcome};
 use tokio::sync::oneshot;
+
+#[cfg(test)]
+const MAX_STOP_CONTINUATIONS: usize = 3;
 
 /// Adapts the session's mailbox to the [`AgentOutcomeSink`] its agents report
 /// to. No generation tag: the agent is resident and fences its own stale runs
@@ -115,153 +107,11 @@ impl horsie_runtime_host::HookSink for SessionHookSink {
     }
 }
 
-/// How many times a `Stop` hook may hold a turn open before horsie ends it
-/// regardless.
-///
-/// Not advisory. horsie runs unattended sessions, and `stop_hook_active` only
-/// stops a hook that reads it — this exists for the ones that do not.
-pub(super) const MAX_STOP_CONTINUATIONS: usize = 3;
-
-/// Runs `Stop` hooks when a turn concludes, and honours what they say.
-///
-/// A decorator on the outcome sink rather than a branch in the session's
-/// `AgentOutcome` handler, because `deliver` is called from the *agent's*
-/// `RunFinished` handler. A slow hook therefore delays that agent's own mailbox
-/// and never the session's command loop, which stays able to serve a cancel or
-/// another agent while a 30-second `Stop` hook runs.
-pub(super) struct StopHookParent {
-    inner: Arc<dyn AgentOutcomeSink>,
-    session: SessionRef,
-    key: AgentKey,
-    /// The provider whose `provide()` cached this agent's client. `Stop` never
-    /// acquires a runtime of its own: a turn that already concluded must not
-    /// be able to fail on provisioning, and there is nothing to guard if no
-    /// runtime ever ran.
-    provider: Arc<SessionContextProvider>,
-    /// Consecutive continuations. Reset whenever a turn concludes without a
-    /// block, so a long interactive session that legitimately continues a few
-    /// times never accumulates toward the cap.
-    continuations: Arc<AtomicUsize>,
-}
-
-impl StopHookParent {
-    /// The outcome sink one of a session's agents reports to: the session's
-    /// own, wrapped so this agent's `Stop` hooks run first.
-    pub(super) fn wrap(
-        session: SessionRef,
-        key: AgentKey,
-        provider: Arc<SessionContextProvider>,
-    ) -> Arc<dyn AgentOutcomeSink> {
-        Arc::new(Self {
-            inner: Arc::new(SessionParent::new(session.clone())),
-            session,
-            key,
-            provider,
-            continuations: Arc::new(AtomicUsize::new(0)),
-        })
-    }
-}
-
-#[async_trait]
-impl AgentOutcomeSink for StopHookParent {
-    async fn deliver(&self, outcome: AgentOutcome) {
-        // `Stop` fires when a turn *ends*. An ask or a park is a turn still in
-        // progress, and a failure is not a stop the hook could act on.
-        let AgentOutcome::Concluded { output, .. } = &outcome else {
-            return self.inner.deliver(outcome).await;
-        };
-        // No plugins, or no runtime this turn: nothing declared a hook, so the
-        // round-trip would be pure latency on every single turn.
-        let Some(client) = self
-            .provider
-            .use_plugins()
-            .then(|| self.provider.cached_client())
-            .flatten()
-        else {
-            return self.inner.deliver(outcome).await;
-        };
-
-        let used = self.continuations.load(Ordering::Relaxed);
-        let last_assistant_message = output.as_str().map(str::to_string);
-        // The spec's own definition: true when horsie would normally stop but
-        // is being held in the loop by a blocking hook. A cooperative hook
-        // returns early on it.
-        let stop_hook_active = used > 0;
-        // A subagent's turn ending is a `SubagentStop`, not a `Stop`. This sink
-        // decorates every agent a session hosts, and until it was gated on the
-        // kind a session with four subagents fired `Stop` five times.
-        let event = match self.provider.kind {
-            SessionAgentKind::Sub(id) => ServerHookEvent::SubagentStop(SubagentStopInput {
-                agent_id: id.to_string(),
-                agent_type: self.provider.agent_type(),
-                last_assistant_message,
-                stop_hook_active,
-            }),
-            // A step keeps `Stop`: it fires `SessionStart` and roots its own
-            // subagent tree, so answering `SubagentStop` would contradict its
-            // own start.
-            SessionAgentKind::Main
-            | SessionAgentKind::Step(_)
-            | SessionAgentKind::SubSession(_) => ServerHookEvent::Stop(StopInput {
-                last_assistant_message,
-                stop_hook_active,
-            }),
-        };
-        let records = client.run_hooks(event).await.unwrap_or_default();
-
-        // A halt outranks a block, which is the spec's own precedence: a hook
-        // that says both is asking to stop, and the turn is already stopping.
-        // So this ends the turn the way an unblocked one ends — the records
-        // are already on their way to the transcript, `run_hooks` having put
-        // them on the sink, and there is nothing to add to them the way
-        // `CapReached` adds to a block.
-        if let Some(reason) = halt_reason(&records) {
-            self.continuations.store(0, Ordering::Relaxed);
-            tracing::info!(reason, "a stop hook set continue: false; the turn ends");
-            return self.inner.deliver(outcome).await;
-        }
-
-        match stop_verdict(&records) {
-            // Blocked *from stopping*, with budget left: the turn does not
-            // conclude. The parent never hears about it, so the session never
-            // marks the turn done and never drains its queue early.
-            Some(reason) if used < MAX_STOP_CONTINUATIONS => {
-                self.continuations.fetch_add(1, Ordering::Relaxed);
-                let _ = self
-                    .session
-                    .tell(SessionCommand::Hooks(HookCommand::ContinueAfterStop {
-                        key: self.key,
-                        reason,
-                    }))
-                    .await;
-            }
-            // Blocked, but out of budget. The turn ends, and a second record
-            // says why — otherwise this reads as a turn that stopped on its
-            // own.
-            Some(_) => {
-                self.continuations.store(0, Ordering::Relaxed);
-                let _ = self
-                    .session
-                    .tell(SessionCommand::Hooks(HookCommand::Ran {
-                        key: self.key,
-                        records: cap_reached(records),
-                    }))
-                    .await;
-                self.inner.deliver(outcome).await;
-            }
-            None => {
-                self.continuations.store(0, Ordering::Relaxed);
-                self.inner.deliver(outcome).await;
-            }
-        }
-    }
-}
-
 /// Why a hook in this batch set `continue: false`, if one did.
 ///
 /// Reads the envelope rather than any outcome: `continue` is a common field, so
 /// every seam that can act on a halt reads it the same way.
-fn halt_reason(records: &[HookRecord]) -> Option<String> {
+pub(super) fn halt_reason(records: &[HookRecord]) -> Option<String> {
     records.iter().find_map(halt_of)
 }
 
@@ -319,7 +169,7 @@ fn is_tool_seam(action: &HookAction) -> bool {
 ///
 /// Both stop events, because both mean the same thing: blocked *from stopping*,
 /// so the agent that fired it continues under the same budget.
-fn stop_verdict(records: &[HookRecord]) -> Option<String> {
+pub(super) fn stop_verdict(records: &[HookRecord]) -> Option<String> {
     // An empty input is not a turn, so a hook that blocked without saying why
     // still has to say something.
     let said = |reason: &Option<String>, fallback: &str| {
@@ -362,47 +212,6 @@ fn stop_verdict(records: &[HookRecord]) -> Option<String> {
         | HookAction::Notification(_)
         | HookAction::CwdChanged(_) => None,
     })
-}
-
-/// Narrow a blocking record's outcome to name the cap.
-///
-/// The only place `CapReached` is produced: `HookInvocation::record` sees one
-/// hook's reply and cannot know the budget, so the outcome is narrowed here
-/// rather than invented in the library.
-fn cap_reached(mut records: Vec<HookRecord>) -> Vec<HookRecord> {
-    for r in &mut records {
-        match &mut r.action {
-            HookAction::Stop(s) => {
-                if let StopOutcome::Blocked(b) = &s.outcome {
-                    s.outcome = StopOutcome::CapReached(b.clone());
-                }
-            }
-            HookAction::SubagentStop(s) => {
-                if let SubagentStopOutcome::Blocked(b) = &s.outcome {
-                    s.outcome = SubagentStopOutcome::CapReached(b.clone());
-                }
-            }
-            HookAction::PreToolUse(_)
-            | HookAction::PostToolUse(_)
-            | HookAction::PostToolUseFailure(_)
-            | HookAction::PostToolBatch(_)
-            | HookAction::SessionStart(_)
-            | HookAction::SessionEnd(_)
-            | HookAction::UserPromptSubmit(_)
-            | HookAction::UserPromptExpansion(_)
-            | HookAction::StopFailure(_)
-            | HookAction::SubagentStart(_)
-            | HookAction::TaskCreated(_)
-            | HookAction::TaskCompleted(_)
-            | HookAction::Notification(_)
-            // A compaction has no continuation budget to run out of: a
-            // `PreCompact` block abandons it once and nothing loops.
-            | HookAction::PreCompact(_)
-            | HookAction::PostCompact(_)
-            | HookAction::CwdChanged(_) => {}
-        }
-    }
-    records
 }
 
 /// Whether the keyed agent has a turn of its own in flight — the halt gate.

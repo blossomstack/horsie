@@ -29,7 +29,6 @@ pub mod seed;
 pub mod task_list;
 pub mod timers;
 pub mod turn;
-pub mod usage;
 
 use crate::agent_loop::prelude::*;
 use horsie_actor::CommandEffect;
@@ -44,7 +43,6 @@ pub(crate) use seed::Seeding;
 pub(crate) use task_list::{TaskListPart, TaskLists};
 pub(crate) use timers::{TimerState, Timers};
 pub(crate) use turn::{Turn, TurnState};
-pub(crate) use usage::UsageState;
 
 /// One component's durable state, tagged by the component that owns it.
 ///
@@ -67,7 +65,6 @@ pub(crate) use usage::UsageState;
 pub enum ComponentState {
     Queue(QueueState),
     Turn(TurnState),
-    Usage(UsageState),
     Timers(TimerState),
     TaskList(TaskListPart),
 }
@@ -123,7 +120,6 @@ macro_rules! parts {
 parts!(
     Queue(QueueState),
     Turn(TurnState),
-    Usage(UsageState),
     Timers(TimerState),
     TaskList(TaskListPart),
 );
@@ -180,6 +176,9 @@ impl Components {
     ) -> Option<CommandEffect<AgentDomainEvent>> {
         Some(match cmd {
             AgentCommand::Queue(c) => self.queue.handle(c, cx).await,
+            AgentCommand::Run(RunCommand::StopHookDone { marker_seq, result }) => {
+                self.stop_hook_returned(marker_seq, result, cx)
+            }
             AgentCommand::Run(c) => self.turn.handle(c, cx).await,
             AgentCommand::Timer(c) => self.timers.handle(c, cx).await,
             AgentCommand::Read(c) => self.reads.handle(c, cx).await,
@@ -189,10 +188,13 @@ impl Components {
             AgentCommand::Provision(c) => self.provision.handle(c, cx).await,
             AgentCommand::Compaction(c) => self.compaction.handle(c, cx).await,
             AgentCommand::Core(CoreCommand::ToolReturned {
-                work,
+                marker_seq,
                 tool_call_id,
                 outcome,
-            }) => self.tool_returned(work, tool_call_id, outcome, cx).await,
+            }) => {
+                self.tool_returned(marker_seq, tool_call_id, outcome, cx)
+                    .await
+            }
             AgentCommand::Core(CoreCommand::Advance) => self.advance(cx).await,
             AgentCommand::Core(CoreCommand::Cancel { ack }) => self.cancel(ack, cx).await,
             AgentCommand::Core(CoreCommand::Shutdown) => return None,
@@ -209,7 +211,6 @@ impl Components {
     pub(crate) fn toolboxes(
         &self,
         actor: horsie_actor::ActorRef<AgentCommand>,
-        work: u64,
     ) -> Vec<std::sync::Arc<dyn horsie_agentcore::Toolbox>> {
         let Self {
             provision,
@@ -223,15 +224,15 @@ impl Components {
             compaction,
         } = self;
         [
-            provision.toolbox(actor.clone(), work),
-            timers.toolbox(actor.clone(), work),
-            turn.toolbox(actor.clone(), work),
-            queue.toolbox(actor.clone(), work),
-            reads.toolbox(actor.clone(), work),
-            log.toolbox(actor.clone(), work),
-            seed.toolbox(actor.clone(), work),
-            task_lists.toolbox(actor.clone(), work),
-            compaction.toolbox(actor, work),
+            provision.toolbox(actor.clone()),
+            timers.toolbox(actor.clone()),
+            turn.toolbox(actor.clone()),
+            queue.toolbox(actor.clone()),
+            reads.toolbox(actor.clone()),
+            log.toolbox(actor.clone()),
+            seed.toolbox(actor.clone()),
+            task_lists.toolbox(actor.clone()),
+            compaction.toolbox(actor),
         ]
         .into_iter()
         .flatten()
@@ -243,7 +244,6 @@ impl Components {
     /// actor advances once, afterwards, over the repaired state.
     pub async fn on_load(&mut self, cx: &mut Cx<'_>) {
         self.timers.on_load(cx).await;
-        self.turn.on_load(cx).await;
     }
 }
 
@@ -259,6 +259,7 @@ impl Components {
     /// with: any journal ever written stays readable, whatever a future spec
     /// chooses to run.
     pub fn apply(mut state: AgentState, event: AgentDomainEvent) -> AgentState {
+        let history_record = event.clone();
         match event {
             e @ (AgentDomainEvent::Seeded { .. } | AgentDomainEvent::SeedSummaryTaken { .. }) => {
                 Seeding::apply(&mut state, e)
@@ -284,7 +285,15 @@ impl Components {
             | AgentDomainEvent::TimerCancelled { .. }
             | AgentDomainEvent::TimerFired { .. }) => Timers::apply(&mut state, e),
             e @ AgentDomainEvent::TaskListChanged { .. } => TaskLists::apply(&mut state, e),
+            AgentDomainEvent::SystemPromptRecorded { .. }
+            | AgentDomainEvent::AgentInitialized
+            | AgentDomainEvent::ConnectionCompleted
+            | AgentDomainEvent::StepStarted { .. }
+            | AgentDomainEvent::StepFailed { .. }
+            | AgentDomainEvent::StopHookCompleted { .. }
+            | AgentDomainEvent::RunEnded { .. } => {}
         }
+        state.record_history(history_record);
         state
     }
 
@@ -295,4 +304,3 @@ impl Components {
         events.iter().cloned().fold(state.clone(), Self::apply)
     }
 }
-

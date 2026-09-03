@@ -36,11 +36,30 @@ pub enum StepFailure {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StopHookOutcome {
+    Allow,
+    Continue { message: String },
+    Failed { reason: String },
+    Interrupted,
+    TimedOut,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RunEnd {
-    Complete,
+    Complete {
+        output: serde_json::Value,
+    },
+    AwaitingInput {
+        asks: Vec<crate::agent_loop::AskedQuestion>,
+    },
+    Parked,
     Cancelled,
     Interrupted,
-    Failed(String),
+    Failed {
+        error: String,
+        recoverable: bool,
+        terminal: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,10 +79,19 @@ pub enum AgentDomainEvent {
     AgentInitialized,
     ConnectionCompleted,
     /// Its assigned history sequence is both step identity and callback fence.
-    StepStarted { kind: StepKind },
-    StepFailed { reason: StepFailure },
-    StopHookCompleted { outcome: String },
-    RunEnded { reason: RunEnd, at_ms: u64 },
+    StepStarted {
+        kind: StepKind,
+    },
+    StepFailed {
+        reason: StepFailure,
+    },
+    StopHookCompleted {
+        outcome: StopHookOutcome,
+    },
+    RunEnded {
+        reason: RunEnd,
+        at_ms: u64,
+    },
     /// This agent was seeded from another session: `state` is the history it
     /// adopts, `seed` a synthetic message appended after it.
     ///
@@ -257,7 +285,9 @@ pub enum AgentDomainEvent {
     /// about this agent's history changed; what the summarising call spent is
     /// aggregated into `usage_total` by the fold.
     SeedSummaryTaken {
-        #[serde(default)]
+        request_id: String,
+        sub_sessions: Vec<uuid::Uuid>,
+        result: Result<String, String>,
         usage: Option<Usage>,
         at_ms: u64,
     },

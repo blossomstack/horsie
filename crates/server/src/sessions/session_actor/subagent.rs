@@ -1169,7 +1169,7 @@ mod tests {
         // forest, nothing delivered to main. Waited out via its own log (the
         // park is journaled there), so the assertion observes a real park
         // rather than a race it won.
-        wait_for_agent(&journal, parent, |s| s.parked).await;
+        wait_for_agent(&journal, parent, |s| s.parked()).await;
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
         let rec = state.forest.sub(parent).unwrap();
         assert_eq!(

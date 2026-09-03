@@ -40,7 +40,11 @@ impl TimerState {
         self.armed.retain(|t| !ids.contains(&t.id));
     }
 
-    fn fired(&mut self, id: &crate::agent_loop::components::timers::domain::TimerId, next: Option<u64>) {
+    fn fired(
+        &mut self,
+        id: &crate::agent_loop::components::timers::domain::TimerId,
+        next: Option<u64>,
+    ) {
         match next {
             Some(next) => {
                 if let Some(t) = self.armed.iter_mut().find(|t| t.id == *id) {
@@ -252,13 +256,11 @@ impl Component for Timers {
     fn toolbox(
         &self,
         actor: horsie_actor::ActorRef<AgentCommand>,
-        work: u64,
     ) -> Option<std::sync::Arc<dyn horsie_agentcore::Toolbox>> {
         Some(crate::agent_loop::component::ActorToolbox::new(
             domain::timer_tool_specs(),
             |call| AgentCommand::Timer(TimerCommand::ToolCall(call)),
             actor,
-            work,
         ))
     }
 

@@ -10,7 +10,7 @@
 //! connect cannot block a cancel. And no decision about whether this agent
 //! exists: residency belongs to whoever spawned it.
 
-use crate::agent_loop::context::AgentRuntimeContext;
+use crate::agent_loop::context::{AgentOutcome, AgentRuntimeContext};
 use crate::agent_loop::prelude::*;
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, CommandEffect, EventSourcedActor, PersistenceId};
@@ -62,8 +62,8 @@ pub trait AgentObserver: Send + Sync {
 pub struct AgentActor {
     runtime: AgentRuntimeContext,
     params: AgentParams,
-    /// The transient half of the state — see [`component::Scratch`].
-    scratch: Scratch,
+    /// The transient half of the state — see [`component::StepRun`].
+    step_run: StepRun,
     /// Every component this agent runs, centralized in one registry the actor
     /// delegates to wholesale — it knows neither their types nor their number.
     components: Components,
@@ -89,11 +89,11 @@ pub struct AgentActor {
 impl AgentActor {
     pub fn new(ctx: AgentRuntimeContext, params: AgentParams) -> Self {
         let revision = ctx.revision.clone();
-        let scratch = Scratch::new(ctx.ready);
+        let step_run = StepRun::new(ctx.ready);
         Self {
             runtime: ctx,
             params,
-            scratch,
+            step_run,
             components: Components::new(),
             observer: None,
             self_ref: None,
@@ -144,6 +144,86 @@ impl AgentActor {
     }
 }
 
+fn recovery_repairs(state: &AgentState) -> Vec<AgentDomainEvent> {
+    let Some((_, kind)) = state.open_step() else {
+        return Vec::new();
+    };
+    let at_ms = horsie_models::now_ms();
+    match kind {
+        StepKind::Initialize | StepKind::Connect => Vec::new(),
+        StepKind::Agent => {
+            if !state.open_step_has_response() {
+                vec![
+                    AgentDomainEvent::StepFailed {
+                        reason: StepFailure::Interrupted,
+                    },
+                    AgentDomainEvent::RunCancelled { at_ms },
+                    AgentDomainEvent::RunEnded {
+                        reason: RunEnd::Interrupted,
+                        at_ms,
+                    },
+                ]
+            } else {
+                missing_tool_results(&state.prompt_messages(), &parked_call_ids(state))
+                    .into_iter()
+                    .map(|message| AgentDomainEvent::InputMessage { message })
+                    .collect()
+            }
+        }
+        StepKind::Compaction => {
+            let mut events = vec![AgentDomainEvent::StepFailed {
+                reason: StepFailure::Interrupted,
+            }];
+            if let Some(crate::agent_loop::Offer::Compact { consumed, .. }) =
+                crate::agent_loop::queued_offer(state.inbox(), state.asks())
+            {
+                events.push(AgentDomainEvent::Consumed {
+                    ids: consumed,
+                    at_ms,
+                });
+            }
+            events
+        }
+        StepKind::SeedSummary { request_id } => {
+            let Some(crate::agent_loop::Offer::Summary {
+                consumed,
+                sub_sessions,
+            }) = crate::agent_loop::queued_offer(state.inbox(), state.asks())
+            else {
+                return vec![AgentDomainEvent::StepFailed {
+                    reason: StepFailure::Interrupted,
+                }];
+            };
+            vec![
+                AgentDomainEvent::SeedSummaryTaken {
+                    request_id: request_id.clone(),
+                    sub_sessions,
+                    result: Err("seed summary interrupted by recovery".to_string()),
+                    usage: None,
+                    at_ms,
+                },
+                AgentDomainEvent::Consumed {
+                    ids: consumed,
+                    at_ms,
+                },
+            ]
+        }
+        StepKind::StopHook => vec![
+            AgentDomainEvent::StopHookCompleted {
+                outcome: StopHookOutcome::Interrupted,
+            },
+            AgentDomainEvent::RunEnded {
+                reason: RunEnd::Failed {
+                    error: "stop hook interrupted by recovery".to_string(),
+                    recoverable: true,
+                    terminal: false,
+                },
+                at_ms,
+            },
+        ],
+    }
+}
+
 #[async_trait]
 impl EventSourcedActor for AgentActor {
     type Command = AgentCommand;
@@ -176,7 +256,7 @@ impl EventSourcedActor for AgentActor {
         self.self_ref.get_or_insert_with(|| ctx.self_ref());
         let mut cx = Cx {
             state,
-            scratch: &mut self.scratch,
+            step_run: &mut self.step_run,
             runtime: &self.runtime,
             params: &self.params,
             actor: ctx,
@@ -200,7 +280,7 @@ impl EventSourcedActor for AgentActor {
         // message says everything they were building towards — so the deltas
         // are dropped the moment one lands.
         if events.iter().any(coarse_appends_an_entry) {
-            self.scratch.deltas.clear();
+            self.step_run.deltas.clear();
         }
         self.revision.send_modify(|r| *r += 1);
         // A provider-backed step owns its cost. Publish the freshly folded
@@ -222,10 +302,69 @@ impl EventSourcedActor for AgentActor {
                 })
                 .await;
         }
+        for event in events {
+            if let AgentDomainEvent::SeedSummaryTaken {
+                sub_sessions,
+                result,
+                ..
+            } = event
+            {
+                self.runtime
+                    .parent
+                    .deliver(AgentOutcome::SeedSummary {
+                        agent: self.runtime.journal_id,
+                        sub_sessions: sub_sessions.clone(),
+                        result: result.clone(),
+                    })
+                    .await;
+            }
+        }
+        // Terminal outcomes leave the actor only after their run boundary is
+        // durable. Replaying a snapshot does not call this hook, and a parent
+        // applies replacements by agent identity, so delivery is idempotent.
+        for event in events {
+            let AgentDomainEvent::RunEnded { reason, .. } = event else {
+                continue;
+            };
+            let agent = self.runtime.journal_id;
+            let outcome = match reason {
+                RunEnd::Complete { output } => AgentOutcome::Concluded {
+                    agent,
+                    output: output.clone(),
+                },
+                RunEnd::AwaitingInput { asks } => AgentOutcome::Asked {
+                    agent,
+                    asks: asks.clone(),
+                },
+                RunEnd::Parked => AgentOutcome::Parked { agent },
+                RunEnd::Cancelled => continue,
+                RunEnd::Interrupted => AgentOutcome::Interrupted { agent },
+                RunEnd::Failed {
+                    error,
+                    recoverable,
+                    terminal,
+                } => AgentOutcome::Failed {
+                    agent,
+                    error: error.clone(),
+                    recoverable: *recoverable,
+                    terminal: *terminal,
+                },
+            };
+            self.runtime.parent.deliver(outcome).await;
+        }
         // Whatever just became durable may have changed what this agent should
         // be doing — a queue item, a tool result, a boundary. Asking is cheap
         // and idempotent; the alternative is every writer remembering to.
-        if let Some(self_ref) = &self.self_ref {
+        let terminal_failure = events.iter().any(|event| {
+            matches!(
+                event,
+                AgentDomainEvent::RunEnded {
+                    reason: RunEnd::Failed { .. },
+                    ..
+                }
+            )
+        });
+        if !terminal_failure && let Some(self_ref) = &self.self_ref {
             let _ = self_ref
                 .tell(AgentCommand::Core(CoreCommand::Advance))
                 .await;
@@ -252,14 +391,137 @@ impl EventSourcedActor for AgentActor {
         self.revision.send_modify(|r| *r += 1);
         let mut cx = Cx {
             state,
-            scratch: &mut self.scratch,
+            step_run: &mut self.step_run,
             runtime: &self.runtime,
             params: &self.params,
             actor: ctx,
         };
+        let repair = recovery_repairs(state);
+        if !repair.is_empty() {
+            let (ack, _) = tokio::sync::oneshot::channel();
+            cx.tell(AgentCommand::Run(RunCommand::PersistProgress {
+                events: repair,
+                ack: horsie_actor::ReplyTo::from_sender(ack),
+            }))
+            .await;
+        }
         self.components.on_load(&mut cx).await;
         // Recovery is over and the repairs are queued behind this: the advance
         // lands after them and reads the state they leave.
         cx.advance().await;
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod tests {
+    use super::*;
+    use horsie_actor::EventSourcedActor;
+    use horsie_agentcore::{ContentPart, Message, Role};
+    use horsie_models::agent::{ToolCallPart, Usage};
+
+    fn fold(events: Vec<AgentDomainEvent>) -> AgentState {
+        events
+            .into_iter()
+            .fold(AgentActor::initial_state(), AgentActor::apply_event)
+    }
+
+    fn assistant_with_calls(ids: &[&str]) -> Message {
+        Message {
+            id: "assistant".into(),
+            role: Role::Assistant,
+            parts: ids
+                .iter()
+                .map(|id| {
+                    ContentPart::ToolCall(ToolCallPart {
+                        id: (*id).into(),
+                        name: "bash".into(),
+                        input: serde_json::json!({"command": "true"}),
+                    })
+                })
+                .collect(),
+            created_at_ms: 2,
+            started_at_ms: None,
+        }
+    }
+
+    #[test]
+    fn recovery_fails_every_open_tool_call_without_dispatching() {
+        let state = fold(vec![
+            AgentDomainEvent::TurnBegan {
+                consumed: vec!["u".into()],
+                answered: Vec::new(),
+                at_ms: 1,
+            },
+            AgentDomainEvent::StepStarted {
+                kind: StepKind::Agent,
+            },
+            AgentDomainEvent::MessageComplete {
+                message: assistant_with_calls(&["one", "two"]),
+                usage: Usage::without_cache(10, 2),
+            },
+        ]);
+
+        let repairs = recovery_repairs(&state);
+        let repaired_ids: Vec<_> = repairs
+            .iter()
+            .filter_map(|event| match event {
+                AgentDomainEvent::InputMessage { message } => message.parts.first(),
+                _ => None,
+            })
+            .filter_map(|part| match part {
+                ContentPart::ToolResult(result) => Some(result.tool_call_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(repaired_ids, ["one", "two"]);
+        assert!(
+            !repairs
+                .iter()
+                .any(|event| matches!(event, AgentDomainEvent::StepStarted { .. }))
+        );
+    }
+
+    #[test]
+    fn recovery_ends_an_unanswered_provider_step() {
+        let state = fold(vec![AgentDomainEvent::StepStarted {
+            kind: StepKind::Agent,
+        }]);
+        let repairs = recovery_repairs(&state);
+        assert!(matches!(
+            repairs.as_slice(),
+            [
+                AgentDomainEvent::StepFailed {
+                    reason: StepFailure::Interrupted
+                },
+                AgentDomainEvent::RunCancelled { .. },
+                AgentDomainEvent::RunEnded {
+                    reason: RunEnd::Interrupted,
+                    ..
+                }
+            ]
+        ));
+    }
+
+    #[test]
+    fn old_marker_is_closed_by_run_end() {
+        let state = fold(vec![
+            AgentDomainEvent::StepStarted {
+                kind: StepKind::Agent,
+            },
+            AgentDomainEvent::RunEnded {
+                reason: RunEnd::Cancelled,
+                at_ms: 2,
+            },
+            AgentDomainEvent::StepStarted {
+                kind: StepKind::Agent,
+            },
+        ]);
+        assert_eq!(state.open_step().map(|(seq, _)| seq), Some(2));
     }
 }

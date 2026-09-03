@@ -5,7 +5,7 @@
 //! and composing the toolbox all cross a process boundary, so the work runs on
 //! a spawned task — the most hang-prone stretch of anything this agent does,
 //! and the reason it selects on the cancel token. The finished [`TurnCtx`] is
-//! published to the scratch, where a turn, a compaction and a summary all read
+//! published to the step_run, where a turn, a compaction and a summary all read
 //! the same one.
 //!
 //! Nobody asks for this. The boundary starts it when the contexts it needs are
@@ -23,16 +23,23 @@ pub(crate) struct Provision;
 
 impl Provision {
     /// Build this agent's contexts on a spawned task. `vended` is every
-    /// toolbox the actor collected from its components, generation already
-    /// baked in — a cancel makes them refuse their own calls.
+    /// toolbox the actor collected from its stateful components.
     pub(crate) fn start(
         &mut self,
+        marker_seq: u64,
+        initializing: bool,
         vended: Vec<Arc<dyn Toolbox>>,
         cx: &mut Cx<'_>,
     ) {
-        let (work, cancel) = cx.scratch.begin(WorkKind::Provisioning);
+        let cancel = cx.step_run.begin(
+            if initializing {
+                StepPhase::Initialize
+            } else {
+                StepPhase::Connect
+            },
+            marker_seq,
+        );
         let self_ref = cx.actor.self_ref();
-        let _ = work;
         let context_provider = cx.runtime.context_provider.clone();
         let configured_prompt = cx.params.system_prompt.clone();
         let run_def_tools = cx.params.tools.clone();
@@ -45,7 +52,12 @@ impl Provision {
             let provided = tokio::select! {
                 biased;
                 () = cancel.cancelled() => return,
-                provided = context_provider.provide() => provided,
+                provided = async {
+                    match initializing {
+                        true => context_provider.provide().await,
+                        false => context_provider.reconnect().await,
+                    }
+                } => provided,
             };
             let outcome = provided.map(|contexts| {
                 // The component toolboxes join before the filter, so the
@@ -89,7 +101,11 @@ impl Provision {
             });
             let _ = self_ref
                 .tell(AgentCommand::Provision(ProvisionCommand::Provided(
-                    Box::new(ProvidedOutcome { work, outcome }),
+                    Box::new(ProvidedOutcome {
+                        marker_seq,
+                        initializing,
+                        outcome,
+                    }),
                 )))
                 .await;
         });
@@ -106,37 +122,57 @@ impl Component for Provision {
         cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
         let ProvisionCommand::Provided(provided) = cmd;
-        let ProvidedOutcome { work, outcome } = *provided;
-        if !cx.scratch.finished(work) {
+        let ProvidedOutcome {
+            marker_seq,
+            initializing,
+            outcome,
+        } = *provided;
+        let marker_is_open = cx.state.open_step().is_some_and(|(seq, kind)| {
+            seq == marker_seq
+                && matches!(
+                    (kind, initializing),
+                    (StepKind::Initialize, true) | (StepKind::Connect, false)
+                )
+        });
+        if !marker_is_open || !cx.step_run.finished(marker_seq) {
             return CommandEffect::none();
         }
         match outcome {
-            Ok(ctx) => {
-                cx.scratch.ctx = Some(std::sync::Arc::new(*ctx));
-                cx.scratch.ctx_stale = false;
+            Ok(mut turn_ctx) => {
+                let events = if initializing {
+                    let mut events = Vec::new();
+                    if !turn_ctx.system_prompt.is_empty() {
+                        events.push(AgentDomainEvent::SystemPromptRecorded {
+                            source: SystemPromptSource::InitialContext,
+                            content: turn_ctx.system_prompt.clone(),
+                        });
+                    }
+                    events.push(AgentDomainEvent::AgentInitialized);
+                    events
+                } else {
+                    turn_ctx.system_prompt = cx.state.system_prompt();
+                    vec![AgentDomainEvent::ConnectionCompleted]
+                };
+                cx.step_run.ctx = Some(std::sync::Arc::new(*turn_ctx));
+                cx.step_run.ctx_stale = false;
+                CommandEffect::persist(events)
             }
             Err(error) => {
-                // Reported from here, where the *why* is known — `terminal`
-                // above all, which tells the session its sandbox is gone for
-                // good rather than merely unreachable.
-                //
-                // The work that was waiting on these contexts is simply not
-                // started: the boundary will ask again when something else
-                // moves, and the next attempt provisions from scratch.
-                cx.runtime
-                    .parent
-                    .deliver(crate::agent_loop::context::AgentOutcome::Failed {
-                        agent: cx.runtime.journal_id,
-                        error: error.message,
-                        recoverable: true,
-                        terminal: error.terminal,
-                    })
-                    .await;
-                return CommandEffect::none();
+                let at_ms = horsie_models::now_ms();
+                CommandEffect::persist(vec![
+                    AgentDomainEvent::StepFailed {
+                        reason: StepFailure::Provider(error.message.clone()),
+                    },
+                    AgentDomainEvent::RunEnded {
+                        reason: RunEnd::Failed {
+                            error: error.message,
+                            recoverable: true,
+                            terminal: error.terminal,
+                        },
+                        at_ms,
+                    },
+                ])
             }
         }
-        // Nothing was written, so nothing advances the agent by itself.
-        cx.advance().await;
-        CommandEffect::none()
     }
 }

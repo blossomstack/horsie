@@ -9,7 +9,7 @@
 //! - **The command/event vocabulary** — a component acts by returning events
 //!   in a [`CommandEffect`], and reports its own progress by telling *its own*
 //!   commands to the shared mailbox.
-//! - **[`Scratch`]** — the transient half of the state: the few in-memory
+//! - **[`StepRun`]** — the transient half of the state: the few in-memory
 //!   facts more than one component genuinely reads, deliberately unjournaled.
 //!
 //! **A component never names another component.** It cannot ask one for
@@ -20,7 +20,7 @@
 //! code that knows what components exist.
 //!
 //! `apply` folds one component's events into state and must be pure — no I/O,
-//! no clock, no scratch. `on_load` repairs what a dead process left behind.
+//! no clock, no step_run. `on_load` repairs what a dead process left behind.
 
 use crate::agent_loop::prelude::*;
 use async_trait::async_trait;
@@ -34,34 +34,36 @@ use tokio_util::sync::CancellationToken;
 /// `None` means the agent is between jobs, which is the only moment
 /// [`Components::advance`] may start a new one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WorkKind {
+pub(crate) enum StepPhase {
     /// Rehydrating the runtime, reconnecting MCP, composing the toolbox.
-    Provisioning,
+    Initialize,
+    Connect,
     /// A turn's pre-start hooks.
-    Hooks,
-    /// One provider call for the turn.
-    Step,
-    /// A summarising call, folded back into this agent's own history.
+    StartHooks,
+    /// One provider call for the current Agent marker.
+    CallingProvider,
+    /// The current Agent marker's tool batch.
+    RunningTools,
+    /// The Stop/SubagentStop hook at a settled boundary.
+    StopHook,
+    /// A tool-less compaction provider call.
     Compaction,
-    /// A summarising call taken for sub sessions branching from this one.
-    Summary,
+    /// A tool-less seed-summary provider call.
+    SeedSummary,
 }
 
 /// The transient half of an agent's state: in-memory facts more than one
 /// component reads. Everything here is rebuilt or re-decided on recovery,
 /// which is exactly why none of it is journaled.
-pub(crate) struct Scratch {
+pub(crate) struct StepRun {
     /// Whether this agent's session has a runtime to run on. Seeded at spawn
     /// and moved by the `Runtime` lifecycle records the owner already sends.
     pub ready: bool,
-    /// The generation every off-mailbox report is fenced against. Bumped by a
-    /// cancel, so a dying task's report names a generation that no longer
-    /// exists and is dropped — which is what makes "nothing more will happen"
-    /// true the moment a cancel is handled.
-    pub work: u64,
+    /// The open history marker every callback must name.
+    pub marker_seq: Option<u64>,
     /// The job running off the mailbox, if any. This is the busy gate.
-    pub running: Option<WorkKind>,
-    /// Cancels everything running for the current generation.
+    pub running: Option<StepPhase>,
+    /// Cancels everything running for the current marker.
     pub cancel: CancellationToken,
     /// The contexts every kind of work runs against — the provider, the
     /// composed toolbox, the budget, the hooks — published by the provision
@@ -89,11 +91,11 @@ pub(crate) struct Scratch {
     pub deltas: Vec<String>,
 }
 
-impl Scratch {
+impl StepRun {
     pub fn new(ready: bool) -> Self {
         Self {
             ready,
-            work: 0,
+            marker_seq: None,
             running: None,
             cancel: CancellationToken::new(),
             ctx: None,
@@ -105,35 +107,30 @@ impl Scratch {
         }
     }
 
-    /// Claim the off-mailbox slot for `kind`. Answers the generation the
-    /// report must carry and the token the task must die on.
-    pub fn begin(&mut self, kind: WorkKind) -> (u64, CancellationToken) {
+    /// Claim the foreground slot for the open history marker.
+    pub fn begin(&mut self, kind: StepPhase, marker_seq: u64) -> CancellationToken {
         self.running = Some(kind);
-        (self.work, self.cancel.clone())
+        self.marker_seq = Some(marker_seq);
+        self.cancel.clone()
     }
 
-    /// Whether `work` still names the live generation — the fence every
-    /// off-mailbox report passes through.
-    pub fn live(&self, work: u64) -> bool {
-        self.work == work
+    pub fn live(&self, marker_seq: u64) -> bool {
+        self.marker_seq == Some(marker_seq)
     }
 
-    /// Release the slot a live report belongs to. `false` for a report from a
-    /// cancelled generation, which changes nothing.
-    pub fn finished(&mut self, work: u64) -> bool {
-        if !self.live(work) {
+    pub fn finished(&mut self, marker_seq: u64) -> bool {
+        if !self.live(marker_seq) {
             return false;
         }
         self.running = None;
         true
     }
 
-    /// Stop everything: kill what is running, and move the generation past
-    /// anything it might still say.
+    /// Stop everything and make every callback for the old marker stale.
     pub fn stop(&mut self) {
         self.cancel.cancel();
         self.cancel = CancellationToken::new();
-        self.work = self.work.wrapping_add(1);
+        self.marker_seq = None;
         self.running = None;
         // The batch died with its turn: the dying tasks' reports are fenced
         // out, and the conclusion repairs whatever dangles.
@@ -146,7 +143,7 @@ impl Scratch {
 }
 
 /// Everything one turn's steps share, built once by the provision component
-/// and published to the shared scratch for whoever needs it.
+/// and published to the shared step_run for whoever needs it.
 pub struct TurnCtx {
     pub provider: std::sync::Arc<dyn horsie_agentcore::LlmProvider>,
     /// The fully-composed, selection-filtered toolbox every call dispatches
@@ -167,11 +164,10 @@ pub struct TurnCtx {
 ///
 /// Built by a vended [`ActorToolbox`] — the turn never
 /// constructs one and never learns the tool was special. Carries the work
-/// generation baked in at provisioning time, so a component never acts for a
+/// marker baked in at provisioning time, so a component never acts for a
 /// turn that has since been cancelled: the stale call is refused, and the
 /// cancel already repaired its dangling `tool_use`.
 pub struct RoutedToolCall {
-    pub work: u64,
     pub tool_call_id: String,
     pub name: String,
     pub input: serde_json::Value,
@@ -201,10 +197,6 @@ pub(crate) struct ActorToolbox {
     /// Wraps the call in the owning component's command group.
     wrap: fn(RoutedToolCall) -> AgentCommand,
     actor: horsie_actor::ActorRef<AgentCommand>,
-    /// The generation this toolbox was provisioned under. A cancel bumps the
-    /// generation and marks the contexts stale, so a toolbox that outlives its
-    /// turn carries proof of its own staleness.
-    work: u64,
 }
 
 impl ActorToolbox {
@@ -212,14 +204,8 @@ impl ActorToolbox {
         specs: Vec<horsie_agentcore::ToolSpec>,
         wrap: fn(RoutedToolCall) -> AgentCommand,
         actor: horsie_actor::ActorRef<AgentCommand>,
-        work: u64,
     ) -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self {
-            specs,
-            wrap,
-            actor,
-            work,
-        })
+        std::sync::Arc::new(Self { specs, wrap, actor })
     }
 }
 
@@ -237,7 +223,6 @@ impl horsie_agentcore::Toolbox for ActorToolbox {
     ) -> Result<horsie_agentcore::ToolOutcome, horsie_agentcore::ToolCallError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let call = RoutedToolCall {
-            work: self.work,
             tool_call_id: tool_call_id.to_string(),
             name: name.to_string(),
             input,
@@ -252,7 +237,7 @@ impl horsie_agentcore::Toolbox for ActorToolbox {
                 },
             )),
             Ok(Err(e)) => Err(e),
-            // The actor died or refused the generation: either way the turn
+            // The actor died or refused the marker: either way the turn
             // this call belongs to is over, and the fence drops the report.
             Err(_) => Err(horsie_agentcore::ToolCallError::ExecutionFailed(
                 "the agent is no longer running this turn".to_string(),
@@ -294,12 +279,12 @@ pub(crate) trait Part: Sized {
 }
 
 /// What a component is handed with every command: the durable state as it
-/// stands, the shared scratch, the agent's configuration, and the means to
+/// stands, the shared step_run, the agent's configuration, and the means to
 /// spawn work and reach its own mailbox. Nothing here belongs to another
 /// component.
 pub(crate) struct Cx<'a> {
     pub state: &'a AgentState,
-    pub scratch: &'a mut Scratch,
+    pub step_run: &'a mut StepRun,
     pub runtime: &'a crate::agent_loop::context::AgentRuntimeContext,
     pub params: &'a AgentParams,
     pub actor: &'a ActorContext<AgentCommand>,
@@ -349,7 +334,7 @@ pub(crate) type ToolExecutor =
 /// `ToolReturned` path every remote call takes, so the turn records both kinds
 /// identically and cannot tell them apart.
 ///
-/// A call from a cancelled generation is refused without executing: the cancel
+/// A call from a cancelled marker is refused without executing: the cancel
 /// already repaired its dangling `tool_use`, and acting now would leak a side
 /// effect. Dropping the reply is the refusal — the toolbox reads a dead
 /// channel as "this turn is over".
@@ -358,11 +343,17 @@ pub(crate) async fn answer_tool_call(
     cx: &mut Cx<'_>,
     execute: ToolExecutor,
 ) -> CommandEffect<AgentDomainEvent> {
-    if !cx.scratch.live(call.work) {
-        tracing::warn!(
-            tool = call.name,
-            "refusing a routed tool call from a cancelled turn"
-        );
+    let call_is_open = cx
+        .state
+        .open_tool_calls()
+        .iter()
+        .any(|id| id == &call.tool_call_id)
+        && cx
+            .state
+            .open_step()
+            .is_some_and(|(_, kind)| *kind == StepKind::Agent);
+    if !call_is_open {
+        tracing::warn!(tool = call.name, "refusing a routed call for a closed step");
         return CommandEffect::none();
     }
     match execute(cx.state, &call.name, &call.input, cx.actor.self_ref()) {
@@ -386,7 +377,7 @@ pub(crate) trait Component {
     type Command;
 
     /// Decide what `cmd` means. Reads whatever it likes through `cx`, writes
-    /// only by returning events (durable) or touching scratch (transient), and
+    /// only by returning events (durable) or touching step_run (transient), and
     /// reaches other components only by telling commands.
     async fn handle(
         &mut self,
@@ -396,7 +387,7 @@ pub(crate) trait Component {
 
     /// Fold one of this component's events into state.
     ///
-    /// Must be pure — no I/O, no clock, no scratch. An associated function
+    /// Must be pure — no I/O, no clock, no step_run. An associated function
     /// rather than a method because replay happens before any component
     /// instance exists.
     fn apply(_state: &mut AgentState, _event: AgentDomainEvent) {}
@@ -415,7 +406,6 @@ pub(crate) trait Component {
     fn toolbox(
         &self,
         _actor: horsie_actor::ActorRef<AgentCommand>,
-        _work: u64,
     ) -> Option<std::sync::Arc<dyn horsie_agentcore::Toolbox>> {
         None
     }

@@ -41,7 +41,7 @@ pub use types::*;
 
 use component::Component;
 use core::SessionCore;
-use hooks::{HookRouting, StopHookParent};
+use hooks::{HookRouting, SessionParent};
 use lifecycle::RuntimeLifecycle;
 use reads::Reads;
 use run::WorkflowRuns;
@@ -52,9 +52,7 @@ use turns::Turns;
 use crate::agent_loop::{
     AgentActor, AgentCommand, AgentOutcome, AgentParams, AgentRunDef, AgentRuntimeContext, Incoming,
 };
-use crate::agent_loop::{
-    CoreCommand as AgentCoreCommand, QueueCommand as AgentQueueCommand,
-};
+use crate::agent_loop::{CoreCommand as AgentCoreCommand, QueueCommand as AgentQueueCommand};
 use crate::projects::{ProjectRegistry, ProjectServices, resolve};
 use crate::sessions::{
     addressing::{SessionEntityId, SessionInbox, SessionRef, SupervisorRef},
@@ -900,7 +898,6 @@ impl SessionActor {
             | SessionAgentKind::Step(id)
             | SessionAgentKind::SubSession(id) => id.to_string(),
         };
-        let key = plan.kind.agent_key();
         // Which runtime *this agent* runs on, resolved through the forest: its
         // own session's, or the sub session's that branched it, or none at all.
         // Read here rather than per acquisition so every call in one run
@@ -960,7 +957,7 @@ impl SessionActor {
             artifacts: self.deps().artifact_source(&plan.settings.model),
             context_provider: provider.clone(),
             revision,
-            parent: StopHookParent::wrap(self.me(ctx), key, provider.clone()),
+            parent: Arc::new(SessionParent::new(self.me(ctx))),
             journal_id,
             // Computed from the state this spawn was decided against, never
             // remembered: an agent built after the runtime landed starts ready,

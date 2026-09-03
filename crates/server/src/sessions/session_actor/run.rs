@@ -799,9 +799,9 @@ mod tests {
         );
         let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
         let started = wait_for_run(&journal, id, |r| !r.steps.is_empty()).await;
-        let step = wait_for_agent(&journal, started.steps[0].agent, |s| s.parked).await;
-        assert_eq!(step.nudges, 0, "a park is not a mistake to be corrected");
-        assert_eq!(step.timers.len(), 1, "and the timer is still armed");
+        let step = wait_for_agent(&journal, started.steps[0].agent, |s| s.parked()).await;
+        assert_eq!(step.nudges(), 0, "a park is not a mistake to be corrected");
+        assert_eq!(step.timers().len(), 1, "and the timer is still armed");
         let run = crate::sessions::events::fold_session_state(&journal, id)
             .await
             .forest
@@ -854,7 +854,7 @@ mod tests {
         // The timer really was armed — otherwise this test passes by testing
         // nothing, which is exactly what it did the first time it was written.
         assert!(
-            step.log.iter().any(|e| matches!(
+            step.log().iter().any(|e| matches!(
                 &e.body,
                 horsie_agentcore::AgentLogBody::Llm(m)
                     if m.parts.iter().any(|p| matches!(
@@ -865,9 +865,9 @@ mod tests {
             "the step never armed a timer, so cancelling one proves nothing"
         );
         assert!(
-            step.timers.is_empty(),
+            step.timers().is_empty(),
             "the concluded step still holds {} armed timer(s)",
-            step.timers.len()
+            step.timers().len()
         );
     }
 

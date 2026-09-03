@@ -72,9 +72,9 @@ impl Component for LogWrites {
                 // nothing about the runtime cannot start a turn. That is what
                 // keeps recovery quiet: it journals a `TurnEnded(Interrupted)`,
                 // which is not a runtime fact and drains nothing.
-                let moved = runtime_readiness(&event).filter(|next| *next != cx.scratch.ready);
+                let moved = runtime_readiness(&event).filter(|next| *next != cx.step_run.ready);
                 if let Some(next) = moved {
-                    cx.scratch.ready = next;
+                    cx.step_run.ready = next;
                 }
                 // The runtime arriving is what lets a waiting agent start
                 // work. Nothing is told: the advance that follows this write

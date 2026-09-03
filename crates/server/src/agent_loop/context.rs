@@ -188,6 +188,18 @@ pub struct Contexts {
 /// turn begins on a user message; the provider knows whether this agent is a
 /// session or a subagent, and so which event that start actually is.
 #[derive(Debug, Clone)]
+pub struct StopHookRequest {
+    pub last_assistant_message: Option<String>,
+    pub active: bool,
+}
+
+#[derive(Debug)]
+pub struct StopHookResult {
+    pub records: Vec<horsie_models::hooks::HookRecord>,
+    pub outcome: crate::agent_loop::StopHookOutcome,
+}
+
+#[derive(Debug, Clone)]
 pub struct StartTurn {
     /// `Some(source)` when this agent load has not yet fired its start hook.
     /// `Startup` for a fresh agent, `Resume` for one recovered from a journal —
@@ -209,7 +221,15 @@ pub struct StartTurn {
 /// without touching any runtime.
 #[async_trait]
 pub trait ContextProvider: Send + Sync {
+    /// One-time semantic setup. This may scan the workspace and compose the
+    /// immutable initial prompt.
     async fn provide(&self) -> Result<Contexts, ContextError>;
+
+    /// Restore disposable runtime and MCP clients for an initialized agent.
+    /// Implementations must not scan the workspace or regenerate prompt bytes.
+    async fn reconnect(&self) -> Result<Contexts, ContextError> {
+        self.provide().await
+    }
 
     /// Whether this provider has hooks to fire before a run starts.
     ///
@@ -236,6 +256,16 @@ pub trait ContextProvider: Send + Sync {
     async fn start_hooks(&self, turn: StartTurn) -> Result<TurnPreparation, ContextError> {
         let _ = turn;
         Ok(TurnPreparation::default())
+    }
+
+    /// Run the Stop/SubagentStop hook at a settled boundary. The actor applies
+    /// a timeout around this call and journals the returned records.
+    async fn stop_hook(&self, request: StopHookRequest) -> StopHookResult {
+        let _ = request;
+        StopHookResult {
+            records: Vec::new(),
+            outcome: crate::agent_loop::StopHookOutcome::Allow,
+        }
     }
 
     /// Fire one of the compaction hooks and hand back what they did.
@@ -482,7 +512,8 @@ impl AgentToolbox {
     fn resolve_workspace(&self, requested: Option<&str>) -> Result<String, ToolCallError> {
         match requested {
             Some(name) => {
-                if self.workspace_names.iter().any(|n| n == name) {
+                if self.workspace_names.is_empty() || self.workspace_names.iter().any(|n| n == name)
+                {
                     Ok(name.to_string())
                 } else {
                     Err(ToolCallError::InvalidInput(format!(

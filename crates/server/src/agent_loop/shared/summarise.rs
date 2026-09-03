@@ -24,7 +24,6 @@ pub(crate) const COMPACT_AT_PERCENT: u32 = 80;
 /// part-way through, and those live in the last few messages.
 pub(crate) const COMPACT_RETAIN_PERCENT: u32 = 20;
 
-
 /// Swallows everything a summarise step streams. A summary is not a turn,
 /// and its deltas must never reach a transcript — a viewer would watch the
 /// summary being typed as though the agent had started answering.
@@ -93,4 +92,3 @@ pub(crate) async fn summarise_step(
     }
     Ok((text, response.usage))
 }
-

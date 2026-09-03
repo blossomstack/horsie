@@ -13,11 +13,11 @@
 
 #![allow(dead_code)]
 
-use crate::agent_loop::prelude::*;
 use crate::agent_loop::AgentRunDef;
 use crate::agent_loop::context::{
     AgentOutcome, AgentOutcomeSink, ContextError, ContextProvider, Contexts,
 };
+use crate::agent_loop::prelude::*;
 use async_trait::async_trait;
 use horsie_agentcore::{ContentPart, Message, Role};
 use horsie_models::agent::TextPart;
@@ -112,23 +112,4 @@ pub(crate) fn with_hook(state: AgentState, plugin: &str, call: &str, seq: usize)
             at_ms: 5,
         },
     )
-}
-
-/// A [`CompactionPolicy`](horsie_agentcore::CompactionPolicy) for agents that
-/// have no budget, so it is never consulted. Tests that exercise the retry loop
-/// need one to pass and nothing to happen.
-pub(crate) struct NeverCompacts;
-
-#[async_trait]
-impl horsie_agentcore::CompactionPolicy for NeverCompacts {
-    async fn carried_state(&self) -> String {
-        String::new()
-    }
-    async fn before(
-        &self,
-        _: &horsie_agentcore::CompactionPlan,
-    ) -> horsie_agentcore::PreCompactDecision {
-        horsie_agentcore::PreCompactDecision::Proceed
-    }
-    async fn after(&self, _: &horsie_agentcore::CompactionResult) {}
 }

@@ -1,4 +1,4 @@
-//! A built-in `task_list` tool: an agent-visible scratchpad for tracking a
+//! A built-in `task_list` tool: an agent-visible step_runpad for tracking a
 //! multi-step plan (create a list, insert tasks at a position, mark one or
 //! more tasks' status).
 //!
