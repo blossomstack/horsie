@@ -770,7 +770,13 @@ mod tests {
             .expect("a working subagent is stoppable");
 
         // Owed and delivered: a stopped child still owes its parent an answer.
-        wait_for_tree(&journal, id, |t| t.sub(sub).is_some_and(|r| r.notified)).await;
+        // Wait for both durable facts; the notification can be observed before
+        // the status projection catches up on a loaded journal backend.
+        wait_for_tree(&journal, id, |t| {
+            t.sub(sub)
+                .is_some_and(|r| r.status == SubAgentStatus::Failed && r.notified)
+        })
+        .await;
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
         let rec = state.forest.sub(sub).unwrap();
         assert_eq!(rec.status, SubAgentStatus::Failed);
