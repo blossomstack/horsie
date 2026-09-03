@@ -8,7 +8,7 @@
 //!
 //! Nothing above this module names a component, and no component names
 //! another. What happens next is decided by
-//! [`Components::advance`](crate::agent_loop::boundary), which is the only
+//! [`AgentLoop::advance`](crate::agent_loop::boundary), which is the only
 //! code that knows they all exist.
 //!
 //! One component, one module: [`provision`] the runtime and context setup they
@@ -120,9 +120,9 @@ parts!(Timers(TimerState), TaskList(TaskListPart));
 /// *here*, where it has to be classified.
 ///
 /// This is also the seam for building an agent's components from its spec
-/// later: construction is centralized in [`Components::new`], so a spec-driven
+/// later: construction is centralized in [`AgentLoop::new`], so a spec-driven
 /// variant changes this file and nothing above it.
-pub(crate) struct Components {
+pub(crate) struct AgentLoop {
     pub(crate) provision: Provision,
     pub(crate) timers: Timers,
     pub(crate) turn: Turn,
@@ -134,7 +134,7 @@ pub(crate) struct Components {
     pub(crate) compaction: Compaction,
 }
 
-impl Components {
+impl AgentLoop {
     pub fn new() -> Self {
         Self {
             provision: Provision,
@@ -153,8 +153,8 @@ impl Components {
     /// a command group added later fails to compile here.
     ///
     /// `Core` is deliberately absent — the agent's own decisions are the
-    /// registry's, not any component's: see [`Components::advance`] and
-    /// [`Components::cancel`] in [`super::boundary`].
+    /// registry's, not any component's: see [`AgentLoop::advance`] and
+    /// [`AgentLoop::cancel`] in [`super::boundary`].
     pub async fn handle(
         &mut self,
         cmd: AgentCommand,
@@ -187,38 +187,15 @@ impl Components {
         })
     }
 
-    /// Every toolbox the components vend, asked of each in registry order.
-    ///
-    /// The actor collects them here and provisioning composes them ahead of
-    /// the runtime's, so a vended tool wins a name collision. Listing the
-    /// fields is deliberate: a component added to the struct is asked here or
-    /// this stops compiling nowhere — so the roster lists them all, and a
-    /// component with no tools answers `None` for free.
+    /// Toolboxes vended by the two genuine stateful components. Provisioning
+    /// composes them ahead of runtime tools, so their names win collisions.
     pub(crate) fn toolboxes(
         &self,
         actor: horsie_actor::ActorRef<AgentCommand>,
     ) -> Vec<std::sync::Arc<dyn horsie_agentcore::Toolbox>> {
-        let Self {
-            provision,
-            timers,
-            turn,
-            queue,
-            reads,
-            log,
-            seed,
-            task_lists,
-            compaction,
-        } = self;
         [
-            provision.toolbox(actor.clone()),
-            timers.toolbox(actor.clone()),
-            turn.toolbox(actor.clone()),
-            queue.toolbox(actor.clone()),
-            reads.toolbox(actor.clone()),
-            log.toolbox(actor.clone()),
-            seed.toolbox(actor.clone()),
-            task_lists.toolbox(actor.clone()),
-            compaction.toolbox(actor),
+            self.timers.toolbox(actor.clone()),
+            self.task_lists.toolbox(actor),
         ]
         .into_iter()
         .flatten()
@@ -233,8 +210,8 @@ impl Components {
     }
 }
 
-impl Components {
-    /// The event-side twin of [`Components::handle`]: route each event to the
+impl AgentLoop {
+    /// The event-side twin of [`AgentLoop::handle`]: route each event to the
     /// component that owns it. Exhaustive the same way — an event added later
     /// fails to compile here, where it has to be classified.
     ///

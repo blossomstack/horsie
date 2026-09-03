@@ -161,11 +161,8 @@ impl AgentState {
 /// Questions answered from state, which wake nothing.
 pub(crate) struct Reads;
 
-#[async_trait::async_trait]
-impl Component for Reads {
-    type Command = ReadCommand;
-
-    async fn handle(
+impl Reads {
+    pub(crate) async fn handle(
         &mut self,
         cmd: ReadCommand,
         cx: &mut Cx<'_>,

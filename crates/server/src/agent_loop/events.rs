@@ -2,7 +2,7 @@
 //!
 //! Every change to [`AgentState`](crate::agent_loop::AgentState) is one of
 //! these, journaled before it is believed and folded by exactly one component
-//! — see [`Components::apply`](crate::agent_loop::components::Components).
+//! — see [`AgentLoop::apply`](crate::agent_loop::components::AgentLoop).
 //!
 //! This is a durability contract. A variant that fails to deserialize takes
 //! down recovery for every session that ever journaled one, so fields are

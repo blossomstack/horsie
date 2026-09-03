@@ -1,6 +1,6 @@
 //! The actor: one agent's shell.
 //!
-//! It routes every command to [`Components`], persists whatever they decided,
+//! It routes every command to [`AgentLoop`], persists whatever they decided,
 //! folds it, and keeps the plumbing they all rely on — the observer, the
 //! revision counter, the snapshot cadence. It decides nothing itself, and it
 //! does not know what components exist.
@@ -64,9 +64,9 @@ pub struct AgentActor {
     params: AgentParams,
     /// The transient half of the state — see [`component::StepRun`].
     step_run: StepRun,
-    /// Every component this agent runs, centralized in one registry the actor
-    /// delegates to wholesale — it knows neither their types nor their number.
-    components: Components,
+    /// The actor-owned run-loop driver. It coordinates normal and special
+    /// steps and contains the two stateful components that vend tools.
+    agent_loop: AgentLoop,
     /// Where durable history is published, when anyone is listening. `None` for
     /// workflow agents, which have no live stream.
     observer: Option<Arc<dyn AgentObserver>>,
@@ -94,7 +94,7 @@ impl AgentActor {
             runtime: ctx,
             params,
             step_run,
-            components: Components::new(),
+            agent_loop: AgentLoop::new(),
             observer: None,
             self_ref: None,
             events_since_snapshot: 0,
@@ -236,11 +236,11 @@ impl EventSourcedActor for AgentActor {
         AgentState::default()
     }
 
-    /// Fold one event into state — [`Components::apply`], the event-side twin
+    /// Fold one event into state — [`AgentLoop::apply`], the event-side twin
     /// of the registry's command routing, so live handling, replay and every
     /// component's own fold-forward agree.
     fn apply_event(state: AgentState, event: AgentDomainEvent) -> AgentState {
-        Components::apply(state, event)
+        AgentLoop::apply(state, event)
     }
 
     /// Hand the command to the component registry. The actor decides nothing
@@ -261,7 +261,7 @@ impl EventSourcedActor for AgentActor {
         };
         // The registry answers everything but the actor's own lifetime:
         // stopping is the one thing that is nobody's component.
-        let effect = match self.components.handle(cmd, &mut cx).await {
+        let effect = match self.agent_loop.handle(cmd, &mut cx).await {
             Some(effect) => effect,
             None => CommandEffect::stop(),
         };
@@ -403,7 +403,7 @@ impl EventSourcedActor for AgentActor {
             }))
             .await;
         }
-        self.components.on_load(&mut cx).await;
+        self.agent_loop.on_load(&mut cx).await;
         // Recovery is over and the repairs are queued behind this: the advance
         // lands after them and reads the state they leave.
         cx.advance().await;

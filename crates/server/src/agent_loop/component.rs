@@ -16,7 +16,7 @@
 //! anything and cannot tell one anything; the one thing it may say to the
 //! world outside itself is [`Cx::advance`] — *something changed, reconsider* —
 //! which names nobody. Deciding what happens next is
-//! [`Components::advance`]'s job, in [`super::boundary`], and it is the only
+//! [`AgentLoop::advance`]'s job, in [`super::boundary`], and it is the only
 //! code that knows what components exist.
 //!
 //! `apply` folds one component's events into state and must be pure — no I/O,

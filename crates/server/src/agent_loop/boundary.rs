@@ -80,7 +80,7 @@ fn cap_stop_records(records: &mut [horsie_models::hooks::HookRecord]) {
     }
 }
 
-impl Components {
+impl AgentLoop {
     /// Decide what happens next, and start it.
     pub(crate) async fn advance(&mut self, cx: &mut Cx<'_>) -> CommandEffect<AgentDomainEvent> {
         // 1. One thing at a time. Whatever is running reports back, and the

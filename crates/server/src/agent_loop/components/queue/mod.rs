@@ -4,7 +4,7 @@
 //! An accepted message is a promise: it is journaled *before* anything is done
 //! with it, so a crash cannot forget it and the ack a caller waits on reports
 //! the durable write rather than a mailbox. Whether it is taken, and when, is
-//! [`Components::advance`](super::boundary)'s decision — this component only
+//! [`AgentLoop::advance`](super::boundary)'s decision — this component only
 //! offers ([`crate::agent_loop::queued_offer`]) and takes.
 //!
 //! Taking a turn's input is a *write*: the items it consumes are crossed off
@@ -16,7 +16,6 @@ pub mod inbox;
 
 use crate::agent_loop::context::AgentOutcome;
 use crate::agent_loop::prelude::*;
-use async_trait::async_trait;
 use horsie_actor::CommandEffect;
 use horsie_agentcore::{
     AgentInput, AgentLogBody, AskLifecycle, LifecycleEvent, QueuedLifecycle, TurnBeganLifecycle,
@@ -233,11 +232,8 @@ impl Queue {
     }
 }
 
-#[async_trait]
-impl Component for Queue {
-    type Command = QueueCommand;
-
-    async fn handle(
+impl Queue {
+    pub(crate) async fn handle(
         &mut self,
         cmd: QueueCommand,
         cx: &mut Cx<'_>,
@@ -294,12 +290,12 @@ impl Component for Queue {
     /// component's own method, never by touching its fields: taking input is
     /// what makes a turn owed, and parking is what ends one, so the decision
     /// belongs here even though the flag does not.
-    // The fallthrough is unreachable by construction: `Components::apply`
+    // The fallthrough is unreachable by construction: `AgentLoop::apply`
     // routes every variant to exactly one component, so an event added later
     // fails to compile *there* — where it should be classified — rather than
     // silently reaching the wrong fold here.
     #[allow(clippy::wildcard_enum_match_arm)]
-    fn apply(state: &mut AgentState, event: AgentDomainEvent) {
+    pub(crate) fn apply(state: &mut AgentState, event: AgentDomainEvent) {
         match event {
             AgentDomainEvent::Received {
                 item: crate::agent_loop::Incoming::User { id, text, .. },

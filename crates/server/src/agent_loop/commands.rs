@@ -76,7 +76,7 @@ pub enum QueueCommand {
 
 /// What the turn's own spawned work reports back: one provider call, one
 /// tool result, one streamed chunk. Nothing here starts anything — when a
-/// step runs is [`Components::advance`](super::component::Components::advance)'s
+/// step runs is [`AgentLoop::advance`](super::component::AgentLoop::advance)'s
 /// decision, and what it says is this component's.
 pub enum RunCommand {
     /// Internal: one provider call finished — the assembled assistant message.
@@ -339,7 +339,7 @@ pub enum CoreCommand {
     },
     /// Internal: reconsider what this agent should be doing. The one thing
     /// any component may say, and it names nobody — see
-    /// [`Components::advance`](super::component::Components::advance). Told by
+    /// [`AgentLoop::advance`](super::component::AgentLoop::advance). Told by
     /// the actor after every durable write, and by hand where something
     /// changed without one.
     Advance,

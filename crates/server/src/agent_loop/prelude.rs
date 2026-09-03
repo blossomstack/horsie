@@ -22,7 +22,7 @@ pub(crate) use crate::agent_loop::component::{
     Component, Cx, Part, PartState, StepPhase, StepRun, TurnCtx, answer_tool_call,
 };
 pub(crate) use crate::agent_loop::components::{
-    ComponentState, Components, TaskListPart, TimerState,
+    AgentLoop, ComponentState, TaskListPart, TimerState,
 };
 pub(crate) use crate::agent_loop::context::ContextManifest;
 pub(crate) use crate::agent_loop::events::{

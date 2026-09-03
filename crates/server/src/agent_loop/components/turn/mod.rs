@@ -1,7 +1,7 @@
 //! The turn component: what one provider call says, and what an ending means.
 //!
 //! This file does not decide when a call happens —
-//! [`Components::advance`](super::boundary) does, and it calls
+//! [`AgentLoop::advance`](super::boundary) does, and it calls
 //! [`Turn::run_step`]. What comes back is this component's to *journal*: an
 //! assistant message, or a turn that is over. It is not this component's to
 //! run — the tool calls a message carries are dispatched by the actor, which
@@ -195,7 +195,7 @@ impl Turn {
         cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
         events.push(self.run_aborted());
-        let folded = Components::apply_all(state, &events);
+        let folded = AgentLoop::apply_all(state, &events);
         self.finish(
             events,
             RunReport {
@@ -286,7 +286,7 @@ impl Turn {
             message: response.message.clone(),
             usage: response.usage.clone(),
         }];
-        let folded = Components::apply_all(cx.state, &events);
+        let folded = AgentLoop::apply_all(cx.state, &events);
 
         // A truncated turn is not a finished turn. Tool calls are exempt: a
         // backend may report `length` alongside a complete tool call, and the
@@ -306,7 +306,7 @@ impl Turn {
 
         if tool_calls.is_empty() {
             events.push(self.run_complete());
-            let folded = Components::apply_all(cx.state, &events);
+            let folded = AgentLoop::apply_all(cx.state, &events);
             return self
                 .finish(
                     events,
@@ -421,7 +421,7 @@ impl Turn {
         cx: &mut Cx<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
         events.push(self.run_complete());
-        let folded = Components::apply_all(cx.state, &events);
+        let folded = AgentLoop::apply_all(cx.state, &events);
         self.finish(
             events,
             RunReport {
@@ -438,7 +438,7 @@ impl Turn {
     /// stopped everything that was running.
     pub(crate) async fn cancelled(&mut self, cx: &mut Cx<'_>) -> CommandEffect<AgentDomainEvent> {
         let events = vec![self.run_aborted()];
-        let folded = Components::apply_all(cx.state, &events);
+        let folded = AgentLoop::apply_all(cx.state, &events);
         self.finish(
             events,
             RunReport {
@@ -451,12 +451,9 @@ impl Turn {
     }
 }
 
-#[async_trait]
-impl Component for Turn {
-    type Command = RunCommand;
-
+impl Turn {
     /// Every callback is accepted only while its marker is the open top step.
-    async fn handle(
+    pub(crate) async fn handle(
         &mut self,
         cmd: RunCommand,
         cx: &mut Cx<'_>,
@@ -498,11 +495,11 @@ impl Component for Turn {
     /// The cost goes to the usage part, through the one method that adds one:
     /// this component holds no numbers of its own, and cannot reach that
     /// part's fields.
-    // The fallthrough is unreachable by construction: `Components::apply`
+    // The fallthrough is unreachable by construction: `AgentLoop::apply`
     // routes every variant to exactly one component, so an event added later
     // fails to compile *there* rather than silently reaching the wrong fold.
     #[allow(clippy::wildcard_enum_match_arm)]
-    fn apply(state: &mut AgentState, event: AgentDomainEvent) {
+    pub(crate) fn apply(state: &mut AgentState, event: AgentDomainEvent) {
         match event {
             AgentDomainEvent::MessageComplete { message, usage } => {
                 let at_ms = message.created_at_ms;
@@ -874,7 +871,7 @@ impl Turn {
             .collect();
         let nudged = AgentDomainEvent::Nudged { at_ms };
         events.push(nudged);
-        let folded = Components::apply_all(state, &events);
+        let folded = AgentLoop::apply_all(state, &events);
         if folded.nudges() > MAX_RESULT_NUDGES {
             return CommandEffect::persist(events);
         }

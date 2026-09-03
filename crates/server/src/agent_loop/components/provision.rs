@@ -13,7 +13,6 @@
 
 use crate::agent_loop::prelude::*;
 use crate::agent_loop::shared::summarise::{COMPACT_AT_PERCENT, COMPACT_RETAIN_PERCENT};
-use async_trait::async_trait;
 use horsie_actor::CommandEffect;
 use horsie_agentcore::{CompactionBudget, Toolbox};
 use std::sync::Arc;
@@ -119,11 +118,8 @@ impl Provision {
     }
 }
 
-#[async_trait]
-impl Component for Provision {
-    type Command = ProvisionCommand;
-
-    async fn handle(
+impl Provision {
+    pub(crate) async fn handle(
         &mut self,
         cmd: ProvisionCommand,
         cx: &mut Cx<'_>,

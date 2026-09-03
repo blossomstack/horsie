@@ -19,11 +19,8 @@ use horsie_models::now_ms;
 /// Being a sub session, and being branched from.
 pub(crate) struct Seeding;
 
-#[async_trait::async_trait]
-impl Component for Seeding {
-    type Command = SeedCommand;
-
-    async fn handle(
+impl Seeding {
+    pub(crate) async fn handle(
         &mut self,
         cmd: SeedCommand,
         cx: &mut Cx<'_>,

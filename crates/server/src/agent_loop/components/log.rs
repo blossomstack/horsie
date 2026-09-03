@@ -14,7 +14,6 @@
 
 use crate::agent_loop::prelude::*;
 use crate::agent_loop::state::hook_entry;
-use async_trait::async_trait;
 use horsie_actor::CommandEffect;
 use horsie_agentcore::{AgentLogBody, LifecycleEvent};
 use horsie_models::now_ms;
@@ -54,11 +53,8 @@ pub(crate) fn runtime_readiness(event: &LifecycleEvent) -> Option<bool> {
 /// Things written into this agent's log by somebody else.
 pub(crate) struct LogWrites;
 
-#[async_trait]
-impl Component for LogWrites {
-    type Command = LogCommand;
-
-    async fn handle(
+impl LogWrites {
+    pub(crate) async fn handle(
         &mut self,
         cmd: LogCommand,
         cx: &mut Cx<'_>,
@@ -106,7 +102,7 @@ impl Component for LogWrites {
     // every variant to exactly one component, so an event added later fails to
     // compile *there* rather than silently reaching the wrong fold here.
     #[allow(clippy::wildcard_enum_match_arm)]
-    fn apply(state: &mut AgentState, event: AgentDomainEvent) {
+    pub(crate) fn apply(state: &mut AgentState, event: AgentDomainEvent) {
         match event {
             AgentDomainEvent::LifecycleRecorded { event, at_ms } => {
                 state.push(at_ms, AgentLogBody::Lifecycle(event));

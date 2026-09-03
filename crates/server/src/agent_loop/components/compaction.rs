@@ -216,11 +216,8 @@ impl Compaction {
     }
 }
 
-#[async_trait::async_trait]
-impl Component for Compaction {
-    type Command = CompactionCommand;
-
-    async fn handle(
+impl Compaction {
+    pub(crate) async fn handle(
         &mut self,
         cmd: CompactionCommand,
         cx: &mut Cx<'_>,
