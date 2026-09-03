@@ -1,40 +1,214 @@
-//! The actor-owned run-loop driver and its stateful tool components.
+//! Stateful tools owned by the agent.
 //!
-//! [`AgentLoop`] coordinates normal provider steps, initialization, connection,
-//! Stop hooks, compaction, seed summaries, incoming records, and reads. Those
-//! are phases or handlers, not components: their durable truth is the shared
-//! history and they own no independent state machine.
-//!
-//! Only [`timers`] and [`task_list`] are components. Each owns durable state,
-//! commands, events, recovery behavior, and a toolbox. Their states are the
-//! only variants of [`ComponentState`].
-//!
-//! Command and event routing remains exhaustive here so adding a variant must
-//! still be classified in one place.
+//! Timers and task lists are components because each has its own commands,
+//! events, durable state, recovery behavior, and toolbox. Run-loop phases do
+//! not live here.
 
-pub mod compaction;
-pub mod log;
-pub mod provision;
-pub mod queue;
-pub mod reads;
-pub mod seed;
 pub mod task_list;
 pub mod timers;
-pub mod turn;
 
 use crate::agent_loop::prelude::*;
+use async_trait::async_trait;
 use horsie_actor::CommandEffect;
 use serde::{Deserialize, Serialize};
 
-pub(crate) use compaction::Compaction;
-pub(crate) use log::LogWrites;
-pub(crate) use provision::Provision;
-pub(crate) use queue::Queue;
-pub(crate) use reads::Reads;
-pub(crate) use seed::Seeding;
 pub(crate) use task_list::{TaskListPart, TaskLists};
 pub(crate) use timers::{TimerState, Timers};
-pub(crate) use turn::Turn;
+
+/// One tool call on its way to the component that owns the tool.
+///
+/// Built by a vended [`ActorToolbox`] — the turn never
+/// constructs one and never learns the tool was special. Carries the work
+/// marker baked in at provisioning time, so a component never acts for a
+/// turn that has since been cancelled: the stale call is refused, and the
+/// cancel already repaired its dangling `tool_use`.
+pub struct RoutedToolCall {
+    pub tool_call_id: String,
+    pub name: String,
+    pub input: serde_json::Value,
+    /// Answers the toolbox's `execute`, exactly as any remote tool answers.
+    pub reply: horsie_actor::ReplyTo<Result<serde_json::Value, horsie_agentcore::ToolCallError>>,
+}
+
+/// A toolbox whose tools run on the actor's own mailbox.
+///
+/// The mechanism behind every toolbox a component vends — the timer toolbox,
+/// the task-list toolbox, whatever comes later. `execute` sends the call to
+/// the actor as a command — where the owning component runs it over current
+/// state and journals its own events — and waits for the answer. That makes
+/// such a tool indistinguishable from a remote one at every layer above:
+/// composed, filtered, dispatched, and answered on the same channel. The
+/// extra mailbox round-trip is the price of having exactly one path.
+pub(crate) struct ActorToolbox {
+    specs: Vec<horsie_agentcore::ToolSpec>,
+    /// Wraps the call in the owning component's command group.
+    wrap: fn(RoutedToolCall) -> AgentCommand,
+    actor: horsie_actor::ActorRef<AgentCommand>,
+}
+
+impl ActorToolbox {
+    pub(crate) fn new(
+        specs: Vec<horsie_agentcore::ToolSpec>,
+        wrap: fn(RoutedToolCall) -> AgentCommand,
+        actor: horsie_actor::ActorRef<AgentCommand>,
+    ) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self { specs, wrap, actor })
+    }
+}
+
+#[async_trait]
+impl horsie_agentcore::Toolbox for ActorToolbox {
+    fn specs(&self) -> Vec<horsie_agentcore::ToolSpec> {
+        self.specs.clone()
+    }
+
+    async fn execute(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+        tool_call_id: &str,
+    ) -> Result<horsie_agentcore::ToolOutcome, horsie_agentcore::ToolCallError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let call = RoutedToolCall {
+            tool_call_id: tool_call_id.to_string(),
+            name: name.to_string(),
+            input,
+            reply: horsie_actor::ReplyTo::from_sender(tx),
+        };
+        let _ = self.actor.tell((self.wrap)(call)).await;
+        match rx.await {
+            Ok(Ok(value)) => Ok(horsie_agentcore::ToolOutcome::Result(
+                horsie_agentcore::ToolValue {
+                    value,
+                    artifacts: Vec::new(),
+                },
+            )),
+            Ok(Err(e)) => Err(e),
+            // The actor died or refused the marker: either way the turn
+            // this call belongs to is over, and the fence drops the report.
+            Err(_) => Err(horsie_agentcore::ToolCallError::ExecutionFailed(
+                "the agent is no longer running this turn".to_string(),
+            )),
+        }
+    }
+}
+
+/// What each component state contributes when history is branched. The common
+/// case contributes nothing; timers and task-list state opt in explicitly.
+pub(crate) trait CarriedComponentState: Sized {
+    /// What this part contributes to a sub session branched from here, if
+    /// anything. Everything that is *about the session* carries; everything in
+    /// flight, or that is a bill, does not.
+    fn carried(&self) -> Option<Self> {
+        None
+    }
+}
+
+/// Reaching one component's state out of the list, typed.
+///
+/// Implemented centrally, once per variant, because the implementation only
+/// names the variant — never a field — so it cannot become a way in.
+pub(crate) trait ComponentSlot: Sized {
+    fn get(parts: &[ComponentState]) -> Option<&Self>;
+    fn get_mut(parts: &mut Vec<ComponentState>) -> Option<&mut Self>;
+}
+
+/// A component's executor for its routed tool calls: the value the call
+/// answers and the component's own events that record it. Pure over the state
+/// (plus whatever task it spawns, like a timer's sleep).
+pub(crate) type ToolExecutor =
+    fn(
+        &AgentState,
+        &str,
+        &serde_json::Value,
+        horsie_actor::ActorRef<AgentCommand>,
+    ) -> Result<(serde_json::Value, Vec<AgentDomainEvent>), horsie_agentcore::ToolCallError>;
+
+/// Execute a routed tool call — the shared shape of every component-owned
+/// tool.
+///
+/// The component runs the executor over current state, journals *its own*
+/// events, and replies the value to the toolbox that asked. The `ToolComplete`
+/// is not journaled here: the reply flows back through the toolbox to the same
+/// `ToolReturned` path every remote call takes, so the turn records both kinds
+/// identically and cannot tell them apart.
+///
+/// A call from a cancelled marker is refused without executing: the cancel
+/// already repaired its dangling `tool_use`, and acting now would leak a side
+/// effect. Dropping the reply is the refusal — the toolbox reads a dead
+/// channel as "this turn is over".
+pub(crate) async fn answer_tool_call(
+    call: RoutedToolCall,
+    cx: &mut CommandContext<'_>,
+    execute: ToolExecutor,
+) -> CommandEffect<AgentDomainEvent> {
+    let call_is_open = cx
+        .state
+        .open_tool_calls()
+        .iter()
+        .any(|id| id == &call.tool_call_id)
+        && cx
+            .state
+            .open_step()
+            .is_some_and(|(_, kind)| *kind == StepKind::Provider);
+    if !call_is_open {
+        tracing::warn!(tool = call.name, "refusing a routed call for a closed step");
+        return CommandEffect::none();
+    }
+    match execute(cx.state, &call.name, &call.input, cx.actor.self_ref()) {
+        Ok((value, events)) => {
+            let _ = call.reply.send(Ok(value));
+            CommandEffect::persist(events)
+        }
+        Err(e) => {
+            let _ = call.reply.send(Err(e));
+            CommandEffect::none()
+        }
+    }
+}
+
+/// The shape every component shares. `handle` decides — state in, effect out;
+/// the actor persists and folds. A component with no instance state still
+/// implements this so the actor treats every field the same way.
+#[async_trait]
+pub(crate) trait Component {
+    /// The command group routed to this component.
+    type Command;
+
+    /// Decide what `cmd` means. Reads whatever it likes through `cx`, writes
+    /// only by returning events (durable) or touching step_run (transient), and
+    /// reaches other components only by telling commands.
+    async fn handle(
+        &mut self,
+        cmd: Self::Command,
+        cx: &mut CommandContext<'_>,
+    ) -> CommandEffect<AgentDomainEvent>;
+
+    /// Fold one of this component's events into state.
+    ///
+    /// Must be pure — no I/O, no clock, no step_run. An associated function
+    /// rather than a method because replay happens before any component
+    /// instance exists.
+    fn apply(_state: &mut AgentState, _event: AgentDomainEvent) {}
+
+    /// Repair whatever a dead process left this component holding, once
+    /// recovery has finished and before the first live command is handled.
+    /// Nothing here persists; anything that needs to journal arrives as an
+    /// ordinary command.
+    async fn on_load(&mut self, _cx: &mut CommandContext<'_>) {}
+
+    /// The toolbox this component vends, if it has tools to offer.
+    ///
+    /// The actor collects these at provisioning time and composes them ahead
+    /// of the runtime's — the one place the whole tool surface is assembled.
+    /// Most components vend nothing.
+    fn toolbox(
+        &self,
+        _actor: horsie_actor::ActorRef<AgentCommand>,
+    ) -> Option<std::sync::Arc<dyn horsie_agentcore::Toolbox>> {
+        None
+    }
+}
 
 /// One component's durable state, tagged by the component that owns it.
 ///
@@ -57,7 +231,7 @@ pub enum ComponentState {
     TaskList(TaskListPart),
 }
 
-/// The `Part` implementations and the two polls, generated from one list so a
+/// The `ComponentSlot` implementations and the two polls, generated from one list so a
 /// variant added above cannot be forgotten in any of them.
 macro_rules! parts {
     ($($variant:ident($ty:ty)),+ $(,)?) => {
@@ -75,7 +249,7 @@ macro_rules! parts {
             vec![$(ComponentState::$variant(<$ty>::default()),)+]
         }
 
-        $(impl Part for $ty {
+        $(impl ComponentSlot for $ty {
             fn get(parts: &[ComponentState]) -> Option<&Self> {
                 parts.iter().find_map(|p| match p {
                     ComponentState::$variant(part) => Some(part),
@@ -99,158 +273,3 @@ macro_rules! parts {
 }
 
 parts!(Timers(TimerState), TaskList(TaskListPart));
-
-/// The actor's run-loop driver. Stateless handlers live beside the two real
-/// components so command routing, event folding, and the next-step decision
-/// remain one exhaustive unit rather than leaking into the actor shell.
-pub(crate) struct AgentLoop {
-    pub(crate) provision: Provision,
-    pub(crate) timers: Timers,
-    pub(crate) turn: Turn,
-    pub(crate) queue: Queue,
-    pub(crate) reads: Reads,
-    pub(crate) log: LogWrites,
-    pub(crate) seed: Seeding,
-    pub(crate) task_lists: TaskLists,
-    pub(crate) compaction: Compaction,
-}
-
-impl AgentLoop {
-    pub fn new() -> Self {
-        Self {
-            provision: Provision,
-            timers: Timers,
-            turn: Turn::default(),
-            queue: Queue::default(),
-            reads: Reads,
-            log: LogWrites,
-            seed: Seeding,
-            task_lists: TaskLists,
-            compaction: Compaction,
-        }
-    }
-
-    /// Route one command to the component that owns its group. Exhaustive:
-    /// a command group added later fails to compile here.
-    ///
-    /// `Core` is deliberately absent — the agent's own decisions are the
-    /// registry's, not any component's: see [`AgentLoop::advance`] and
-    /// [`AgentLoop::cancel`] in [`super::boundary`].
-    pub async fn handle(
-        &mut self,
-        cmd: AgentCommand,
-        cx: &mut Cx<'_>,
-    ) -> Option<CommandEffect<AgentDomainEvent>> {
-        Some(match cmd {
-            AgentCommand::Queue(c) => self.queue.handle(c, cx).await,
-            AgentCommand::Run(RunCommand::StopHookDone { marker_seq, result }) => {
-                self.stop_hook_returned(marker_seq, result, cx)
-            }
-            AgentCommand::Run(c) => self.turn.handle(c, cx).await,
-            AgentCommand::Timer(c) => self.timers.handle(c, cx).await,
-            AgentCommand::Read(c) => self.reads.handle(c, cx).await,
-            AgentCommand::Log(c) => self.log.handle(c, cx).await,
-            AgentCommand::Seed(c) => self.seed.handle(c, cx).await,
-            AgentCommand::TaskList(c) => self.task_lists.handle(c, cx).await,
-            AgentCommand::Provision(c) => self.provision.handle(c, cx).await,
-            AgentCommand::Compaction(c) => self.compaction.handle(c, cx).await,
-            AgentCommand::Core(CoreCommand::ToolReturned {
-                marker_seq,
-                tool_call_id,
-                outcome,
-            }) => {
-                self.tool_returned(marker_seq, tool_call_id, outcome, cx)
-                    .await
-            }
-            AgentCommand::Core(CoreCommand::Advance) => self.advance(cx).await,
-            AgentCommand::Core(CoreCommand::Cancel { ack }) => self.cancel(ack, cx).await,
-            AgentCommand::Core(CoreCommand::Shutdown) => return None,
-        })
-    }
-
-    /// Toolboxes vended by the two genuine stateful components. Provisioning
-    /// composes them ahead of runtime tools, so their names win collisions.
-    pub(crate) fn toolboxes(
-        &self,
-        actor: horsie_actor::ActorRef<AgentCommand>,
-    ) -> Vec<std::sync::Arc<dyn horsie_agentcore::Toolbox>> {
-        [
-            self.timers.toolbox(actor.clone()),
-            self.task_lists.toolbox(actor),
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
-    }
-
-    /// Ask each component, in registration order, to repair what a dead
-    /// process left it holding. Nothing here decides what happens next: the
-    /// actor advances once, afterwards, over the repaired state.
-    pub async fn on_load(&mut self, cx: &mut Cx<'_>) {
-        self.timers.on_load(cx).await;
-    }
-}
-
-impl AgentLoop {
-    /// The event-side twin of [`AgentLoop::handle`]: route each event to the
-    /// component that owns it. Exhaustive the same way — an event added later
-    /// fails to compile here, where it has to be classified.
-    ///
-    /// The one shared state-transition function: live handling, replay and
-    /// every component's own fold-forward all go through here, so they cannot
-    /// disagree. Associated rather than `&mut self` because a fold is pure and
-    /// replay must not depend on which components an agent was instantiated
-    /// with: any journal ever written stays readable, whatever a future spec
-    /// chooses to run.
-    pub fn apply(mut state: AgentState, event: AgentDomainEvent) -> AgentState {
-        // `Seeded` carries a whole `AgentState`; storing that event inside the
-        // state it installs would recursively duplicate the source snapshot.
-        // The adopted history is already the durable account.
-        let history_record =
-            (!matches!(&event, AgentDomainEvent::Seeded { .. })).then(|| event.clone());
-        match event {
-            e @ (AgentDomainEvent::Seeded { .. } | AgentDomainEvent::SeedSummaryTaken { .. }) => {
-                Seeding::apply(&mut state, e)
-            }
-            e @ (AgentDomainEvent::InputMessage { .. }
-            | AgentDomainEvent::Received { .. }
-            | AgentDomainEvent::Consumed { .. }
-            | AgentDomainEvent::TurnBegan { .. }
-            | AgentDomainEvent::AskRecorded { .. }
-            | AgentDomainEvent::Parked { .. }) => Queue::apply(&mut state, e),
-            e @ (AgentDomainEvent::MessageComplete { .. }
-            | AgentDomainEvent::MessageAborted { .. }
-            | AgentDomainEvent::ToolComplete { .. }
-            | AgentDomainEvent::RunComplete { .. }
-            | AgentDomainEvent::RunAborted { .. }
-            | AgentDomainEvent::RunCancelled { .. }
-            | AgentDomainEvent::Nudged { .. }) => Turn::apply(&mut state, e),
-            e @ (AgentDomainEvent::HookRan { .. } | AgentDomainEvent::LifecycleRecorded { .. }) => {
-                LogWrites::apply(&mut state, e)
-            }
-            e @ AgentDomainEvent::Compacted { .. } => Compaction::apply(&mut state, e),
-            e @ (AgentDomainEvent::TimerArmed { .. }
-            | AgentDomainEvent::TimerCancelled { .. }
-            | AgentDomainEvent::TimerFired { .. }) => Timers::apply(&mut state, e),
-            e @ AgentDomainEvent::TaskListChanged { .. } => TaskLists::apply(&mut state, e),
-            AgentDomainEvent::SystemPromptRecorded { .. }
-            | AgentDomainEvent::AgentInitialized { .. }
-            | AgentDomainEvent::ConnectionCompleted
-            | AgentDomainEvent::StepStarted { .. }
-            | AgentDomainEvent::StepFailed { .. }
-            | AgentDomainEvent::StopHookCompleted { .. }
-            | AgentDomainEvent::RunEnded { .. } => {}
-        }
-        if let Some(history_record) = history_record {
-            state.record_history(history_record);
-        }
-        state
-    }
-
-    /// Fold several events forward over a snapshot — what a handler does to
-    /// see the state its own events leave behind before deciding what comes
-    /// next.
-    pub fn apply_all(state: &AgentState, events: &[AgentDomainEvent]) -> AgentState {
-        events.iter().cloned().fold(state.clone(), Self::apply)
-    }
-}

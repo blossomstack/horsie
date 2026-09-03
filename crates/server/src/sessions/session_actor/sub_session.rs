@@ -21,7 +21,7 @@ use super::{
 };
 use crate::agent_loop::{AgentCommand, AgentState, Incoming};
 use crate::agent_loop::{
-    QueueCommand as AgentQueueCommand, ReadCommand as AgentReadCommand,
+    IncomingCommand as AgentIncomingCommand, QueryCommand as AgentQueryCommand,
     SeedCommand as AgentSeedCommand,
 };
 use crate::sessions::addressing::SessionInbox;
@@ -445,7 +445,7 @@ impl SessionActor {
     ) -> Option<u64> {
         let agent = self.sub_session_source(state, ctx, parent)?;
         agent
-            .ask(|reply| AgentCommand::Read(AgentReadCommand::LogHead { reply }))
+            .ask(|reply| AgentCommand::Query(AgentQueryCommand::LogHead { reply }))
             .await
             .ok()
     }
@@ -506,7 +506,7 @@ impl SessionActor {
         };
         tokio::spawn(async move {
             let _ = source
-                .tell(AgentCommand::Queue(AgentQueueCommand::Enqueue {
+                .tell(AgentCommand::Incoming(AgentIncomingCommand::Receive {
                     item: Incoming::SubSession {
                         id: format!("sub_session-summarise:{id}"),
                         sub_session: id,

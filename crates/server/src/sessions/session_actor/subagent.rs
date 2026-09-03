@@ -16,7 +16,7 @@ use super::{
     AgentAction, AgentKey, AgentPlan, CommandEffect, SessionActor, SessionCommand,
     SessionDomainEvent, SessionState, SubAgentCommand, TurnEnd,
 };
-use crate::agent_loop::QueueCommand as AgentQueueCommand;
+use crate::agent_loop::IncomingCommand as AgentIncomingCommand;
 use crate::agent_loop::{AgentCommand, Incoming};
 use crate::sessions::addressing::SessionInbox;
 use crate::sessions::run_forest::{INTERRUPTED_ERROR, MAX_DEPTH};
@@ -119,7 +119,7 @@ impl SubAgents {
                 // flight. Queued rather than run directly so a subagent has one
                 // way in, whatever is addressed to it.
                 let _ = agent
-                    .tell(AgentCommand::Queue(AgentQueueCommand::Enqueue {
+                    .tell(AgentCommand::Incoming(AgentIncomingCommand::Receive {
                         item: Incoming::User {
                             id: format!("task:{id}"),
                             text: task,

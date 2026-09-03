@@ -15,8 +15,8 @@ use super::{
 use crate::agent_loop::AgentCommand;
 use crate::agent_loop::{AgentOutcome, AgentOutcomeSink, Incoming};
 use crate::agent_loop::{
-    CoreCommand as AgentCoreCommand, LogCommand as AgentLogCommand,
-    QueueCommand as AgentQueueCommand,
+    CoreCommand as AgentCoreCommand, HistoryCommand as AgentHistoryCommand,
+    IncomingCommand as AgentIncomingCommand,
 };
 use crate::sessions::addressing::{SessionInbox, SessionRef};
 use crate::sessions::run_forest::{SubAgentStatus, TurnPhase};
@@ -269,7 +269,9 @@ impl HookRouting {
                 if let Some(agent) = actor.agents.get(key) {
                     let _ = agent
                         .actor
-                        .tell(AgentCommand::Log(AgentLogCommand::HooksRan { records }))
+                        .tell(AgentCommand::History(AgentHistoryCommand::HooksRan {
+                            records,
+                        }))
                         .await;
                 }
                 CommandEffect::none()
@@ -341,7 +343,7 @@ impl HookRouting {
                 if let Some(agent) = actor.agents.get(key) {
                     let _ = agent
                         .actor
-                        .tell(AgentCommand::Queue(AgentQueueCommand::Enqueue {
+                        .tell(AgentCommand::Incoming(AgentIncomingCommand::Receive {
                             item: Incoming::Continue {
                                 id: uuid::Uuid::new_v4().to_string(),
                                 reason,

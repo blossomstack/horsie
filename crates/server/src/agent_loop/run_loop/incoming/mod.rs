@@ -1,18 +1,18 @@
-//! The queue component: what this agent has accepted, and how it becomes the
-//! next input.
+//! Durable incoming records and their conversion into the next provider input.
 //!
-//! An accepted message is a promise: it is journaled *before* anything is done
-//! with it, so a crash cannot forget it and the ack a caller waits on reports
-//! the durable write rather than a mailbox. Whether it is taken, and when, is
-//! [`AgentLoop::advance`](super::boundary)'s decision — this component only
-//! offers ([`crate::agent_loop::queued_offer`]) and takes.
+//! Acceptance journals `Received` before acknowledging the sender. Ordering,
+//! consumption, and pending asks are derived from history; there is no queue
+//! state. [`RunLoop::advance`] alone decides when the next offer is consumed.
 //!
-//! Taking a turn's input is a *write*: the items it consumes are crossed off
-//! and the input message is journaled here rather than by whatever runs next,
-//! so a provider retry can never double-persist it. Nothing is started from
-//! this file.
+//! Consuming an offer journals both `Consumed` and the exact provider input,
+//! so retries and recovery cannot insert it twice.
 
-pub mod inbox;
+mod pending;
+
+pub use pending::{
+    ABANDONED_ASK_RESULT, AnswerError, AskAnswer, Incoming, MERGE_SEPARATOR, PendingInput,
+    TurnInput, answered_input, next_input,
+};
 
 use crate::agent_loop::prelude::*;
 use horsie_actor::CommandEffect;
@@ -21,38 +21,31 @@ use horsie_agentcore::{
 };
 use horsie_models::now_ms;
 /// Accepts incoming records and prepares the next normal agent step.
-/// Durable queue and ask state are derived from history; this helper owns only
-/// whether this actor incarnation has fired its load-time start hook.
+/// Pending input and asks are derived from history; this handler owns no state
+/// of its own.
 #[derive(Default)]
-pub(crate) struct Queue {
-    /// Whether this agent load has fired its start hook. Deliberately **not**
-    /// journaled — a rehydrated agent fires again, which is precisely what
-    /// `source: "resume"` means.
-    start_hook_fired: bool,
-}
+pub(crate) struct IncomingHandler;
 
-impl Queue {
+impl IncomingHandler {
     /// Take this input: cross off what it consumes, journal what the model
     /// will read, and run the turn's pre-start hooks if any are owed.
     ///
     /// `TurnBegan` is journaled here, at the decision, rather than after the
-    /// hooks: a crash in the hook window replays with the queue still owed,
+    /// hooks: a crash in the hook window replays with the input still pending,
     /// which redelivers the message — the same at-least-once the session's
     /// tell-then-persist has always had, and the direction to err in.
     pub(crate) async fn take(
-        &mut self,
-        turn: crate::agent_loop::Turn,
-        cx: &mut Cx<'_>,
+        turn: crate::agent_loop::TurnInput,
+        cx: &mut CommandContext<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
         let state = cx.state.clone();
-        CommandEffect::persist(self.begin_turn(turn, &state, cx).await)
+        CommandEffect::persist(Self::begin_turn(turn, &state, cx).await)
     }
 
     async fn begin_turn(
-        &mut self,
-        turn: crate::agent_loop::Turn,
+        turn: crate::agent_loop::TurnInput,
         state: &AgentState,
-        cx: &mut Cx<'_>,
+        cx: &mut CommandContext<'_>,
     ) -> Vec<AgentDomainEvent> {
         let marker_seq = state.next_history_seq().saturating_add(1);
         let mut events = vec![
@@ -62,15 +55,15 @@ impl Queue {
                 at_ms: now_ms(),
             },
             AgentDomainEvent::StepStarted {
-                kind: StepKind::Agent,
+                kind: StepKind::Provider,
             },
         ];
         let start = crate::agent_loop::StartTurn {
             // An agent that has never spoken to a provider is starting up;
             // anything else was folded from a journal. Read off the *LLM*
-            // entries rather than the log, which a queued message alone already
+            // entries rather than the log, which a received message already
             // appends to.
-            start_source: (!self.start_hook_fired).then_some(match state.has_run() {
+            start_source: (!cx.step_run.start_hooks_ran()).then_some(match state.has_run() {
                 false => horsie_models::runtime::SessionStartSource::Startup,
                 true => horsie_models::runtime::SessionStartSource::Resume,
             }),
@@ -79,12 +72,12 @@ impl Queue {
         let nothing_due = start.start_source.is_none() && start.prompt.is_none();
         if nothing_due || !cx.runtime.context_provider.has_start_hooks() {
             events.extend(
-                self.start_prepared(
-                    PreparedStart {
+                Self::start_prepared(
+                    PreparedInput {
                         marker_seq,
-                        turn,
+                        input: turn,
                         records: Vec::new(),
-                        abandon: None,
+                        rejection: None,
                     },
                     state,
                     cx,
@@ -93,11 +86,11 @@ impl Queue {
             );
             return events;
         }
-        let cancel = cx.step_run.begin(StepPhase::StartHooks, marker_seq);
+        let cancel = cx.step_run.begin_start_hooks(marker_seq);
         // Set when the prepare task is *spawned*, not when it returns: a
         // failed prepare must not re-fire the start hook on the next turn,
         // which would inject its context a second time.
-        self.start_hook_fired = true;
+        cx.step_run.mark_start_hooks_ran();
         let provider = cx.runtime.context_provider.clone();
         let self_ref = cx.actor.self_ref();
         tokio::spawn(async move {
@@ -107,59 +100,58 @@ impl Queue {
                 outcome = provider.start_hooks(start) => outcome,
             };
             let prepared = match outcome {
-                Ok(prep) => PreparedStart {
+                Ok(prep) => PreparedInput {
                     marker_seq,
-                    abandon: crate::agent_loop::start_blocked(&prep.records)
-                        .map(AbandonedStart::Blocked),
+                    rejection: crate::agent_loop::start_blocked(&prep.records)
+                        .map(RejectedInput::Blocked),
                     records: prep.records,
                     // A rewritten prompt replaces the turn's input; an absent
                     // one leaves what the user actually sent.
-                    turn: crate::agent_loop::Turn {
+                    input: crate::agent_loop::TurnInput {
                         message: prep.message.or(turn.message),
                         ..turn
                     },
                 },
-                Err(error) => PreparedStart {
+                Err(error) => PreparedInput {
                     marker_seq,
-                    turn,
+                    input: turn,
                     records: Vec::new(),
-                    abandon: Some(AbandonedStart::Failed(error)),
+                    rejection: Some(RejectedInput::Failed(error)),
                 },
             };
             let _ = self_ref
-                .tell(AgentCommand::Queue(QueueCommand::StartPrepared(Box::new(
-                    prepared,
-                ))))
+                .tell(AgentCommand::Incoming(IncomingCommand::InputPrepared(
+                    Box::new(prepared),
+                )))
                 .await;
         });
         events
     }
 
-    /// Journal a prepared turn's hook records, then commit it — or abandon it.
+    /// Journal a prepared turn's hook records, then commit it — or rejection it.
     ///
     /// The records are folded into a local copy of state before the prompt is
     /// read, which is the whole point of the prepare step: `state` here is the
     /// pre-command snapshot, and a `SessionStart` record that is not folded in
     /// first would first reach the model on the *next* turn.
     async fn start_prepared(
-        &mut self,
-        prepared: PreparedStart,
+        prepared: PreparedInput,
         state: &AgentState,
-        _cx: &mut Cx<'_>,
+        _cx: &mut CommandContext<'_>,
     ) -> Vec<AgentDomainEvent> {
-        let PreparedStart {
-            turn,
+        let PreparedInput {
+            input,
             records,
-            abandon,
+            rejection,
             ..
         } = prepared;
-        let crate::agent_loop::Turn {
+        let crate::agent_loop::TurnInput {
             message,
             artifacts,
             subagent_results,
             results,
             ..
-        } = turn;
+        } = input;
 
         let at_ms = now_ms();
         let mut events = Vec::new();
@@ -167,21 +159,21 @@ impl Queue {
             events.push(AgentDomainEvent::HookRan { record, seq, at_ms });
         }
 
-        if let Some(abandon) = abandon {
+        if let Some(rejection) = rejection {
             // A preparation failure is reported exactly as the same failure
             // coming out of `provide` would be — `terminal` above all, which is
             // what tells the session its sandbox is gone for good rather than
             // merely unreachable. A refusal is neither: the prompt was read and
             // rejected, so retrying it unchanged would be rejected again.
-            let (error, recoverable, terminal) = match abandon {
-                AbandonedStart::Blocked(reason) => (reason, false, false),
-                AbandonedStart::Failed(e) => (e.message, true, e.terminal),
+            let (error, recoverable, terminal) = match rejection {
+                RejectedInput::Blocked(reason) => (reason, false, false),
+                RejectedInput::Failed(e) => (e.message, true, e.terminal),
             };
             events.extend([
                 AgentDomainEvent::StepFailed {
                     reason: StepFailure::Provider(error.clone()),
                 },
-                AgentDomainEvent::RunCancelled { at_ms },
+                AgentDomainEvent::TurnCancelled { at_ms },
                 AgentDomainEvent::RunEnded {
                     reason: RunEnd::Failed {
                         error,
@@ -218,17 +210,16 @@ impl Queue {
     }
 }
 
-impl Queue {
+impl IncomingHandler {
     pub(crate) async fn handle(
-        &mut self,
-        cmd: QueueCommand,
-        cx: &mut Cx<'_>,
+        cmd: IncomingCommand,
+        cx: &mut CommandContext<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
         match cmd {
-            QueueCommand::Enqueue { item, ack } => {
+            IncomingCommand::Receive { item, ack } => {
                 // Nothing is decided here. The write is the whole job, and the
                 // advance the actor makes once it is durable is what looks at
-                // a queue that now holds this item.
+                // history that now contains this item.
                 let effect = CommandEffect::persist(vec![AgentDomainEvent::Received {
                     item,
                     at_ms: now_ms(),
@@ -238,7 +229,7 @@ impl Queue {
                     None => effect,
                 }
             }
-            QueueCommand::Answer { answers, reply } => {
+            IncomingCommand::Answer { answers, reply } => {
                 // Work in flight means the questions are already gone — a turn
                 // beginning is what clears them — so there is nothing to
                 // answer.
@@ -249,10 +240,10 @@ impl Queue {
                 }
                 let state = cx.state.clone();
                 let incoming = state.pending_incoming();
-                match crate::agent_loop::answered_turn(&incoming, &asks, answers) {
+                match crate::agent_loop::answered_input(&incoming, &asks, answers) {
                     Ok(turn) => {
                         let _ = reply.send(Ok(()));
-                        CommandEffect::persist(self.begin_turn(turn, &state, cx).await)
+                        CommandEffect::persist(Self::begin_turn(turn, &state, cx).await)
                     }
                     Err(e) => {
                         let _ = reply.send(Err(e));
@@ -260,26 +251,18 @@ impl Queue {
                     }
                 }
             }
-            QueueCommand::StartPrepared(prepared) => {
-                if !cx.step_run.finished(prepared.marker_seq) {
+            IncomingCommand::InputPrepared(prepared) => {
+                if !cx.step_run.finish_start_hooks(prepared.marker_seq) {
                     return CommandEffect::none();
                 }
                 let state = cx.state.clone();
-                CommandEffect::persist(self.start_prepared(*prepared, &state, cx).await)
+                CommandEffect::persist(Self::start_prepared(*prepared, &state, cx).await)
             }
         }
     }
 
-    /// What the queue holds, what a turn took from it, and what it parked on.
-    ///
-    /// Two of these arms move the *turn's* flag. They do it by calling that
-    /// component's own method, never by touching its fields: taking input is
-    /// what makes a turn owed, and parking is what ends one, so the decision
-    /// belongs here even though the flag does not.
-    // The fallthrough is unreachable by construction: `AgentLoop::apply`
-    // routes every variant to exactly one component, so an event added later
-    // fails to compile *there* — where it should be classified — rather than
-    // silently reaching the wrong fold here.
+    /// Fold accepted input, consumption, and parked questions into read
+    /// projections. `RunLoop::apply` already restricts which events arrive.
     #[allow(clippy::wildcard_enum_match_arm)]
     pub(crate) fn apply(state: &mut AgentState, event: AgentDomainEvent) {
         match event {

@@ -1,15 +1,9 @@
-//! The provision component: the runtime and context setup every kind of work
-//! shares.
+//! Initialization and reconnection, each as a fenced foreground step.
 //!
-//! Rehydrating a suspended runtime, reconnecting MCP, scanning the workspace
-//! and composing the toolbox all cross a process boundary, so the work runs on
-//! a spawned task — the most hang-prone stretch of anything this agent does,
-//! and the reason it selects on the cancel token. The finished [`TurnCtx`] is
-//! published to the step_run, where a turn, a compaction and a summary all read
-//! the same one.
-//!
-//! Nobody asks for this. The boundary starts it when the contexts it needs are
-//! stale, and the work that follows never learns it happened.
+//! Initialization provisions the agent, scans the workspace, composes the
+//! immutable system prompt, and returns a durable manifest. Reconnection uses
+//! that manifest to rebuild live runtime and MCP clients without repeating
+//! semantic initialization.
 
 use crate::agent_loop::prelude::*;
 use crate::agent_loop::shared::summarise::{COMPACT_AT_PERCENT, COMPACT_RETAIN_PERCENT};
@@ -18,26 +12,41 @@ use horsie_agentcore::{CompactionBudget, Toolbox};
 use std::sync::Arc;
 
 /// The runtime and context setup every kind of work shares.
-pub(crate) struct Provision;
+pub(crate) struct ContextStep;
 
-impl Provision {
-    /// Build this agent's contexts on a spawned task. `vended` is every
-    /// toolbox the actor collected from its stateful components.
-    pub(crate) fn start(
-        &mut self,
+#[derive(Clone, Copy)]
+enum ContextMode {
+    Initialize,
+    Reconnect,
+}
+
+impl ContextStep {
+    pub(crate) fn initialize(
         marker_seq: u64,
-        initializing: bool,
-        vended: Vec<Arc<dyn Toolbox>>,
-        cx: &mut Cx<'_>,
+        toolboxes: Vec<Arc<dyn Toolbox>>,
+        cx: &mut CommandContext<'_>,
     ) {
-        let cancel = cx.step_run.begin(
-            if initializing {
-                StepPhase::Initialize
-            } else {
-                StepPhase::Connect
-            },
-            marker_seq,
-        );
+        Self::start(ContextMode::Initialize, marker_seq, toolboxes, cx);
+    }
+
+    pub(crate) fn reconnect(
+        marker_seq: u64,
+        toolboxes: Vec<Arc<dyn Toolbox>>,
+        cx: &mut CommandContext<'_>,
+    ) {
+        Self::start(ContextMode::Reconnect, marker_seq, toolboxes, cx);
+    }
+
+    fn start(
+        mode: ContextMode,
+        marker_seq: u64,
+        vended: Vec<Arc<dyn Toolbox>>,
+        cx: &mut CommandContext<'_>,
+    ) {
+        let cancel = match mode {
+            ContextMode::Initialize => cx.step_run.begin_initialization(marker_seq),
+            ContextMode::Reconnect => cx.step_run.begin_connection(marker_seq),
+        };
         let self_ref = cx.actor.self_ref();
         let context_provider = cx.runtime.context_provider.clone();
         let configured_prompt = cx.params.system_prompt.clone();
@@ -53,14 +62,14 @@ impl Provision {
                 biased;
                 () = cancel.cancelled() => return,
                 provided = async {
-                    if initializing {
-                        context_provider.provide().await
-                    } else if let Some(manifest) = &manifest {
-                        context_provider.reconnect(manifest).await
-                    } else {
-                        Err(crate::agent_loop::ContextError::terminal(
-                            "initialized agent has no durable context manifest",
-                        ))
+                    match mode {
+                        ContextMode::Initialize => context_provider.provide().await,
+                        ContextMode::Reconnect => match &manifest {
+                            Some(manifest) => context_provider.reconnect(manifest).await,
+                            None => Err(crate::agent_loop::ContextError::terminal(
+                                "initialized agent has no durable context manifest",
+                            )),
+                        },
                     }
                 } => provided,
             };
@@ -84,7 +93,7 @@ impl Provision {
                     }
                 };
                 let specs = toolbox.specs();
-                Box::new(TurnCtx {
+                Box::new(ExecutionContext {
                     provider: contexts.provider,
                     manifest: contexts.manifest,
                     toolbox,
@@ -105,61 +114,70 @@ impl Provision {
                     context_provider,
                 })
             });
-            let _ = self_ref
-                .tell(AgentCommand::Provision(ProvisionCommand::Provided(
-                    Box::new(ProvidedOutcome {
-                        marker_seq,
-                        initializing,
-                        outcome,
-                    }),
-                )))
-                .await;
+            let ready = Box::new(ContextReady {
+                marker_seq,
+                outcome,
+            });
+            let command = match mode {
+                ContextMode::Initialize => ContextCommand::InitializationReady(ready),
+                ContextMode::Reconnect => ContextCommand::ConnectionReady(ready),
+            };
+            let _ = self_ref.tell(AgentCommand::Context(command)).await;
         });
     }
 }
 
-impl Provision {
+impl ContextStep {
     pub(crate) async fn handle(
-        &mut self,
-        cmd: ProvisionCommand,
-        cx: &mut Cx<'_>,
+        cmd: ContextCommand,
+        cx: &mut CommandContext<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
-        let ProvisionCommand::Provided(provided) = cmd;
-        let ProvidedOutcome {
+        let (mode, ready) = match cmd {
+            ContextCommand::InitializationReady(ready) => (ContextMode::Initialize, ready),
+            ContextCommand::ConnectionReady(ready) => (ContextMode::Reconnect, ready),
+        };
+        let ContextReady {
             marker_seq,
-            initializing,
             outcome,
-        } = *provided;
+        } = *ready;
         let marker_is_open = cx.state.open_step().is_some_and(|(seq, kind)| {
             seq == marker_seq
                 && matches!(
-                    (kind, initializing),
-                    (StepKind::Initialize, true) | (StepKind::Connect, false)
+                    (kind, mode),
+                    (StepKind::Initialize, ContextMode::Initialize)
+                        | (StepKind::Connect, ContextMode::Reconnect)
                 )
         });
-        if !marker_is_open || !cx.step_run.finished(marker_seq) {
+        let live_step_finished = match mode {
+            ContextMode::Initialize => cx.step_run.finish_initialization(marker_seq),
+            ContextMode::Reconnect => cx.step_run.finish_connection(marker_seq),
+        };
+        if !marker_is_open || !live_step_finished {
             return CommandEffect::none();
         }
         match outcome {
-            Ok(mut turn_ctx) => {
-                let events = if initializing {
-                    let mut events = Vec::new();
-                    if !turn_ctx.system_prompt.is_empty() {
-                        events.push(AgentDomainEvent::SystemPromptRecorded {
-                            source: SystemPromptSource::InitialContext,
-                            content: turn_ctx.system_prompt.clone(),
+            Ok(mut execution_context) => {
+                let events = match mode {
+                    ContextMode::Initialize => {
+                        let mut events = Vec::new();
+                        if !execution_context.system_prompt.is_empty() {
+                            events.push(AgentDomainEvent::SystemPromptRecorded {
+                                source: SystemPromptSource::InitialContext,
+                                content: execution_context.system_prompt.clone(),
+                            });
+                        }
+                        events.push(AgentDomainEvent::AgentInitialized {
+                            manifest: execution_context.manifest.clone(),
                         });
+                        events
                     }
-                    events.push(AgentDomainEvent::AgentInitialized {
-                        manifest: turn_ctx.manifest.clone(),
-                    });
-                    events
-                } else {
-                    turn_ctx.system_prompt = cx.state.system_prompt();
-                    vec![AgentDomainEvent::ConnectionCompleted]
+                    ContextMode::Reconnect => {
+                        execution_context.system_prompt = cx.state.system_prompt();
+                        vec![AgentDomainEvent::ConnectionCompleted]
+                    }
                 };
-                cx.step_run.ctx = Some(std::sync::Arc::new(*turn_ctx));
-                cx.step_run.ctx_stale = false;
+                cx.step_run.execution = Some(std::sync::Arc::new(*execution_context));
+                cx.step_run.reconnect_required = false;
                 CommandEffect::persist(events)
             }
             Err(error) => {

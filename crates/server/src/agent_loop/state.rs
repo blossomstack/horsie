@@ -1,30 +1,19 @@
-//! The transcript, and every component's own durable state.
+//! Durable state derived from one chronological agent history.
 //!
-//! [`AgentState`] holds two things and no third. The [`Transcript`] is shared
-//! by construction — it is the one ordered thing a client reads, and nearly
-//! every component appends to it. Everything else belongs to exactly one
-//! component and lives behind [`ComponentState`], a list rather than a set of
-//! named fields so that adding a component adds an entry rather than editing
-//! this file.
+//! [`AgentState`] keeps the append-only domain records plus deterministic read
+//! projections: the user-facing transcript, cumulative usage, and context size.
+//! Pending input, asks, open steps, run identity, and unresolved tool calls are
+//! computed from the same history rather than stored again.
 //!
-//! A component reaches its own state with [`AgentState::part`], which is typed:
-//! there is no downcast that can fail. It reaches nobody else's *fields* at
-//! all — each state's fields are private to the file that owns them, so the
-//! compiler, not a convention, is what stops one component reading another's
-//! internals. What others may know is whatever methods that file chooses to
-//! offer, and [`AgentState`]'s own accessors are those methods forwarded.
-//!
-//! This is a durability contract: it is snapshotted, and the parts are tagged
-//! by `kind`. A tag this build does not know is skipped with a warning rather
-//! than failing the load, so removing a component cannot make an old snapshot
-//! unreadable.
+//! Timers and task lists are the only independent durable components. Their
+//! tagged states live in [`ComponentState`] so either component can evolve its
+//! own state machine without widening the run loop.
 
 use crate::agent_loop::prelude::*;
 use horsie_agentcore::{AgentLogBody, AgentLogEntry, Usage};
 use serde::{Deserialize, Serialize};
 
-/// The transcript and the component states folding an agent's events leaves
-/// behind.
+/// The result of folding an agent's durable history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentState {
     /// The sole chronological durable account. The transcript below is a
@@ -80,8 +69,7 @@ where
         .collect())
 }
 
-/// The one thing every component writes to: the ordered log, and the next
-/// sequence number to hand out.
+/// The ordered user-facing projection of history and its next sequence.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Transcript {
@@ -149,18 +137,18 @@ impl Transcript {
 impl AgentState {
     /// This component's own state, or `None` if it has never had any.
     ///
-    /// Typed by the caller: `state.part::<TimerState>()`. No downcast, and no
-    /// way to name a part that does not exist.
+    /// Typed by the caller: `state.component_state::<TimerState>()`. There is
+    /// no downcast and no way to name an unregistered component state.
     #[must_use]
-    pub(crate) fn part<T: Part>(&self) -> Option<&T> {
+    pub(crate) fn component_state<T: ComponentSlot>(&self) -> Option<&T> {
         T::get(&self.parts)
     }
 
     /// This component's own state, created empty the first time it is asked
-    /// for. `None` is unreachable — the part is inserted just above — and the
+    /// for. `None` is unreachable — the state is inserted just above — and
     /// callers treat it as "nothing to do" rather than panicking, because a
     /// fold must never take the process down.
-    pub(crate) fn part_mut<T: Part>(&mut self) -> Option<&mut T> {
+    pub(crate) fn component_state_mut<T: ComponentSlot>(&mut self) -> Option<&mut T> {
         T::get_mut(&mut self.parts)
     }
 
@@ -371,7 +359,7 @@ impl AgentState {
             matches!(
                 &entry.record,
                 AgentDomainEvent::StepStarted {
-                    kind: StepKind::Agent,
+                    kind: StepKind::Provider,
                 }
             )
             .then_some(entry.seq)
@@ -396,7 +384,7 @@ impl AgentState {
                 matches!(
                     &entry.record,
                     AgentDomainEvent::StepStarted {
-                        kind: StepKind::Agent,
+                        kind: StepKind::Provider,
                     }
                 )
                 .then_some(entry.seq)
@@ -695,10 +683,10 @@ impl AgentState {
 
     /// The next history-backed offer, if one can run now.
     #[must_use]
-    pub fn queued_offer(&self) -> Option<crate::agent_loop::Offer> {
+    pub fn next_input(&self) -> Option<crate::agent_loop::PendingInput> {
         let incoming = self.pending_incoming();
         let asks = self.pending_asks();
-        crate::agent_loop::queued_offer(&incoming, &asks)
+        crate::agent_loop::next_input(&incoming, &asks)
     }
 
     /// Whether the latest durable boundary parked on background work.
@@ -720,7 +708,7 @@ impl AgentState {
                 AgentDomainEvent::InputMessage { .. }
                     | AgentDomainEvent::TurnBegan { .. }
                     | AgentDomainEvent::StepStarted {
-                        kind: StepKind::Agent,
+                        kind: StepKind::Provider,
                     }
             ) {
                 parked = false;
@@ -738,9 +726,9 @@ impl AgentState {
                 running = true;
             } else if matches!(
                 &entry.record,
-                AgentDomainEvent::RunComplete { .. }
-                    | AgentDomainEvent::RunAborted { .. }
-                    | AgentDomainEvent::RunCancelled { .. }
+                AgentDomainEvent::TurnCompleted { .. }
+                    | AgentDomainEvent::TurnAborted { .. }
+                    | AgentDomainEvent::TurnCancelled { .. }
                     | AgentDomainEvent::AskRecorded { .. }
                     | AgentDomainEvent::Parked { .. }
                     | AgentDomainEvent::RunEnded { .. }
@@ -775,13 +763,14 @@ impl AgentState {
     /// Active timers, durable so they re-arm on recovery.
     #[must_use]
     pub fn timers(&self) -> &[crate::agent_loop::components::timers::domain::TimerRecord] {
-        self.part::<TimerState>().map_or(&[], TimerState::records)
+        self.component_state::<TimerState>()
+            .map_or(&[], TimerState::records)
     }
 
     /// The agent's own task list.
     #[must_use]
     pub fn task_list(&self) -> &crate::agent_loop::components::task_list::domain::TaskListState {
-        match self.part::<TaskListPart>() {
+        match self.component_state::<TaskListPart>() {
             Some(part) => part.list(),
             None => crate::agent_loop::components::task_list::empty_list(),
         }
@@ -946,8 +935,8 @@ mod history_tests {
         assert_eq!(state.pending_incoming(), vec![incoming("two", "second")]);
         assert!(state.turn_in_flight());
         assert!(matches!(
-            state.queued_offer(),
-            Some(crate::agent_loop::Offer::Input(_))
+            state.next_input(),
+            Some(crate::agent_loop::PendingInput::Input(_))
         ));
     }
 
@@ -979,10 +968,10 @@ mod history_tests {
         let state = fold(
             AgentActor::initial_state(),
             AgentDomainEvent::StepStarted {
-                kind: StepKind::Agent,
+                kind: StepKind::Provider,
             },
         );
-        assert_eq!(state.open_step(), Some((0, &StepKind::Agent)));
+        assert_eq!(state.open_step(), Some((0, &StepKind::Provider)));
         assert_eq!(state.next_history_seq(), 1);
     }
 
@@ -997,7 +986,7 @@ mod history_tests {
                 manifest: ContextManifest::default(),
             },
             AgentDomainEvent::StepStarted {
-                kind: StepKind::Agent,
+                kind: StepKind::Provider,
             },
             AgentDomainEvent::InputMessage {
                 message: Message::user("u", "later", 1),

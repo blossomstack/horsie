@@ -53,8 +53,8 @@ use crate::agent_loop::{
     AgentActor, AgentCommand, AgentOutcome, AgentParams, AgentRunDef, AgentRuntimeContext, Incoming,
 };
 use crate::agent_loop::{
-    CoreCommand as AgentCoreCommand, QueueCommand as AgentQueueCommand,
-    ReadCommand as AgentReadCommand,
+    CoreCommand as AgentCoreCommand, IncomingCommand as AgentIncomingCommand,
+    QueryCommand as AgentQueryCommand,
 };
 use crate::projects::{ProjectRegistry, ProjectServices, resolve};
 use crate::sessions::{
@@ -1258,7 +1258,7 @@ impl SessionActor {
             return Vec::new();
         };
         if agent
-            .tell(AgentCommand::Queue(AgentQueueCommand::Enqueue {
+            .tell(AgentCommand::Incoming(AgentIncomingCommand::Receive {
                 item: Incoming::SubAgent {
                     id: child.0.to_string(),
                     part: Box::new(part),
@@ -1628,7 +1628,7 @@ impl SessionActor {
         for (_, agent) in self.agents.iter() {
             let safe = agent
                 .actor
-                .ask(|reply| AgentCommand::Read(AgentReadCommand::CanOffload { reply }))
+                .ask(|reply| AgentCommand::Query(AgentQueryCommand::CanOffload { reply }))
                 .await;
             if !matches!(safe, Ok(true)) {
                 return false;

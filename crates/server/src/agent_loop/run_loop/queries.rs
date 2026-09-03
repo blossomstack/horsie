@@ -159,21 +159,20 @@ impl AgentState {
 }
 
 /// Questions answered from state, which wake nothing.
-pub(crate) struct Reads;
+pub(crate) struct QueryHandler;
 
-impl Reads {
+impl QueryHandler {
     pub(crate) async fn handle(
-        &mut self,
-        cmd: ReadCommand,
-        cx: &mut Cx<'_>,
+        cmd: QueryCommand,
+        cx: &mut CommandContext<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
         let state = cx.state;
         match cmd {
-            ReadCommand::ReadLog { after, reply } => {
-                let _ = reply.send(state.read_from(after, &cx.step_run.deltas));
+            QueryCommand::ReadLog { after, reply } => {
+                let _ = reply.send(state.read_from(after, &cx.step_run.streamed_text));
                 CommandEffect::none()
             }
-            ReadCommand::PageLog {
+            QueryCommand::PageLog {
                 anchor,
                 max,
                 filter,
@@ -187,7 +186,7 @@ impl Reads {
                 ));
                 CommandEffect::none()
             }
-            ReadCommand::SearchLog {
+            QueryCommand::SearchLog {
                 needle,
                 max,
                 filter,
@@ -201,29 +200,29 @@ impl Reads {
                 ));
                 CommandEffect::none()
             }
-            ReadCommand::SeqOfId { id, reply } => {
+            QueryCommand::SeqOfId { id, reply } => {
                 let _ = reply.send(crate::agent_loop::shared::agent_log::seq_of_id(
                     state.log(),
                     &id,
                 ));
                 CommandEffect::none()
             }
-            ReadCommand::CanOffload { reply } => {
+            QueryCommand::CanOffload { reply } => {
                 let safe = !cx.step_run.is_running()
                     && !state.turn_in_flight()
                     && state.open_step().is_none();
                 let _ = reply.send(safe);
                 CommandEffect::none()
             }
-            ReadCommand::GetUsage { reply } => {
+            QueryCommand::GetUsage { reply } => {
                 let _ = reply.send(state.usage_snapshot());
                 CommandEffect::none()
             }
-            ReadCommand::GetState { reply } => {
+            QueryCommand::GetState { reply } => {
                 let _ = reply.send(state.state_view());
                 CommandEffect::none()
             }
-            ReadCommand::LogHead { reply } => {
+            QueryCommand::LogHead { reply } => {
                 let _ = reply.send(state.next_seq());
                 CommandEffect::none()
             }

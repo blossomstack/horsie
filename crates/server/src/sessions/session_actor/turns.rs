@@ -37,7 +37,7 @@ struct SubSessionRequest {
     seed: SeedMode,
     message: String,
 }
-use crate::agent_loop::QueueCommand as AgentQueueCommand;
+use crate::agent_loop::IncomingCommand as AgentIncomingCommand;
 use horsie_actor::ActorContext;
 use horsie_actor::ReplyTo;
 use horsie_models::now_ms;
@@ -215,7 +215,7 @@ impl SessionActor {
             return CommandEffect::none();
         };
         if agent
-            .tell(AgentCommand::Queue(AgentQueueCommand::Answer {
+            .tell(AgentCommand::Incoming(AgentIncomingCommand::Answer {
                 answers,
                 reply,
             }))
@@ -485,7 +485,7 @@ impl SessionActor {
             let _ = reply.send(answer);
         });
         if agent
-            .tell(AgentCommand::Queue(AgentQueueCommand::Enqueue {
+            .tell(AgentCommand::Incoming(AgentIncomingCommand::Receive {
                 item,
                 ack: Some(ReplyTo::from_sender(tx)),
             }))

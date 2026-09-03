@@ -30,7 +30,7 @@ impl TaskListPart {
     }
 }
 
-impl PartState for TaskListPart {
+impl CarriedComponentState for TaskListPart {
     /// The plan carries. A sub session branched to continue this work inherits
     /// what the work *is*; losing it would make the branch start over.
     fn carried(&self) -> Option<Self> {
@@ -83,7 +83,7 @@ impl Component for TaskLists {
     async fn handle(
         &mut self,
         cmd: TaskListCommand,
-        cx: &mut Cx<'_>,
+        cx: &mut CommandContext<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
         let TaskListCommand::ToolCall(call) = cmd;
         answer_tool_call(call, cx, execute_task_list_tool).await
@@ -95,7 +95,7 @@ impl Component for TaskLists {
         &self,
         actor: horsie_actor::ActorRef<AgentCommand>,
     ) -> Option<std::sync::Arc<dyn horsie_agentcore::Toolbox>> {
-        Some(crate::agent_loop::component::ActorToolbox::new(
+        Some(crate::agent_loop::components::ActorToolbox::new(
             vec![domain::task_list_tool_spec()],
             |call| AgentCommand::TaskList(TaskListCommand::ToolCall(call)),
             actor,
@@ -111,7 +111,7 @@ impl TaskLists {
     /// a client watches live, so without it a plan changing mid-turn reached
     /// nobody until the next turn boundary let the agent document be re-read.
     // `if let` rather than a `match`, because this module owns exactly one
-    // variant. Which one is decided in `component::fold`, so an event added
+    // variant. Which one is decided in `RunLoop::apply`, so an event added
     // later fails to compile *there* rather than silently reaching the wrong
     // fold here.
     pub(crate) fn apply(state: &mut AgentState, event: AgentDomainEvent) {
@@ -122,7 +122,7 @@ impl TaskLists {
                     tasks: snapshot.wire_tasks(),
                 })),
             );
-            if let Some(part) = state.part_mut::<TaskListPart>() {
+            if let Some(part) = state.component_state_mut::<TaskListPart>() {
                 part.0 = snapshot;
             }
         }

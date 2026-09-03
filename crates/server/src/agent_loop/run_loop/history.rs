@@ -51,16 +51,15 @@ pub(crate) fn runtime_readiness(event: &LifecycleEvent) -> Option<bool> {
 }
 
 /// Things written into this agent's log by somebody else.
-pub(crate) struct LogWrites;
+pub(crate) struct HistoryHandler;
 
-impl LogWrites {
+impl HistoryHandler {
     pub(crate) async fn handle(
-        &mut self,
-        cmd: LogCommand,
-        cx: &mut Cx<'_>,
+        cmd: HistoryCommand,
+        cx: &mut CommandContext<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
         match cmd {
-            LogCommand::RecordLifecycle { event, at_ms } => {
+            HistoryCommand::RecordLifecycle { event, at_ms } => {
                 // Almost every one of these is something a reader sees and this
                 // agent does nothing about. The runtime arriving is the one
                 // that changes what it may *do* — so it is read off the record
@@ -68,16 +67,17 @@ impl LogWrites {
                 // nothing about the runtime cannot start a turn. That is what
                 // keeps recovery quiet: it journals a `TurnEnded(Interrupted)`,
                 // which is not a runtime fact and drains nothing.
-                let moved = runtime_readiness(&event).filter(|next| *next != cx.step_run.ready);
+                let moved =
+                    runtime_readiness(&event).filter(|next| *next != cx.step_run.runtime_ready);
                 if let Some(next) = moved {
-                    cx.step_run.ready = next;
+                    cx.step_run.runtime_ready = next;
                 }
                 // The runtime arriving is what lets a waiting agent start
                 // work. Nothing is told: the advance that follows this write
                 // finds the record folded and the gate open.
                 CommandEffect::persist(vec![AgentDomainEvent::LifecycleRecorded { event, at_ms }])
             }
-            LogCommand::HooksRan { records } => {
+            HistoryCommand::HooksRan { records } => {
                 let at_ms = now_ms();
                 // Counted here, against the state as it stands, and carried on
                 // the event: `agent_frame` sees only the event, so deriving the
@@ -98,7 +98,7 @@ impl LogWrites {
     }
 
     /// What the session did, and what a plugin did to a tool call.
-    // The fallthrough is unreachable by construction: `component::fold` routes
+    // The fallthrough is unreachable by construction: `RunLoop::apply` routes
     // every variant to exactly one component, so an event added later fails to
     // compile *there* rather than silently reaching the wrong fold here.
     #[allow(clippy::wildcard_enum_match_arm)]

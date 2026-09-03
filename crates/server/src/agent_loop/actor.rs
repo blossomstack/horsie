@@ -1,6 +1,6 @@
 //! One event-sourced agent and its transient foreground step.
 //!
-//! The actor owns [`AgentLoop`], persists its decisions, folds chronological
+//! The actor owns [`RunLoop`], persists its decisions, folds chronological
 //! history, publishes durable outcomes, and reconstructs or repairs the newest
 //! open step after recovery. Provider, tool, hook, compaction, seed-summary,
 //! and connection work run off-mailbox so reads and cancellation remain live.
@@ -51,18 +51,16 @@ pub trait AgentObserver: Send + Sync {
     fn publish(&self, event: &AgentDomainEvent, state: &AgentState);
 }
 
-/// An agent, modelled as an event-sourced actor over components.
-///
-/// Everything domain-shaped lives in a component; what stays here is the
-/// routing and the plumbing every component relies on.
+/// An event-sourced agent with one durable history and one live foreground
+/// step. The run loop owns sequencing; timers and task lists are the only
+/// independent stateful tools.
 pub struct AgentActor {
     runtime: AgentRuntimeContext,
     params: AgentParams,
-    /// The transient half of the state — see [`component::StepRun`].
+    /// Every process-local foreground detail; never snapshotted.
     step_run: StepRun,
-    /// The actor-owned run-loop driver. It coordinates normal and special
-    /// steps and contains the two stateful components that vend tools.
-    agent_loop: AgentLoop,
+    /// The single sequencing decision plus the two stateful tool components.
+    run_loop: RunLoop,
     /// Where durable history is published, when anyone is listening. `None` for
     /// workflow agents, which have no live stream.
     observer: Option<Arc<dyn AgentObserver>>,
@@ -90,7 +88,7 @@ impl AgentActor {
             runtime: ctx,
             params,
             step_run,
-            agent_loop: AgentLoop::new(),
+            run_loop: RunLoop::new(),
             observer: None,
             self_ref: None,
             events_since_snapshot: 0,
@@ -147,13 +145,13 @@ fn recovery_repairs(state: &AgentState) -> Vec<AgentDomainEvent> {
     let at_ms = horsie_models::now_ms();
     match kind {
         StepKind::Initialize | StepKind::Connect => Vec::new(),
-        StepKind::Agent => {
+        StepKind::Provider => {
             if !state.open_step_has_response() {
                 vec![
                     AgentDomainEvent::StepFailed {
                         reason: StepFailure::Interrupted,
                     },
-                    AgentDomainEvent::RunCancelled { at_ms },
+                    AgentDomainEvent::TurnCancelled { at_ms },
                     AgentDomainEvent::RunEnded {
                         reason: RunEnd::Interrupted,
                         at_ms,
@@ -170,7 +168,9 @@ fn recovery_repairs(state: &AgentState) -> Vec<AgentDomainEvent> {
             let mut events = vec![AgentDomainEvent::StepFailed {
                 reason: StepFailure::Interrupted,
             }];
-            if let Some(crate::agent_loop::Offer::Compact { consumed, .. }) = state.queued_offer() {
+            if let Some(crate::agent_loop::PendingInput::Compact { consumed, .. }) =
+                state.next_input()
+            {
                 events.push(AgentDomainEvent::Consumed {
                     ids: consumed,
                     at_ms,
@@ -179,10 +179,10 @@ fn recovery_repairs(state: &AgentState) -> Vec<AgentDomainEvent> {
             events
         }
         StepKind::SeedSummary { request_id } => {
-            let Some(crate::agent_loop::Offer::Summary {
+            let Some(crate::agent_loop::PendingInput::Summary {
                 consumed,
                 sub_sessions,
-            }) = state.queued_offer()
+            }) = state.next_input()
             else {
                 return vec![AgentDomainEvent::StepFailed {
                     reason: StepFailure::Interrupted,
@@ -261,15 +261,14 @@ impl EventSourcedActor for AgentActor {
         AgentState::default()
     }
 
-    /// Fold one event into state — [`AgentLoop::apply`], the event-side twin
-    /// of the registry's command routing, so live handling, replay and every
-    /// component's own fold-forward agree.
+    /// Fold one event through the same exhaustive router used by replay and
+    /// live handling.
     fn apply_event(state: AgentState, event: AgentDomainEvent) -> AgentState {
-        AgentLoop::apply(state, event)
+        RunLoop::apply(state, event)
     }
 
-    /// Hand the command to the component registry. The actor decides nothing
-    /// here and does not know what components exist.
+    /// Hand the command to the run loop. The actor shell is only persistence,
+    /// observation, and lifecycle plumbing.
     async fn handle_command(
         &mut self,
         state: &AgentState,
@@ -277,16 +276,15 @@ impl EventSourcedActor for AgentActor {
         ctx: &mut ActorContext<AgentCommand>,
     ) -> CommandEffect<AgentDomainEvent> {
         self.self_ref.get_or_insert_with(|| ctx.self_ref());
-        let mut cx = Cx {
+        let mut cx = CommandContext {
             state,
             step_run: &mut self.step_run,
             runtime: &self.runtime,
             params: &self.params,
             actor: ctx,
         };
-        // The registry answers everything but the actor's own lifetime:
-        // stopping is the one thing that is nobody's component.
-        let effect = match self.agent_loop.handle(cmd, &mut cx).await {
+        // `None` is the explicit shutdown command.
+        let effect = match self.run_loop.handle(cmd, &mut cx).await {
             Some(effect) => effect,
             None => CommandEffect::stop(),
         };
@@ -303,7 +301,7 @@ impl EventSourcedActor for AgentActor {
         // message says everything they were building towards — so the deltas
         // are dropped the moment one lands.
         if events.iter().any(coarse_appends_an_entry) {
-            self.step_run.deltas.clear();
+            self.step_run.streamed_text.clear();
         }
         self.revision.send_modify(|r| *r += 1);
         // A provider-backed step owns its cost. Publish the freshly folded
@@ -408,7 +406,7 @@ impl EventSourcedActor for AgentActor {
         // actor, so after an idle offload it still holds the position from
         // before — republishing costs nothing.
         self.revision.send_modify(|r| *r += 1);
-        let mut cx = Cx {
+        let mut cx = CommandContext {
             state,
             step_run: &mut self.step_run,
             runtime: &self.runtime,
@@ -418,7 +416,7 @@ impl EventSourcedActor for AgentActor {
         let repair = recovery_repairs(state);
         if !repair.is_empty() {
             let (ack, _) = tokio::sync::oneshot::channel();
-            cx.tell(AgentCommand::Run(RunCommand::PersistProgress {
+            cx.tell(AgentCommand::Provider(ProviderCommand::PersistProgress {
                 events: repair,
                 ack: horsie_actor::ReplyTo::from_sender(ack),
             }))
@@ -430,7 +428,7 @@ impl EventSourcedActor for AgentActor {
             // The session deduplicates this by `(agent, run_id)`.
             self.runtime.parent.deliver(outcome).await;
         }
-        self.agent_loop.on_load(&mut cx).await;
+        self.run_loop.on_load(&mut cx).await;
         // Recovery is over and the repairs are queued behind this: the advance
         // lands after them and reads the state they leave.
         cx.advance().await;
@@ -484,7 +482,7 @@ mod tests {
                 at_ms: 1,
             },
             AgentDomainEvent::StepStarted {
-                kind: StepKind::Agent,
+                kind: StepKind::Provider,
             },
             AgentDomainEvent::MessageComplete {
                 message: assistant_with_calls(&["one", "two"]),
@@ -515,7 +513,7 @@ mod tests {
     #[test]
     fn recovery_ends_an_unanswered_provider_step() {
         let state = fold(vec![AgentDomainEvent::StepStarted {
-            kind: StepKind::Agent,
+            kind: StepKind::Provider,
         }]);
         let repairs = recovery_repairs(&state);
         assert!(matches!(
@@ -524,7 +522,7 @@ mod tests {
                 AgentDomainEvent::StepFailed {
                     reason: StepFailure::Interrupted
                 },
-                AgentDomainEvent::RunCancelled { .. },
+                AgentDomainEvent::TurnCancelled { .. },
                 AgentDomainEvent::RunEnded {
                     reason: RunEnd::Interrupted,
                     ..
@@ -537,14 +535,14 @@ mod tests {
     fn old_marker_is_closed_by_run_end() {
         let state = fold(vec![
             AgentDomainEvent::StepStarted {
-                kind: StepKind::Agent,
+                kind: StepKind::Provider,
             },
             AgentDomainEvent::RunEnded {
                 reason: RunEnd::Cancelled,
                 at_ms: 2,
             },
             AgentDomainEvent::StepStarted {
-                kind: StepKind::Agent,
+                kind: StepKind::Provider,
             },
         ]);
         assert_eq!(state.open_step().map(|(seq, _)| seq), Some(2));

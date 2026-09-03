@@ -50,7 +50,7 @@ impl horsie_agentcore::EventSink for NullSink {
 /// nothing rather than erroring — a sub session branched from a session that
 /// has not started yet is empty, not broken.
 pub(crate) async fn summarise_step(
-    tctx: &TurnCtx,
+    execution: &ExecutionContext,
     history: &[Message],
     cut: usize,
     instructions: Option<&str>,
@@ -71,8 +71,8 @@ pub(crate) async fn summarise_step(
         started_at_ms: None,
     });
     let request = horsie_agentcore::StepRequest {
-        provider: tctx.provider.clone(),
-        conversation_id: tctx.conversation_id.clone(),
+        provider: execution.provider.clone(),
+        conversation_id: execution.conversation_id.clone(),
         system_prompt: String::new(),
         specs: Vec::new(),
         tool_choice: horsie_agentcore::ToolChoice::Auto,

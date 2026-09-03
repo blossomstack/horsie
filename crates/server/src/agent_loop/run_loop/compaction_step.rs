@@ -169,26 +169,26 @@ impl AgentState {
 /// boundary, at a moment where every tool call is answered so nothing can be
 /// cut across, and invisible to everything else: the next provider call simply
 /// reads a shorter history.
-pub(crate) struct Compaction;
+pub(crate) struct CompactionStep;
 
-impl Compaction {
+impl CompactionStep {
     /// Whether the context has grown past the trigger — read off the budget
     /// the contexts publish. A fresh agent has no budget yet and never
     /// compacts before its first call, which is right: there is nothing to
     /// fold.
-    pub(crate) fn due(&self, cx: &Cx<'_>) -> bool {
-        cx.step_run.ctx.as_ref().is_some_and(|c| {
+    pub(crate) fn due(cx: &CommandContext<'_>) -> bool {
+        cx.step_run.execution.as_ref().is_some_and(|c| {
             c.budget
                 .is_some_and(|b| cx.state.context_tokens() >= b.trigger_tokens())
         })
     }
 
     /// Take the summary on a spawned task.
-    pub(crate) fn start(&mut self, marker_seq: u64, job: CompactJob, cx: &mut Cx<'_>) {
-        let Some(tctx) = cx.step_run.ctx.clone() else {
+    pub(crate) fn start(marker_seq: u64, job: CompactJob, cx: &mut CommandContext<'_>) {
+        let Some(execution) = cx.step_run.execution.clone() else {
             return;
         };
-        let cancel = cx.step_run.begin(StepPhase::Compaction, marker_seq);
+        let cancel = cx.step_run.begin_compaction(marker_seq);
         // The history and the carried state are read here, at handling time: a
         // task-list change earlier in the same turn is already folded, so a
         // compaction between two calls carries it verbatim.
@@ -200,7 +200,7 @@ impl Compaction {
             let (outcome, usage) = tokio::select! {
                 biased;
                 () = cancel.cancelled() => return,
-                outcome = run_compaction(&job, &tctx, history, carried_state, &cancel) => outcome,
+                outcome = run_compaction(&job, &execution, history, carried_state, &cancel) => outcome,
             };
             let _ = self_ref
                 .tell(AgentCommand::Compaction(CompactionCommand::Landed(
@@ -216,11 +216,10 @@ impl Compaction {
     }
 }
 
-impl Compaction {
+impl CompactionStep {
     pub(crate) async fn handle(
-        &mut self,
         cmd: CompactionCommand,
-        cx: &mut Cx<'_>,
+        cx: &mut CommandContext<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
         let CompactionCommand::Landed(landing) = cmd;
         let CompactLanding {
@@ -233,7 +232,7 @@ impl Compaction {
             .state
             .open_step()
             .is_some_and(|(seq, kind)| seq == marker_seq && *kind == StepKind::Compaction);
-        if !marker_is_open || !cx.step_run.finished(marker_seq) {
+        if !marker_is_open || !cx.step_run.finish_compaction(marker_seq) {
             tracing::warn!(
                 marker_seq,
                 "dropping a callback for a closed compaction step"
@@ -291,13 +290,13 @@ impl Compaction {
 /// what the summarising call spent.
 async fn run_compaction(
     job: &CompactJob,
-    tctx: &TurnCtx,
+    execution: &ExecutionContext,
     history: Vec<Message>,
     carried_state: String,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> (CompactOutcome, Option<horsie_agentcore::Usage>) {
     use horsie_models::agent::{CompactionTrigger, EmptyOutcome};
-    let retain_tokens = tctx.budget.map(|b| b.retain_tokens());
+    let retain_tokens = execution.budget.map(|b| b.retain_tokens());
     let skipped = |notice: bool| CompactOutcome::Skipped {
         notice,
         context_tokens: job.tokens_before,
@@ -310,7 +309,7 @@ async fn run_compaction(
         return (skipped(job.manual), None);
     }
     let trigger_name = if job.manual { "manual" } else { "auto" };
-    let records = tctx
+    let records = execution
         .context_provider
         .compaction_hooks(horsie_models::runtime::ServerHookEvent::PreCompact(
             horsie_models::runtime::PreCompactInput {
@@ -324,7 +323,7 @@ async fn run_compaction(
         return (skipped(false), None);
     }
     let (summary, usage) = match crate::agent_loop::shared::summarise::summarise_step(
-        tctx,
+        execution,
         &history,
         cut,
         job.instructions.as_deref(),
@@ -353,7 +352,7 @@ async fn run_compaction(
     let tokens_after = horsie_agentcore::approx_history_tokens(&rewritten);
     // Fire-and-forget: the boundary is about to exist, and nothing a
     // `PostCompact` hook says could change it.
-    let _ = tctx
+    let _ = execution
         .context_provider
         .compaction_hooks(horsie_models::runtime::ServerHookEvent::PostCompact(
             horsie_models::runtime::PostCompactInput {
@@ -380,7 +379,7 @@ async fn run_compaction(
     )
 }
 
-impl Compaction {
+impl CompactionStep {
     /// Where the prompt now starts, and the context size that leaves behind.
     // `if let` rather than a `match`, because this module owns exactly one
     // variant. Which one is decided in `AgentActor::apply_event`, so an event

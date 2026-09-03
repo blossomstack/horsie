@@ -27,8 +27,8 @@ use horsie_server::agent_loop::{
     AgentRuntimeContext, ContextManifest, FixedContextProvider, StepKind,
 };
 use horsie_server::agent_loop::{
-    CoreCommand as AgentCoreCommand, QueueCommand as AgentQueueCommand,
-    ReadCommand as AgentReadCommand,
+    CoreCommand as AgentCoreCommand, IncomingCommand as AgentIncomingCommand,
+    QueryCommand as AgentQueryCommand,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -208,7 +208,7 @@ async fn recovered_agent_repairs_a_stopped_mid_history_tool_call() {
                 message: assistant_tool_call("a1", "stopped-call"),
                 usage: Usage::without_cache(1, 1),
             },
-            AgentDomainEvent::RunCancelled { at_ms: 0 },
+            AgentDomainEvent::TurnCancelled { at_ms: 0 },
             // Later turns completed on top of it, burying it mid-history.
             AgentDomainEvent::InputMessage {
                 message: Message::user("u2", "never mind, just say hi", 0),
@@ -248,7 +248,7 @@ async fn recovered_agent_repairs_a_stopped_mid_history_tool_call() {
         AgentActor::new(ctx, params),
     );
     agent
-        .tell(AgentCommand::Queue(AgentQueueCommand::Enqueue {
+        .tell(AgentCommand::Incoming(AgentIncomingCommand::Receive {
             item: horsie_server::agent_loop::Incoming::User {
                 id: "m1".into(),
                 text: "carry on".into(),
@@ -370,7 +370,7 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
         AgentActor::new(ctx, params),
     );
     agent
-        .tell(AgentCommand::Queue(AgentQueueCommand::Answer {
+        .tell(AgentCommand::Incoming(AgentIncomingCommand::Answer {
             answers: vec![horsie_server::agent_loop::AskAnswer {
                 tool_call_id: "ask-1".into(),
                 text: "validate, daemon, job".into(),
@@ -392,7 +392,7 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
     // Take another turn: any synthetic result recovery journaled is in the
     // history by now, so this is what every later turn would carry forever.
     agent
-        .tell(AgentCommand::Queue(AgentQueueCommand::Enqueue {
+        .tell(AgentCommand::Incoming(AgentIncomingCommand::Receive {
             item: horsie_server::agent_loop::Incoming::User {
                 id: "m2".into(),
                 text: "carry on".into(),
@@ -480,7 +480,7 @@ async fn cancelling_a_run_stuck_in_provide_returns_promptly() {
             AgentActor::new(ctx, params),
         );
         agent
-            .tell(AgentCommand::Queue(AgentQueueCommand::Enqueue {
+            .tell(AgentCommand::Incoming(AgentIncomingCommand::Receive {
                 item: horsie_server::agent_loop::Incoming::User {
                     id: "m3".into(),
                     text: "start something that wedges".into(),
@@ -529,7 +529,7 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
                 message: Message::user("u1", "read the readme", 0),
             },
             AgentDomainEvent::StepStarted {
-                kind: StepKind::Agent,
+                kind: StepKind::Provider,
             },
             // The process died here: the call is journaled, its result is not.
             AgentDomainEvent::MessageComplete {
@@ -569,7 +569,7 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
         loop {
             let (reply, rx) = tokio::sync::oneshot::channel();
             agent
-                .tell(AgentCommand::Read(AgentReadCommand::PageLog {
+                .tell(AgentCommand::Query(AgentQueryCommand::PageLog {
                     anchor: horsie_server::agent_loop::Anchor::Tail,
                     max: 100,
                     filter: horsie_server::agent_loop::LogFilter::everything(),
@@ -625,7 +625,7 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let (reply, rx) = tokio::sync::oneshot::channel();
     agent2
-        .tell(AgentCommand::Read(AgentReadCommand::PageLog {
+        .tell(AgentCommand::Query(AgentQueryCommand::PageLog {
             anchor: horsie_server::agent_loop::Anchor::Tail,
             max: 100,
             filter: horsie_server::agent_loop::LogFilter::everything(),

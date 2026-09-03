@@ -57,7 +57,7 @@ impl TimerState {
     }
 }
 
-impl PartState for TimerState {
+impl CarriedComponentState for TimerState {
     /// Nothing: a timer belongs to the agent that armed it, and a sub session
     /// waking on one nobody set for it would be a surprise.
     fn carried(&self) -> Option<Self> {
@@ -179,7 +179,7 @@ impl Component for Timers {
     async fn handle(
         &mut self,
         cmd: TimerCommand,
-        cx: &mut Cx<'_>,
+        cx: &mut CommandContext<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
         let id = match cmd {
             TimerCommand::ToolCall(call) => {
@@ -222,19 +222,19 @@ impl Component for Timers {
         CommandEffect::persist(vec![fired, received])
     }
 
-    // The fallthrough is unreachable by construction: `component::fold` routes
+    // The fallthrough is unreachable by construction: `RunLoop::apply` routes
     // every variant to exactly one component, so an event added later fails to
     // compile *there* rather than silently reaching the wrong fold here.
     #[allow(clippy::wildcard_enum_match_arm)]
     fn apply(state: &mut AgentState, event: AgentDomainEvent) {
         match event {
             AgentDomainEvent::TimerArmed { record, .. } => {
-                if let Some(part) = state.part_mut::<TimerState>() {
+                if let Some(part) = state.component_state_mut::<TimerState>() {
                     part.arm(record);
                 }
             }
             AgentDomainEvent::TimerCancelled { ids, .. } => {
-                if let Some(part) = state.part_mut::<TimerState>() {
+                if let Some(part) = state.component_state_mut::<TimerState>() {
                     part.cancel(&ids);
                 }
             }
@@ -243,7 +243,7 @@ impl Component for Timers {
                 next_fire_at_unix_ms,
                 ..
             } => {
-                if let Some(part) = state.part_mut::<TimerState>() {
+                if let Some(part) = state.component_state_mut::<TimerState>() {
                     part.fired(&id, next_fire_at_unix_ms);
                 }
             }
@@ -257,7 +257,7 @@ impl Component for Timers {
         &self,
         actor: horsie_actor::ActorRef<AgentCommand>,
     ) -> Option<std::sync::Arc<dyn horsie_agentcore::Toolbox>> {
-        Some(crate::agent_loop::component::ActorToolbox::new(
+        Some(crate::agent_loop::components::ActorToolbox::new(
             domain::timer_tool_specs(),
             |call| AgentCommand::Timer(TimerCommand::ToolCall(call)),
             actor,
@@ -267,7 +267,7 @@ impl Component for Timers {
     /// Every timer that survived, re-armed with its remaining delay — firing
     /// immediately if it is already due. Whether the agent is parked or was
     /// mid-run, because a timer keeps its promise either way.
-    async fn on_load(&mut self, cx: &mut Cx<'_>) {
+    async fn on_load(&mut self, cx: &mut CommandContext<'_>) {
         let now = now_ms();
         for t in cx.state.timers() {
             spawn_timer_sleep(cx.actor.self_ref(), t.id.clone(), t.remaining(now));

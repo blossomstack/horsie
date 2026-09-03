@@ -17,13 +17,12 @@ use horsie_agentcore::AgentLogBody;
 use horsie_models::now_ms;
 
 /// Being a sub session, and being branched from.
-pub(crate) struct Seeding;
+pub(crate) struct SeedStep;
 
-impl Seeding {
+impl SeedStep {
     pub(crate) async fn handle(
-        &mut self,
         cmd: SeedCommand,
-        cx: &mut Cx<'_>,
+        cx: &mut CommandContext<'_>,
     ) -> CommandEffect<AgentDomainEvent> {
         let state = cx.state;
         match cmd {
@@ -96,7 +95,7 @@ impl Seeding {
                                 request_id: request_id.clone(),
                             })
                 });
-                if !marker_is_open || !cx.step_run.finished(marker_seq) {
+                if !marker_is_open || !cx.step_run.finish_seed_summary(marker_seq) {
                     return CommandEffect::none();
                 }
                 let at_ms = now_ms();
@@ -118,21 +117,20 @@ impl Seeding {
     }
 }
 
-impl Seeding {
+impl SeedStep {
     /// Take the summary the queued sub sessions are waiting on: a bare
     /// summarise run over the whole history at the branch point, sharing the
     /// compaction component's machinery.
     pub(crate) fn take_summary(
-        &mut self,
         marker_seq: u64,
         consumed: Vec<String>,
         sub_sessions: Vec<uuid::Uuid>,
-        cx: &mut Cx<'_>,
+        cx: &mut CommandContext<'_>,
     ) {
-        let Some(tctx) = cx.step_run.ctx.clone() else {
+        let Some(execution) = cx.step_run.execution.clone() else {
             return;
         };
-        let cancel = cx.step_run.begin(StepPhase::SeedSummary, marker_seq);
+        let cancel = cx.step_run.begin_seed_summary(marker_seq);
         // The summary must describe the history at the branch point, read
         // before anything can append behind it.
         let history = repair_unanswered_tool_calls(cx.state.prompt_messages());
@@ -141,7 +139,7 @@ impl Seeding {
             let result = tokio::select! {
                 biased;
                 () = cancel.cancelled() => return,
-                result = crate::agent_loop::shared::summarise::summarise_step(&tctx, &history, history.len(), None, &cancel)
+                result = crate::agent_loop::shared::summarise::summarise_step(&execution, &history, history.len(), None, &cancel)
                     => result,
             };
             let (result, usage) = match result {
@@ -165,7 +163,7 @@ impl Seeding {
 
     /// The history this agent adopted, and the seed appended after it.
     // `if let` rather than a `match`, because this module owns exactly one
-    // variant. Which one is decided in `component::fold`, so an event added
+    // variant. Which one is decided in `RunLoop::apply`, so an event added
     // later fails to compile *there* rather than silently reaching the wrong
     // fold here.
     #[allow(clippy::wildcard_enum_match_arm)]

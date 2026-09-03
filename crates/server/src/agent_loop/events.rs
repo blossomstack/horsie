@@ -1,9 +1,7 @@
 //! What has happened to an agent: the events, and nothing else.
 //!
-//! Every change to [`AgentState`](crate::agent_loop::AgentState) is one of
-//! these, journaled before it is believed and folded by exactly one component
-//! — see [`AgentLoop::apply`](crate::agent_loop::components::AgentLoop).
-//!
+//! Every durable change is one of these records, journaled before it is
+//! believed and folded through [`RunLoop::apply`](crate::agent_loop::run_loop::RunLoop::apply).
 //! This is a durability contract. A variant that fails to deserialize takes
 //! down recovery for every session that ever journaled one, so fields are
 //! added with `#[serde(default)]` and never renamed or repurposed.
@@ -18,13 +16,21 @@ pub enum SystemPromptSource {
     InitialContext,
 }
 
+/// A durable foreground-step boundary. The record's history sequence is its
+/// identity and callback fence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StepKind {
+    /// First semantic setup: provision, scan, and freeze prompt meaning.
     Initialize,
+    /// Rebuild live clients from the initialization manifest.
     Connect,
-    Agent,
+    /// One provider request and its resulting assistant message.
+    Provider,
+    /// Decide whether a settled provider result may end the run.
     StopHook,
+    /// Summarise old history behind a compaction boundary.
     Compaction,
+    /// Summarise a branch point for one or more sub sessions.
     SeedSummary { request_id: String },
 }
 
@@ -116,7 +122,7 @@ pub enum AgentDomainEvent {
     InputMessage {
         message: Message,
     },
-    /// Queue items taken by work that is not a turn — a `/compact`, a summary
+    /// Incoming records taken by work that is not a turn — a `/compact`, a summary
     /// for branching sub sessions. Journaled when the work *lands*, not when
     /// it starts: a crash in between replays the item, and doing it twice is
     /// cheaper than a sub session waiting for ever on a summary nobody will
@@ -173,16 +179,16 @@ pub enum AgentDomainEvent {
     },
     /// A run loop reached its normal boundary. Provider usage was already
     /// banked by each `MessageComplete`; this event carries no bill.
-    RunComplete {
+    TurnCompleted {
         iterations: u32,
         at_ms: u64,
     },
     /// A run loop ended badly. Completed provider steps already banked their
     /// own usage, so cancellation or failure cannot lose or double-count it.
-    RunAborted {
+    TurnAborted {
         at_ms: u64,
     },
-    RunCancelled {
+    TurnCancelled {
         at_ms: u64,
     },
     /// A timer was armed.
@@ -257,7 +263,7 @@ pub enum AgentDomainEvent {
         usage: Option<Usage>,
         at_ms: u64,
     },
-    /// Something was accepted into this agent's queue.
+    /// Something was durably accepted by this agent.
     ///
     /// Journaled before anything is done with it, which is what makes an
     /// accepted message a promise: it survives a crash and is still owed an
@@ -266,7 +272,7 @@ pub enum AgentDomainEvent {
         item: crate::agent_loop::Incoming,
         at_ms: u64,
     },
-    /// A turn began, consuming these queue items — and, if the agent was
+    /// A turn began, consuming these incoming records — and, if the agent was
     /// parked, answering these questions. One event so a crash anywhere in the
     /// window replays to the same place.
     TurnBegan {

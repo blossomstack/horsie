@@ -1,15 +1,9 @@
-//! What is addressed to an agent, and when it becomes a turn.
+//! Pure projections from incoming history to the next provider input.
 //!
-//! An agent has one queue, and everything that arrives for it goes in the same
-//! one: a person's message, a subagent's report, a timer firing, a `Stop` hook
-//! saying to keep going. They differ in what they contribute to the turn, not
-//! in how they are held — which is the whole reason this is one enum rather
-//! than four fields.
-//!
-//! No actors and no I/O, so the decision is unit-testable against a hand-built
-//! queue. [`AgentActor`](crate::agent_loop::AgentActor) owns the queue; this
-//! owns the rule.
-
+//! `Received` records append everything addressed to the agent. `Consumed`
+//! and `TurnBegan` records identify what has already been taken. Folding those
+//! records yields pending messages and exactly one next input; there is no
+//! second queue container and no I/O in this module.
 use horsie_models::agent::{SubAgentResultPart, ToolResultInput};
 use serde::{Deserialize, Serialize};
 
@@ -116,14 +110,14 @@ impl Incoming {
     }
 }
 
-/// The next thing the queue is offering, and what taking it consumes.
+/// The next history-derived input and the records taking it consumes.
 ///
 /// One offer at a time, in a fixed order of precedence, because each is a
 /// different kind of work: taking it is a decision the caller makes, and what
 /// it *does* with it is none of this module's business. Whoever takes an offer
 /// journals the ids in `consumed`, which is what removes them from the queue.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Offer {
+pub enum PendingInput {
     /// `/summary-n-fork`: the summary is not this session's to keep. It seeds
     /// these sub sessions, and this history is left exactly as it was.
     ///
@@ -142,7 +136,7 @@ pub enum Offer {
     },
     /// Everything queued that is *addressed to the model*, merged into one
     /// input.
-    Input(Box<Turn>),
+    Input(Box<TurnInput>),
 }
 
 /// Everything an agent is about to be resumed with, and what that consumes.
@@ -150,7 +144,7 @@ pub enum Offer {
 /// Every field is what the actor needs to journal the turn, so nothing below
 /// this re-derives a decision made here.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct Turn {
+pub struct TurnInput {
     /// Ids of the queue items this turn carries.
     pub consumed: Vec<String>,
     /// Tool-call ids of the questions this turn *answered*. Empty when the turn
@@ -202,13 +196,11 @@ impl std::fmt::Display for AnswerError {
     }
 }
 
-/// What the queue is offering now, if anything.
+/// What durable history offers next, if anything.
 ///
-/// `None` means "nothing to take", and there are exactly two reasons for it:
-/// nothing is queued, or the agent is parked on questions and nothing queued
-/// is entitled to abandon them. Being *busy* is not one of them — that is the
-/// caller's own business, checked before this is ever asked, because work in
-/// flight is not a fact about the queue.
+/// `None` means either nothing is pending, or the agent is parked on questions
+/// and no pending input may abandon them. Foreground activity is checked by the
+/// run loop before this projection is asked.
 ///
 /// The precedence is about what a loss costs. A sub session waiting on a
 /// summary is stuck for ever if its summary is skipped, so it goes first. A
@@ -216,10 +208,10 @@ impl std::fmt::Display for AnswerError {
 /// of typing it is to shrink the context the *next* turn reads. Everything
 /// else is one merged input.
 #[must_use]
-pub fn queued_offer(
+pub fn next_input(
     inbox: &[Incoming],
     asks: &[crate::agent_loop::AskedQuestion],
-) -> Option<Offer> {
+) -> Option<PendingInput> {
     if inbox.is_empty() {
         return None;
     }
@@ -240,7 +232,7 @@ pub fn queued_offer(
         })
         .collect();
     if !sub_sessions.is_empty() {
-        return Some(Offer::Summary {
+        return Some(PendingInput::Summary {
             consumed: sub_sessions.iter().map(|(id, _)| id.clone()).collect(),
             sub_sessions: sub_sessions.into_iter().map(|(_, s)| s).collect(),
         });
@@ -257,7 +249,7 @@ pub fn queued_offer(
         })
         .collect();
     if !compactions.is_empty() {
-        return Some(Offer::Compact {
+        return Some(PendingInput::Compact {
             consumed: compactions.iter().map(|(id, _)| id.clone()).collect(),
             // The newest wins: they ask for the same thing, and the last
             // instructions typed are the ones the user is thinking of.
@@ -273,7 +265,7 @@ pub fn queued_offer(
     }
     // Abandoned, not answered: every parked call still gets a result, so
     // nothing dangles on the wire, but the result says the question went
-    // unanswered. Answering for real goes through `answered_turn`, which
+    // unanswered. Answering for real goes through `answered_input`, which
     // requires all of them at once.
     turn.results = asks
         .iter()
@@ -285,7 +277,7 @@ pub fn queued_offer(
             artifacts: Vec::new(),
         })
         .collect();
-    Some(Offer::Input(Box::new(turn)))
+    Some(PendingInput::Input(Box::new(turn)))
 }
 
 /// The turn an answered park starts: the answers, plus whatever queued behind
@@ -295,11 +287,11 @@ pub fn queued_offer(
 /// half-answered park could not resume anyway — the run would go back to the
 /// provider with a `tool_use` that has no result — and refusing costs nothing,
 /// because nothing has been journaled yet.
-pub fn answered_turn(
+pub fn answered_input(
     inbox: &[Incoming],
     asks: &[crate::agent_loop::AskedQuestion],
     answers: Vec<AskAnswer>,
-) -> Result<Turn, AnswerError> {
+) -> Result<TurnInput, AnswerError> {
     let pending: std::collections::HashSet<String> =
         asks.iter().filter_map(|a| a.tool_call_id.clone()).collect();
     if pending.is_empty() {
@@ -339,7 +331,7 @@ pub fn answered_turn(
 
 /// Fold the whole queue into one turn's input. Never partial: an agent that is
 /// starting a turn at all is starting it on everything it has been told.
-fn drain(inbox: &[Incoming]) -> Turn {
+fn drain(inbox: &[Incoming]) -> TurnInput {
     // A `/compact` and a `/summary-n-fork` are instructions to the server, not
     // input, and they are taken as their own offers. Left in the queue here,
     // they would be crossed off by a turn that did nothing about them.
@@ -348,7 +340,7 @@ fn drain(inbox: &[Incoming]) -> Turn {
         .filter(|i| !matches!(i, Incoming::Compact { .. } | Incoming::SubSession { .. }))
         .collect();
     let texts: Vec<&str> = inbox.iter().copied().filter_map(Incoming::text).collect();
-    Turn {
+    TurnInput {
         consumed: inbox.iter().map(|i| i.id().to_string()).collect(),
         answered: Vec::new(),
         // `None`, not an empty string, when nothing contributed text: Anthropic

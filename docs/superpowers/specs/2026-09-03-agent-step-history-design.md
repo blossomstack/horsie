@@ -109,39 +109,36 @@ A run identity is the sequence of the first normal `StepStarted` after the previ
 
 ## Transient `StepRun`
 
-`StepRun` is an `AgentActor` field, not part of event-sourced `AgentState`:
+`StepRun` is an `AgentActor` field, not part of event-sourced `AgentState`. It contains every process-local execution detail and does not duplicate pending input, provider iterations, repeated-tool fingerprints, or forced-tool decisions that history can derive.
 
 ```rust
 struct StepRun {
-    marker_seq: u64,
-    kind: StepKind,
-    initial_messages: Vec<Incoming>,
-    assistant_message: Option<Message>,
-    tool_results: Vec<ToolResult>,
-    pending_messages: Vec<Incoming>,
-    phase: StepPhase,
+    runtime_ready: bool,
+    foreground: ForegroundStep,
+    execution: Option<ExecutionContext>,
+    reconnect_required: bool,
+    start_hooks_ran: bool,
+    streamed_text: Vec<String>,
 }
 
-enum StepPhase {
-    Ready,
-    CallingProvider {
-        cancel: CancellationToken,
-        deltas: Vec<String>,
-    },
-    RunningTools {
-        cancel: CancellationToken,
-    },
-    WaitingForInput,
-    RunningSpecial {
-        cancel: CancellationToken,
-    },
-    Settled,
+enum ForegroundStep {
+    Idle,
+    Initializing { marker_seq, cancel },
+    Connecting { marker_seq, cancel },
+    StartingHooks { marker_seq, cancel },
+    CallingProvider { marker_seq, attempt, cancel },
+    RunningTools { marker_seq, cancel, calls, stopped },
+    RunningStopHook { marker_seq, cancel },
+    Compacting { marker_seq, cancel },
+    SummarisingSeed { marker_seq, cancel },
 }
 ```
 
-The assistant message stays whole because thinking, text, and tool calls may be interleaved. Queries derive those parts without rearranging them.
+The assistant message stays whole in durable history because thinking, text, and tool calls may be interleaved. Queries derive those parts without rearranging them.
 
-The process-only phase lives inside `StepRun`; there is no separate `Scratch`, `ActiveWork`, generation, or tool-call registry. Every callback carries `marker_seq`. The actor accepts it only while that marker is still the open top step.
+There is no separate `Scratch`, `ActiveWork`, provider-flight, generation, or tool-call registry. Every callback carries `marker_seq` and can finish only its matching `ForegroundStep` variant while that sequence is still the open durable step.
+
+The tagged variants make illegal combinations unrepresentable: idle state cannot retain a marker or cancellation token, provider retry state exists only during a provider call, and only tool execution can retain dispatched calls.
 
 The exact Rust shape should make illegal combinations unrepresentable. For example, only a normal agent-step variant can be `CallingProvider`, and only a Stop-hook variant can hold a Stop-hook callback. The illustrative structs above do not require one wide struct full of optional fields.
 
@@ -259,6 +256,19 @@ Compaction may start only at a settled boundary. It reads a stable history prefi
 ### Seed summary
 
 Seed summary is keyed by a durable request ID. It reads a stable history prefix, performs a tool-less provider call, and appends the summary plus usage. Its durable result is delivered idempotently to the requester. Initializing the target sub-session is a separate operation.
+
+## Code organization
+
+The module tree mirrors ownership rather than execution mechanics:
+
+- `actor.rs`: persistence, recovery, observation, and actor lifecycle only.
+- `run_loop/decision.rs`: the single ordered next-step decision.
+- `run_loop/provider/`: one provider call plus interpretation of its ending.
+- `run_loop/context_step.rs`, `compaction_step.rs`, and `seed_step.rs`: fenced special steps.
+- `run_loop/incoming/`: pure pending-input projections and their stateless command handler.
+- `step_run.rs`: all process-local foreground state.
+- `state.rs` and `events.rs`: durable history and its projections.
+- `components/`: only stateful tools.
 
 ## Components
 

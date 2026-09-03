@@ -1,18 +1,16 @@
 //! What an agent can be told.
 //!
-//! Grouped the way
-//! [`SessionCommand`](crate::sessions::session_actor::SessionCommand) is, one
-//! group per component, so dispatch stays one line per component. Commands are
-//! never journaled — only the events they decide are.
+//! Commands are grouped by concern so the run loop routes each group in one
+//! exhaustive match. Commands are transient; only the events they return are
+//! journaled.
 //!
-//! Most of these are *internal*: a component's own spawned work reporting
-//! back. The ones that arrive from outside are `Queue::Enqueue`,
-//! `Queue::Answer`, the `Read` group, the `Log` group, `Seed`, and `Core`.
+//! Most commands are callbacks from foreground work. Outside callers use
+//! `Incoming`, `Query`, `History`, `Seed`, and `Core`.
 
-use crate::agent_loop::component::RoutedToolCall;
-use crate::agent_loop::components::reads::ReadOutcome;
+use crate::agent_loop::components::RoutedToolCall;
+use crate::agent_loop::run_loop::ReadOutcome;
 use crate::agent_loop::state::{AgentState, AgentStateView, AgentUsageSnapshot};
-use crate::agent_loop::{AgentDomainEvent, TurnCtx};
+use crate::agent_loop::{AgentDomainEvent, ExecutionContext};
 use horsie_actor::ReplyTo;
 use horsie_agentcore::{LifecycleEvent, Message, Usage};
 
@@ -25,21 +23,21 @@ use horsie_agentcore::{LifecycleEvent, Message, Usage};
 /// command.
 pub enum AgentCommand {
     /// What this agent has been asked to answer, and the decision to answer it.
-    Queue(QueueCommand),
+    Incoming(IncomingCommand),
     /// The turn in flight: stopping it, and what it writes and reports.
-    Run(RunCommand),
+    Provider(ProviderCommand),
     /// Timers this agent has armed against itself.
     Timer(TimerCommand),
     /// The agent's own task list.
     TaskList(TaskListCommand),
     /// The per-turn runtime and context setup.
-    Provision(ProvisionCommand),
+    Context(ContextCommand),
     /// Folding old history behind a summary boundary.
     Compaction(CompactionCommand),
     /// Questions answered from state, which wake nothing.
-    Read(ReadCommand),
+    Query(QueryCommand),
     /// Things written into this agent's log by somebody else.
-    Log(LogCommand),
+    History(HistoryCommand),
     /// Reading this session as a sub session's starting point, and being one.
     Seed(SeedCommand),
     /// The actor's own lifetime.
@@ -47,7 +45,7 @@ pub enum AgentCommand {
 }
 
 /// What this agent has been asked to answer, and the decision to answer it.
-pub enum QueueCommand {
+pub enum IncomingCommand {
     /// Something addressed to this agent: a person's message, a subagent's
     /// report, a timer firing, a `Stop` hook's continuation.
     ///
@@ -55,8 +53,8 @@ pub enum QueueCommand {
     /// so a caller that must know an accepted message will survive a crash
     /// (`POST /sessions/:id/messages`) can wait for that rather than trust a
     /// mailbox. Whether it becomes a turn is this agent's own decision, taken
-    /// immediately afterwards; see [`crate::agent_loop::queued_turn`].
-    Enqueue {
+    /// immediately afterwards; see [`crate::agent_loop::next_input`].
+    Receive {
         item: crate::agent_loop::Incoming,
         ack: Option<ReplyTo<Result<(), horsie_actor::JournalError>>>,
     },
@@ -70,15 +68,14 @@ pub enum QueueCommand {
         reply: ReplyTo<Result<(), crate::agent_loop::AnswerError>>,
     },
     /// Internal: a turn's pre-start hooks finished. Journal their records, then
-    /// commit the turn — or abandon it. Boxed to keep the command enum small.
-    StartPrepared(Box<PreparedStart>),
+    /// commit the turn — or rejection it. Boxed to keep the command enum small.
+    InputPrepared(Box<PreparedInput>),
 }
 
-/// What the turn's own spawned work reports back: one provider call, one
-/// tool result, one streamed chunk. Nothing here starts anything — when a
-/// step runs is [`AgentLoop::advance`](super::component::AgentLoop::advance)'s
-/// decision, and what it says is this component's.
-pub enum RunCommand {
+/// What one provider step reports: its completed message, failure, streamed
+/// text, or an explicitly requested durable write. The run loop alone decides
+/// when a provider step starts.
+pub enum ProviderCommand {
     /// Internal: one provider call finished — the assembled assistant message.
     StepDone {
         marker_seq: u64,
@@ -92,11 +89,6 @@ pub enum RunCommand {
     /// Internal: one chunk of the message a step is streaming. Unjournaled and
     /// fenced by the open marker sequence.
     StreamDelta { marker_seq: u64, text: String },
-    /// Internal: the Stop hook for one special step completed or timed out.
-    StopHookDone {
-        marker_seq: u64,
-        result: crate::agent_loop::StopHookResult,
-    },
     /// Internal: events to journal outside a step's own handler — recovery
     /// repairs, and tests. `ack` reports the durable write.
     PersistProgress {
@@ -137,19 +129,16 @@ pub enum TaskListCommand {
     ToolCall(RoutedToolCall),
 }
 
-/// The per-work runtime and context setup.
-pub enum ProvisionCommand {
-    /// Internal: the spawned setup finished. Asked for by the boundary, never
-    /// by a component: provisioning serves a turn, a compaction and a summary
-    /// identically, and none of them knows it happened.
-    Provided(Box<ProvidedOutcome>),
+/// Completion of one initialization or reconnection step.
+pub enum ContextCommand {
+    InitializationReady(Box<ContextReady>),
+    ConnectionReady(Box<ContextReady>),
 }
 
-/// What the spawned setup produced.
-pub struct ProvidedOutcome {
+/// Live dependencies built by a context step.
+pub struct ContextReady {
     pub marker_seq: u64,
-    pub initializing: bool,
-    pub outcome: Result<Box<TurnCtx>, crate::agent_loop::ContextError>,
+    pub outcome: Result<Box<ExecutionContext>, crate::agent_loop::ContextError>,
 }
 
 /// Folding old history behind a summary boundary.
@@ -160,10 +149,10 @@ pub enum CompactionCommand {
 
 /// What a compaction run needs and only its requester knows. Everything
 /// shared — the provider, the budget, the hooks, the cancel token — is read
-/// from the step_run's [`TurnCtx`], so nobody carries another component's
-/// context.
+/// from [`StepRun`](crate::agent_loop::step_run::StepRun)'s [`ExecutionContext`],
+/// so the command carries no duplicate live context.
 pub struct CompactJob {
-    /// Queue items this compaction answers — a typed `/compact`. Empty when
+    /// Incoming records this compaction answers — a typed `/compact`. Empty when
     /// the boundary started it on its own.
     pub consumed: Vec<String>,
     pub manual: bool,
@@ -210,7 +199,7 @@ pub struct CompactedData {
 }
 
 /// Questions answered from state, which wake nothing.
-pub enum ReadCommand {
+pub enum QueryCommand {
     /// Read forward from a cursor: durable entries plus, when the caller has
     /// caught up to the tail, the deltas of the message still being written.
     ///
@@ -271,7 +260,7 @@ pub enum ReadCommand {
 }
 
 /// Things written into this agent's log by somebody else.
-pub enum LogCommand {
+pub enum HistoryCommand {
     /// Record something that happened to the session in this agent's log.
     ///
     /// Sent by the session actor, which still owns the fact — this only makes
@@ -328,6 +317,11 @@ pub enum SeedCommand {
 
 /// The actor's own lifetime.
 pub enum CoreCommand {
+    /// Internal: the Stop hook for one special step completed or timed out.
+    StopHookReturned {
+        marker_seq: u64,
+        result: crate::agent_loop::StopHookResult,
+    },
     /// Internal: one dispatched tool call answered (or timed out inside its
     /// own toolbox). Carried per call rather than per batch so a fast tool's
     /// result is durable while a slow one still runs.
@@ -342,7 +336,7 @@ pub enum CoreCommand {
     },
     /// Internal: reconsider what this agent should be doing. The one thing
     /// any component may say, and it names nobody — see
-    /// [`AgentLoop::advance`](super::component::AgentLoop::advance). Told by
+    /// [`RunLoop::advance`](crate::agent_loop::run_loop::RunLoop::advance). Told by
     /// the actor after every durable write, and by hand where something
     /// changed without one.
     Advance,
@@ -364,19 +358,19 @@ pub enum CoreCommand {
 /// Carries the drained turn untouched apart from a rewritten prompt: the
 /// prepare step decides nothing about what the turn consumes, it only learns
 /// what the hooks said.
-pub struct PreparedStart {
+pub struct PreparedInput {
     /// The open Agent marker the hooks prepare.
     pub marker_seq: u64,
-    pub turn: crate::agent_loop::Turn,
+    pub input: crate::agent_loop::TurnInput,
     /// Records to journal before the turn snapshots its history — which is the
     /// whole reason this round-trip exists. Empty when no hook fired.
     pub records: Vec<horsie_models::hooks::HookRecord>,
     /// `Some` abandons the turn.
-    pub abandon: Option<AbandonedStart>,
+    pub rejection: Option<RejectedInput>,
 }
 
 /// Why a prepared turn never ran.
-pub enum AbandonedStart {
+pub enum RejectedInput {
     /// A `UserPromptSubmit` hook refused the prompt. Deterministic for that
     /// prompt, so retrying it unchanged would be refused again.
     Blocked(String),
