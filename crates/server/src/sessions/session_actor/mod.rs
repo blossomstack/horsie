@@ -52,7 +52,10 @@ use turns::Turns;
 use crate::agent_loop::{
     AgentActor, AgentCommand, AgentOutcome, AgentParams, AgentRunDef, AgentRuntimeContext, Incoming,
 };
-use crate::agent_loop::{CoreCommand as AgentCoreCommand, QueueCommand as AgentQueueCommand};
+use crate::agent_loop::{
+    CoreCommand as AgentCoreCommand, QueueCommand as AgentQueueCommand,
+    ReadCommand as AgentReadCommand,
+};
 use crate::projects::{ProjectRegistry, ProjectServices, resolve};
 use crate::sessions::{
     addressing::{SessionEntityId, SessionInbox, SessionRef, SupervisorRef},
@@ -1616,6 +1619,22 @@ impl SessionActor {
             Some(run) if !state.forest.is_known_agent(agent) => state.forest.runtime_of_run(run),
             _ => state.forest.runtime_of_agent(agent),
         }
+    }
+
+    /// Ask every resident agent at the last possible moment before offload.
+    /// Session state can still read Idle in the window between a durable
+    /// enqueue and the agent's durable run marker; the agent owns that fact.
+    async fn agents_can_offload(&self) -> bool {
+        for (_, agent) in self.agents.iter() {
+            let safe = agent
+                .actor
+                .ask(|reply| AgentCommand::Read(AgentReadCommand::CanOffload { reply }))
+                .await;
+            if !matches!(safe, Ok(true)) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Stop every agent this session hosts. Used when the session unloads.

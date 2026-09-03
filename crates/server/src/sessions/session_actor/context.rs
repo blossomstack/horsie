@@ -2067,8 +2067,7 @@ mod tests {
     #[tokio::test]
     async fn typed_subagent_reconnect_uses_the_durable_catalog_without_scanning() {
         let (f, session, id) = agent_harness().await;
-        let sub = spawn_typed(&session, Some("code-reviewer")).await.unwrap();
-        let provider = typed_provider(&f, &session, id, sub, None);
+        let provider = typed_provider(&f, &session, id, Uuid::new_v4(), None);
 
         let initial = provider.provide().await.expect("initial contexts");
         let manifest = initial.manifest.clone();

@@ -241,11 +241,11 @@ impl RuntimeLifecycle {
                 CommandEffect::persist(events)
             }
             LifecycleCommand::PrepareOffload { reply } => {
-                // Work started while the supervisor was deciding: refuse, and
-                // let the idle clock start again. Asked of every component
-                // rather than hand-written here, so a component added later
-                // makes itself heard instead of being silently unloadable.
-                if actor.busy(state) {
+                // Work may start while the supervisor is deciding. Session
+                // state catches known runs; the final agent query catches an
+                // open foreground step. Pending input alone is durable and may
+                // safely survive the offload.
+                if actor.busy(state) || !actor.agents_can_offload().await {
                     let _ = reply.send(false);
                     return CommandEffect::none();
                 }

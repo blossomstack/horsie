@@ -208,6 +208,13 @@ impl Reads {
                 ));
                 CommandEffect::none()
             }
+            ReadCommand::CanOffload { reply } => {
+                let safe = !cx.step_run.is_running()
+                    && !state.turn_in_flight()
+                    && state.open_step().is_none();
+                let _ = reply.send(safe);
+                CommandEffect::none()
+            }
             ReadCommand::GetUsage { reply } => {
                 let _ = reply.send(state.usage_snapshot());
                 CommandEffect::none()

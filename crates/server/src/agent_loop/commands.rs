@@ -257,6 +257,9 @@ pub enum ReadCommand {
     /// session was asked for rather than the moment its seed happened to be
     /// built.
     LogHead { reply: ReplyTo<u64> },
+    /// Whether this actor has no in-flight foreground work. Durable pending
+    /// input may survive an offload; an open step may not.
+    CanOffload { reply: ReplyTo<bool> },
     /// Read this agent's own usage + context-size snapshot — no messages or
     /// tasks, cheaper than `GetHistory` when only the numbers are needed.
     /// Backs the session-level usage aggregation.
