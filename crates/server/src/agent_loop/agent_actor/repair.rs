@@ -194,7 +194,7 @@ pub(super) fn repair_dangling(
 
 pub(super) fn synthetic_results(ids: Vec<String>) -> impl Iterator<Item = Message> {
     ids.into_iter()
-        .map(|id| Message::tool_result(id, INTERRUPTED_RESULT, true, now_ms()))
+        .map(|id| Message::tool_result(id, INTERRUPTED_RESULT, true, Vec::new(), now_ms()))
 }
 
 #[cfg(test)]
@@ -232,7 +232,7 @@ mod tests {
                     }),
                 ],
             },
-            Message::tool_result("tc1", "ok", false, 0),
+            Message::tool_result("tc1", "ok", false, Vec::new(), 0),
         ];
         let fixed = repair_unanswered_tool_calls(history);
         // tc2 was dangling → an error tool_result is appended at the end.
@@ -392,7 +392,7 @@ mod tests {
             assistant_call("a1", "stopped"), // Stop landed here: no result ever journaled
             user_msg("never mind, do this instead"),
             assistant_call("a2", "tc2"),
-            Message::tool_result("tc2", "ok", false, 0),
+            Message::tool_result("tc2", "ok", false, Vec::new(), 0),
             Message {
                 created_at_ms: 0,
                 started_at_ms: None,
@@ -421,7 +421,7 @@ mod tests {
             assistant_call("a1", "stopped"),
             user_msg("never mind"),
             assistant_call("a2", "tc2"),
-            Message::tool_result("tc2", "ok", false, 0),
+            Message::tool_result("tc2", "ok", false, Vec::new(), 0),
         ];
         let fixed = repair_unanswered_tool_calls(history);
         match &fixed[2].parts[0] {
@@ -458,7 +458,7 @@ mod tests {
                     }),
                 ],
             },
-            Message::tool_result("tc1", "ok", false, 0),
+            Message::tool_result("tc1", "ok", false, Vec::new(), 0),
             user_msg("stop, do something else"),
         ];
         let fixed = repair_unanswered_tool_calls(history);
@@ -484,7 +484,7 @@ mod tests {
                     input: serde_json::json!({}),
                 })],
             },
-            Message::tool_result("tc1", "ok", false, 0),
+            Message::tool_result("tc1", "ok", false, Vec::new(), 0),
         ];
         let before = history.len();
         let fixed = repair_unanswered_tool_calls(history);

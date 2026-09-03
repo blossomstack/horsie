@@ -678,6 +678,7 @@ impl Agent {
                     tool_call_id: tool_call_id.clone(),
                     output: output.clone(),
                     is_error,
+                    artifacts: artifacts.clone(),
                     at_ms: finished_ms,
                 }))
                 .await?;
@@ -739,10 +740,13 @@ mod tests {
         events::EventSink,
         provider::{CompletionResponse, StopReason, ToolChoice},
         testkit::{CollectingEventSink, MockProvider, MockToolbox},
-        tool::{EmptyToolbox, ToolSpec, Toolbox},
+        tool::{EmptyToolbox, ToolSpec, ToolValue, Toolbox},
     };
     use async_trait::async_trait;
-    use horsie_models::agent::{ContentPart, TextPart, ThinkingPart, ToolCallPart, Usage};
+    use horsie_models::agent::{
+        ArtifactKind, ArtifactRef, ContentPart, ImageArtifact, TextPart, ThinkingPart,
+        ToolCallPart, Usage,
+    };
     use horsie_models::events::AgentEvent;
     use serde_json::{Value, json};
     use std::sync::{Arc, Mutex};
@@ -1985,6 +1989,56 @@ mod tests {
             "output was JSON-escaped: {}",
             tc.output
         );
+    }
+
+    #[tokio::test]
+    async fn tool_complete_event_carries_artifacts() {
+        let provider = MockProvider::tool_then_text("t1", "read_image", json!({}), "done");
+        let artifact = ArtifactRef {
+            id: "image-id".into(),
+            media_type: "image/png".into(),
+            kind: ArtifactKind::Image(ImageArtifact {
+                width: Some(640),
+                height: Some(480),
+            }),
+            byte_size: 12,
+            filename: Some("page.png".into()),
+        };
+        let returned = artifact.clone();
+        let toolbox = MockToolbox::new(
+            vec![ToolSpec {
+                name: "read_image".to_string(),
+                description: "read image".to_string(),
+                input_schema: json!({ "type": "object" }),
+            }],
+            Arc::new(move |_, _| {
+                Ok(ToolOutcome::Result(ToolValue::with_artifacts(
+                    Value::String("Image loaded.".into()),
+                    vec![returned.clone()],
+                )))
+            }),
+        );
+        let mut agent = Agent::builder(provider, toolbox, "test-conversation")
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+        agent
+            .run(
+                AgentInput::user_message("m", "go"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let complete = sink
+            .events()
+            .into_iter()
+            .find_map(|event| match event {
+                AgentEvent::ToolComplete(complete) => Some(complete),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(complete.artifacts, vec![artifact]);
     }
 
     struct BarrierToolbox {
