@@ -12,7 +12,7 @@ import { api } from "../api/client";
 import { answerConfirm, confirmSnapshot, resetConfirm } from "../lib/confirm";
 import type { SessionSummary } from "../api/types";
 import { SessionStatusKind } from "../api/types";
-import { Sidebar } from "./Sidebar";
+import { CollapsedSidebar, Sidebar } from "./Sidebar";
 
 // jsdom has no window.matchMedia, which useTheme reads at module scope via
 // ThemeToggle; the theme toggle is irrelevant to the rail's list behaviour.
@@ -75,6 +75,37 @@ describe("Sidebar", () => {
     fireEvent.click(screen.getByTestId("hide-sidebar-button"));
 
     expect(onHide).toHaveBeenCalledOnce();
+  });
+
+  it("keeps primary destinations and settings available when collapsed", () => {
+    const onShow = vi.fn();
+    render(
+      <MemoryRouter>
+        <CollapsedSidebar onShow={onShow} />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByTestId("collapsed-inbox-link").getAttribute("href")).toBe(
+      "/inbox",
+    );
+    expect(screen.getByTestId("collapsed-agents-link").getAttribute("href")).toBe(
+      "/agents",
+    );
+    expect(
+      screen.getByTestId("collapsed-environments-link").getAttribute("href"),
+    ).toBe("/environments");
+    expect(screen.getByTestId("collapsed-routines-link").getAttribute("href")).toBe(
+      "/routines",
+    );
+    expect(screen.getByTestId("collapsed-workflows-link").getAttribute("href")).toBe(
+      "/workflows",
+    );
+    expect(screen.getByTestId("collapsed-settings-link").getAttribute("href")).toBe(
+      "/settings",
+    );
+
+    fireEvent.click(screen.getByTestId("show-sidebar-button"));
+    expect(onShow).toHaveBeenCalledOnce();
   });
 });
 

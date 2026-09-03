@@ -1,6 +1,5 @@
-import { PanelLeftOpen } from "lucide-react";
 import { Outlet, useLocation } from "react-router-dom";
-import { Sidebar } from "../components/Sidebar";
+import { CollapsedSidebar, Sidebar } from "../components/Sidebar";
 import { RailProvider, useRail, useRailAutoClose } from "../components/rail";
 import { usePersistentState } from "../hooks/usePersistentState";
 import { useGlobalSessionFeed } from "../hooks/useSessions";
@@ -54,27 +53,7 @@ function Shell() {
           <Sidebar onHide={() => setSidebarHidden(true)} />
         </div>
         {sidebarHidden && (
-          <aside className="column-edge-r absolute inset-0 hidden w-12 bg-chassis md:block">
-            <button
-              className="group flex h-[var(--header-h)] w-full items-center justify-center"
-              onClick={() => setSidebarHidden(false)}
-              data-testid="show-sidebar-button"
-              title={t("rail.showSessions")}
-              aria-label={t("rail.showSessions")}
-            >
-              <span
-                aria-hidden
-                className="flex h-6 w-6 items-center justify-center rounded-[4px] bg-accent font-mono text-[0.8125rem] font-bold text-accent-ink group-hover:hidden group-focus-visible:hidden"
-              >
-                h
-              </span>
-              <PanelLeftOpen
-                size={16}
-                aria-hidden
-                className="hidden group-hover:block group-focus-visible:block"
-              />
-            </button>
-          </aside>
+          <CollapsedSidebar onShow={() => setSidebarHidden(false)} />
         )}
       </div>
       {/* `tabIndex={-1}` is what makes the skip link land: an anchor to a
