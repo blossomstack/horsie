@@ -147,6 +147,17 @@ const en = {
     hideSessions: "Hide sessions",
     filterByTag: "Filter by tag",
     newSession: "Start a new session",
+    selectSessions: "Select sessions",
+    exitSelection: "Stop selecting sessions",
+    selectSession: "Select {{title}}",
+    selectAll: "Select all",
+    selectAllSessions: "Select all visible sessions",
+    selected_one: "{{count}} selected",
+    selected_other: "{{count}} selected",
+    confirmDeleteSelected_one:
+      "Delete {{count}} selected session? This cannot be undone.",
+    confirmDeleteSelected_other:
+      "Delete {{count}} selected sessions? This cannot be undone.",
     filterPlaceholder: "Filter sessions…",
     filterSessions: "Filter sessions",
     unreachable:

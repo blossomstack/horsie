@@ -137,6 +137,21 @@ export function useDeleteSession() {
   });
 }
 
+export function useDeleteSessions() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async (ids: string[]) => {
+      const results = await Promise.allSettled(
+        ids.map((id) => api.sessions.remove(id)),
+      );
+      const failed = results.find((result) => result.status === "rejected");
+      if (failed) throw failed.reason;
+      return results;
+    },
+    onSettled: () => client.invalidateQueries({ queryKey: qk.sessions }),
+  });
+}
+
 /** Rename a session.
  *
  * The agent's title tool used to be the only writer of a session name, so a

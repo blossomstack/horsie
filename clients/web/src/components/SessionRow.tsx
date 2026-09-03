@@ -18,11 +18,15 @@ import { useTranslation } from "react-i18next";
 export function SessionRow({
   s,
   tags,
+  selected,
+  onToggle,
 }: {
   s: SessionSummary;
   /** Every tag in existence, so the menu can offer them all — not only the
    * ones this session already carries. */
   tags: string[];
+  selected?: boolean;
+  onToggle?: () => void;
 }) {
   const title = sessionTitle(s.name);
   const meta = statusMeta(s.status);
@@ -47,6 +51,38 @@ export function SessionRow({
   // outside the route that names one.
   const inside = useMatch("/sessions/:id/*")?.params.id;
   const open = (useMatch("/sessions/:id")?.params.id ?? inside) === s.id;
+
+  if (onToggle)
+    return (
+      <div
+        className="row row-quiet items-start px-2.5 py-2"
+        data-active={selected ? "true" : undefined}
+        data-testid="session-row"
+        data-session-id={s.id}
+      >
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={onToggle}
+          aria-label={t("rail.selectSession", { title })}
+          data-testid={`session-select-${s.id}`}
+          className="mt-[3px]"
+        />
+        <StatusDot status={s.status} className="mt-[7px]" />
+        <button
+          type="button"
+          className="min-w-0 flex-1 text-left"
+          onClick={onToggle}
+        >
+          <span className="block truncate text-[0.8125rem] leading-5">
+            {title}
+          </span>
+          {s.workflow && (
+            <span className="legend mt-0.5 block truncate">{s.workflow}</span>
+          )}
+        </button>
+      </div>
+    );
 
   const remove = async () => {
     if (!(await askConfirm(`Delete “${title}”? This cannot be undone.`))) return;
