@@ -795,38 +795,15 @@ impl ContextProvider for SessionContextProvider {
             Some(cached) => Some(cached.without_hook_sink()),
             None => self.runtime_client().await?,
         };
-        // KNOWN GAP: this seam runs *before* `provide` (see the
-        // `ContextProvider` docs), so the hooks below run against an agent
-        // whose plugin tree has not been built yet — and a hook is itself a
-        // plugin file. A runtime refuses a request naming an unprovisioned
-        // agent, and `run_hooks` swallows that with `unwrap_or_default`, so
-        // the hooks simply never fire.
-        //
-        // Provisioning here is the obvious fix and is NOT applied, because the
-        // extra pre-turn round trip wedges a sub session's turn: with it,
-        // three sub session tests and one subagent test hang; without it, all
-        // 36 pass. That is a sub session-path fragility this change surfaces
-        // rather than causes, and it needs its own diagnosis before this line
-        // goes in. Before the hooks, because a hook *is* a plugin file. This
-        // seam runs ahead of `provide` — see the `ContextProvider` docs — so
-        // it is the first place an agent's tree can exist, and hooks fired
-        // against an agent the runtime has never been told about are refused.
-        // `run_hooks` swallows that with `unwrap_or_default`, so the failure
-        // would be every plugin hook silently not running.
-        //
-        // `provide` provisions too. Both is correct rather than wasteful: this
-        // method is skipped entirely when `has_start_hooks` is false, and the
-        // runtime absorbs a repeat for a set it has already built.
-        // Hooks run runtime-side, so an agent with no sandbox has none to run
-        // and nothing to provision them into. It still returns the prompt: a
-        // runtime-less turn is an ordinary turn with an empty hook set.
+        // One-time initialization has already materialized the agent before a
+        // normal step can reach this seam. Reload reconnects the same runtime;
+        // it must not provision or rediscover semantic context here.
         let Some(client) = client else {
             return Ok(TurnPreparation {
                 records: Vec::new(),
                 message: turn.prompt,
             });
         };
-        self.provision_agent(&client).await?;
         let mut records = Vec::new();
         if let Some(source) = turn.start_source {
             // A subagent's start is a `SubagentStart`. It used to be a
@@ -962,11 +939,11 @@ impl ContextProvider for SessionContextProvider {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = runtime_client.clone();
 
-        // Before anything reads this agent's plugins — the hooks its bundles
-        // declare, the skills the scan finds, the MCP servers discovery starts.
-        // Sent on every load rather than once: the runtime is the only party
-        // that knows what is already on its disk, and it absorbs the repeat.
-        if let Some(client) = &runtime_client {
+        // Materialize the agent only during semantic initialization. A later
+        // reconnect binds to the same runtime and must not provision it again.
+        if !reconnect_only()
+            && let Some(client) = &runtime_client
+        {
             self.provision_agent(client).await?;
         }
 
@@ -1975,15 +1952,39 @@ mod tests {
         provider.kind = SessionAgentKind::Main;
         provider.agent_type = None;
         let before = f.agent.scan_count();
+        let provisions_before = f
+            .agent
+            .relayed()
+            .iter()
+            .filter(|kind| kind.as_str() == "ProvisionAgent")
+            .count();
         let initial = provider.provide().await.expect("initial contexts");
         assert!(initial.system_prompt.is_some());
         let after_initial = f.agent.scan_count();
         assert_eq!(after_initial, before + 1);
+        let provisions_after_initial = f
+            .agent
+            .relayed()
+            .iter()
+            .filter(|kind| kind.as_str() == "ProvisionAgent")
+            .count();
+        assert_eq!(provisions_after_initial, provisions_before + 1);
+
         let _connected = provider.reconnect().await.expect("reconnected contexts");
         assert_eq!(
             f.agent.scan_count(),
             after_initial,
             "reconnection restores clients without semantic discovery"
+        );
+        let provisions_after_reconnect = f
+            .agent
+            .relayed()
+            .iter()
+            .filter(|kind| kind.as_str() == "ProvisionAgent")
+            .count();
+        assert_eq!(
+            provisions_after_reconnect, provisions_after_initial,
+            "reconnection must not provision the already initialized agent"
         );
     }
 
@@ -2337,14 +2338,14 @@ mod tests {
     /// refusal with `unwrap_or_default`, so getting this order wrong is not an
     /// error anywhere: it is every plugin hook silently never running.
     ///
-    /// Ordering rather than mere presence, because `start_hooks` runs *ahead*
-    /// of `provide` — provisioning only in `provide` looks correct and is
-    /// exactly the bug.
+    /// Initialization is now structurally ahead of every normal step, so the
+    /// hook seam itself must not provision again.
     #[tokio::test]
-    async fn an_agent_is_provisioned_before_its_hooks_run() {
+    async fn an_agent_is_initialized_once_before_its_hooks_run() {
         let (f, session, id) = catalog_harness_with(Vec::new(), Vec::new()).await;
         let provider = catalog_provider(&f, &session, id);
 
+        provider.provide().await.expect("initialize");
         provider
             .start_hooks(StartTurn {
                 start_source: Some(horsie_models::runtime::SessionStartSource::Startup),
@@ -2366,7 +2367,15 @@ mod tests {
         );
         assert!(
             first_provision < first_hooks,
-            "provisioning must precede the hooks that read it: {relayed:?}"
+            "initialization must precede the hooks that read it: {relayed:?}"
+        );
+        assert_eq!(
+            relayed
+                .iter()
+                .filter(|kind| kind.as_str() == "ProvisionAgent")
+                .count(),
+            1,
+            "the hook seam must not provision again: {relayed:?}"
         );
     }
 
