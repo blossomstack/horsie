@@ -122,11 +122,8 @@ pub enum AgentDomainEvent {
     InputMessage {
         message: Message,
     },
-    /// Incoming records taken by work that is not a turn — a `/compact`, a summary
-    /// for branching sub sessions. Journaled when the work *lands*, not when
-    /// it starts: a crash in between replays the item, and doing it twice is
-    /// cheaper than a sub session waiting for ever on a summary nobody will
-    /// take again.
+    /// Incoming records that no longer await work. Normal provider input names
+    /// them in `TurnBegan`; special work and context failures use this record.
     Consumed {
         ids: Vec<String>,
         at_ms: u64,

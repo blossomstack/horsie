@@ -474,7 +474,7 @@ async fn wait_turns(client: &reqwest::Client, api: &Api, id: &str, want: usize) 
         if start.elapsed() > deadline {
             match got {
                 Some(got) => panic!(
-                    "timed out waiting for {want} finished turns; the agent has finished {got}"
+                    "timed out waiting for {want} finished turns; the agent has finished {got}: {page}"
                 ),
                 None => panic!(
                     "timed out waiting for {want} finished turns; the agent never became \
@@ -944,17 +944,8 @@ async fn create_message_sse_roundtrip() {
         .to_string();
     assert_eq!(
         signals,
-        vec![
-            format!("create:{runtime}"),
-            format!("get:{runtime}"),
-            format!("get:{runtime}"),
-            format!("get:{runtime}")
-        ],
-        "one create at session creation, then two gets for the first turn: the \
-         pre-run hook seam needs a runtime before the turn snapshots its \
-         history, and `provide` still resolves one of its own so a hibernated \
-         runtime is resumed on every run. The second turn reuses the cached \
-         handle and costs one. `get` never provisions."
+        vec![format!("create:{runtime}"), format!("get:{runtime}")],
+        "initialization resolves the runtime once; later steps reuse the live context"
     );
 
     server.shutdown().await;
@@ -2232,13 +2223,8 @@ async fn reads_after_a_concluded_turn_acquire_no_runtime() {
         .to_string();
     assert_eq!(
         after_turn,
-        vec![
-            format!("create:{runtime}"),
-            format!("get:{runtime}"),
-            format!("get:{runtime}")
-        ],
-        "one create at session creation, two gets for the first turn — the hook \
-         seam resolves one before the snapshot, `provide` one for the run"
+        vec![format!("create:{runtime}"), format!("get:{runtime}")],
+        "initialization resolves the runtime once"
     );
 
     // Read it every way a client can, repeatedly.
@@ -2282,10 +2268,10 @@ async fn reads_after_a_concluded_turn_acquire_no_runtime() {
     server.shutdown().await;
 }
 
-/// The promise a `202` makes: every accepted message is answered, and messages
-/// accepted during one turn go in together as the next one.
+/// The promise a `202` makes: messages accepted during one provider step are
+/// merged into the next step before the surrounding run ends.
 #[tokio::test]
-async fn messages_queued_during_a_turn_are_merged_into_the_next_one() {
+async fn messages_received_during_a_step_are_merged_into_the_next_step() {
     let mock = MockLlmServer::builder().build().await;
     let tmp = tempfile::tempdir().unwrap();
     let agent = FakeRuntimeVendor::builder("mock")
@@ -2311,10 +2297,10 @@ async fn messages_queued_during_a_turn_are_merged_into_the_next_one() {
     mock.queue_response("second");
     block.release();
     wait_inbox(&client, &server.api, &id, &[]).await;
-    wait_turns(&client, &server.api, &id, 2).await;
+    wait_turns(&client, &server.api, &id, 1).await;
 
-    // One turn, one user message: consecutive user turns are not portable
-    // across providers, so the queue is joined with a blank line instead.
+    // One provider input per step: consecutive user messages are not portable
+    // across providers, so pending input is joined with a blank line.
     let page: serde_json::Value = client
         .get(format!(
             "{}/sessions/{id}/messages?aid=main&max=100",
@@ -2340,11 +2326,11 @@ async fn messages_queued_during_a_turn_are_merged_into_the_next_one() {
 
     server.shutdown().await;
 }
-
-/// A message is durable the moment it is accepted, so a crash mid-turn owes the
-/// user an answer to it — and owes them no turn they did not start.
+/// A message is durable the moment it is accepted. Recovery closes the
+/// interrupted run, then the ordinary next-step decision consumes the pending
+/// message in a new run.
 #[tokio::test]
-async fn a_crash_keeps_the_inbox_and_starts_nothing_on_its_own() {
+async fn a_crash_repairs_the_run_then_answers_pending_input() {
     let mock = MockLlmServer::builder().build().await;
     let tmp = tempfile::tempdir().unwrap();
     let agent = FakeRuntimeVendor::builder("mock")
@@ -2360,35 +2346,16 @@ async fn a_crash_keeps_the_inbox_and_starts_nothing_on_its_own() {
     send_message(&client, &server.api, &id, "still owed an answer").await;
     wait_inbox(&client, &server.api, &id, &["still owed an answer"]).await;
 
-    // Crash mid-turn, with the queue non-empty.
     server.shutdown().await;
 
-    let signals_before = agent.signals();
+    mock.queue_response("answered after recovery");
     let server2 = start_server(tmp.path(), agent.link(), &mock.url()).await;
-    wait_turns(&client, &server2.api, &id, 1).await;
-    // The queue survived: the session actor recovers it from its journal, and
-    // recovering acquires no runtime.
-    wait_inbox(&client, &server2.api, &id, &["still owed an answer"]).await;
-    assert_eq!(
-        agent.signals(),
-        signals_before,
-        "reading a session must acquire no runtime"
-    );
-
-    // And nothing ran on its own: the queued message is still queued, waiting
-    // for the user to come back rather than being answered behind their back.
-    //
-    // A real pause, and the only one left in this file: proving that something
-    // does *not* happen means giving it a window in which to happen. Every
-    // other wait here is for an event, and none of them can stand in for this.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    wait_inbox(&client, &server2.api, &id, &["still owed an answer"]).await;
-    wait_turns(&client, &server2.api, &id, 1).await;
+    wait_turns(&client, &server2.api, &id, 2).await;
+    wait_for_reply(&client, &server2.api, &id, "answered after recovery").await;
+    wait_inbox(&client, &server2.api, &id, &[]).await;
 
     server2.shutdown().await;
 }
-
-/// The two runtime failures the design draws a hard line between: a vendor that
 /// says the runtime is gone ends the session, while a vendor that is merely
 /// unreachable fails one turn.
 #[tokio::test]
@@ -2434,9 +2401,8 @@ async fn a_gone_runtime_is_terminal_while_an_unreachable_vendor_is_not() {
 
     server.shutdown().await;
 }
-
 #[tokio::test]
-async fn an_unreachable_vendor_fails_one_turn_and_recovers_on_the_next() {
+async fn reconnect_failure_ends_one_run_and_recovers_on_the_next() {
     let mock = MockLlmServer::builder().build().await;
     let tmp = tempfile::tempdir().unwrap();
     let client = reqwest::Client::new();
@@ -2452,30 +2418,33 @@ async fn an_unreachable_vendor_fails_one_turn_and_recovers_on_the_next() {
     let id = create_session_for_vendor(&client, &server.api, "agent-3", &agent, "first").await;
     wait_turns(&client, &server.api, &id, 1).await;
 
-    // The vendor goes away between turns. Its runtime is not gone — nobody can
-    // say either way — so the turn fails and the session stays usable.
+    // A loaded agent keeps its live client. Reconnection is tested by making
+    // the agent cold while its vendor is unavailable.
     agent.disconnect();
     server.await_vendor("agent-3", false).await;
-    mock.queue_response("never reached");
-    send_message(&client, &server.api, &id, "while the vendor is down").await;
-    wait_status(&client, &server.api, &id, "Failed").await;
+    server.shutdown().await;
 
-    // The vendor comes back, still owning the runtimes it created — a real
-    // vendor's sandboxes outlive its agent process.
+    let (server2, _local2) = start_server_with_live_vendors(tmp.path(), &mock.url()).await;
+    send_message(&client, &server2.api, &id, "while the vendor is down").await;
+    wait_status(&client, &server2.api, &id, "Failed").await;
+
+    // The vendor comes back still owning the runtime it created. The pending
+    // next message reconnects that runtime rather than provisioning another.
+    let url2 = server2.api.ws("/vendor/connect");
     let agent2 = FakeRuntimeVendor::builder("agent-3")
         .resuming(&agent)
-        .connect(&url)
+        .connect(&url2)
         .await
         .expect("agent reconnects");
-    server.await_vendor("agent-3", true).await;
+    server2.await_vendor("agent-3", true).await;
     mock.queue_response("back in business");
     assert_eq!(
-        send_message(&client, &server.api, &id, "and now?")
+        send_message(&client, &server2.api, &id, "and now?")
             .await
             .as_u16(),
         202
     );
-    wait_turns(&client, &server.api, &id, 3).await;
+    wait_turns(&client, &server2.api, &id, 3).await;
     let signals = agent2.signals();
     assert!(
         signals
@@ -2488,6 +2457,8 @@ async fn an_unreachable_vendor_fails_one_turn_and_recovers_on_the_next() {
         1,
         "resuming must never provision a second runtime: {signals:?}"
     );
+
+    server2.shutdown().await;
 }
 
 /// The idle clock, through the full HTTP stack: a session left alone is

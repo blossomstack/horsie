@@ -177,10 +177,12 @@ impl CompactionStep {
     /// compacts before its first call, which is right: there is nothing to
     /// fold.
     pub(crate) fn due(cx: &CommandContext<'_>) -> bool {
-        cx.step_run.execution.as_ref().is_some_and(|c| {
-            c.budget
-                .is_some_and(|b| cx.state.context_tokens() >= b.trigger_tokens())
-        })
+        cx.state.prompt_changed_since_compaction()
+            && cx.step_run.execution.as_ref().is_some_and(|context| {
+                context
+                    .budget
+                    .is_some_and(|budget| cx.state.context_tokens() >= budget.trigger_tokens())
+            })
     }
 
     /// Take the summary on a spawned task.

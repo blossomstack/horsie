@@ -182,7 +182,16 @@ impl ContextStep {
             }
             Err(error) => {
                 let at_ms = horsie_models::now_ms();
-                CommandEffect::persist(vec![
+                let mut events = Vec::new();
+                if let Some(pending) = cx.state.next_input()
+                    && !pending.consumed().is_empty()
+                {
+                    events.push(AgentDomainEvent::Consumed {
+                        ids: pending.consumed().to_vec(),
+                        at_ms,
+                    });
+                }
+                events.extend([
                     AgentDomainEvent::StepFailed {
                         reason: StepFailure::Provider(error.message.clone()),
                     },
@@ -194,7 +203,8 @@ impl ContextStep {
                         },
                         at_ms,
                     },
-                ])
+                ]);
+                CommandEffect::persist(events)
             }
         }
     }

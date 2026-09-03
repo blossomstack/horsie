@@ -438,20 +438,59 @@ impl AgentState {
             .count()
     }
 
+    /// Whether the newest durable step has recorded its own terminal response.
     #[must_use]
     pub fn open_step_has_response(&self) -> bool {
-        let Some((marker, _)) = self.open_step() else {
+        let Some((marker, kind)) = self.open_step() else {
             return false;
         };
         self.history.iter().any(|entry| {
-            entry.seq > marker
-                && matches!(
-                    &entry.record,
+            if entry.seq <= marker {
+                return false;
+            }
+            if matches!(&entry.record, AgentDomainEvent::StepFailed { .. }) {
+                return true;
+            }
+            match (kind, &entry.record) {
+                (
+                    StepKind::Provider,
                     AgentDomainEvent::MessageComplete { .. }
-                        | AgentDomainEvent::MessageAborted { .. }
-                        | AgentDomainEvent::StepFailed { .. }
-                        | AgentDomainEvent::StopHookCompleted { .. }
+                    | AgentDomainEvent::MessageAborted { .. },
                 )
+                | (StepKind::Initialize, AgentDomainEvent::AgentInitialized { .. })
+                | (StepKind::Connect, AgentDomainEvent::ConnectionCompleted)
+                | (StepKind::StopHook, AgentDomainEvent::StopHookCompleted { .. })
+                | (StepKind::Compaction, AgentDomainEvent::Compacted { .. }) => true,
+                (
+                    StepKind::SeedSummary {
+                        request_id: expected,
+                    },
+                    AgentDomainEvent::SeedSummaryTaken { request_id, .. },
+                ) => request_id == expected,
+                _ => false,
+            }
+        })
+    }
+
+    /// Whether prompt-visible history changed after the newest compaction.
+    #[must_use]
+    pub fn prompt_changed_since_compaction(&self) -> bool {
+        let Some(compaction) = self
+            .history
+            .iter()
+            .rposition(|entry| matches!(&entry.record, AgentDomainEvent::Compacted { .. }))
+        else {
+            return true;
+        };
+        self.history[compaction + 1..].iter().any(|entry| {
+            matches!(
+                &entry.record,
+                AgentDomainEvent::InputMessage { .. }
+                    | AgentDomainEvent::MessageComplete { .. }
+                    | AgentDomainEvent::MessageAborted { .. }
+                    | AgentDomainEvent::ToolComplete { .. }
+                    | AgentDomainEvent::HookRan { .. }
+            )
         })
     }
 
@@ -1027,6 +1066,39 @@ mod history_tests {
                 .iter()
                 .any(|entry| matches!(&entry.record, AgentDomainEvent::RunEnded { .. }))
         );
+    }
+
+    #[test]
+    fn a_completed_compaction_closes_its_step() {
+        let state = [
+            AgentDomainEvent::StepStarted {
+                kind: StepKind::Compaction,
+            },
+            AgentDomainEvent::Compacted {
+                summary: "summary".into(),
+                carried_state: String::new(),
+                retained_from_message_id: None,
+                trigger: horsie_agentcore::CompactionTrigger::Manual(
+                    horsie_agentcore::EmptyOutcome {},
+                ),
+                instructions: None,
+                tokens_before: 100,
+                tokens_after: 20,
+                usage: None,
+                at_ms: 1,
+            },
+        ]
+        .into_iter()
+        .fold(AgentActor::initial_state(), fold);
+        assert!(state.open_step_has_response());
+        assert!(!state.prompt_changed_since_compaction());
+        let changed = fold(
+            state,
+            AgentDomainEvent::InputMessage {
+                message: Message::user("u", "new input", 2),
+            },
+        );
+        assert!(changed.prompt_changed_since_compaction());
     }
 
     #[test]

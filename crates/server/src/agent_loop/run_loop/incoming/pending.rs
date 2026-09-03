@@ -139,6 +139,16 @@ pub enum PendingInput {
     Input(Box<TurnInput>),
 }
 
+impl PendingInput {
+    #[must_use]
+    pub fn consumed(&self) -> &[String] {
+        match self {
+            Self::Summary { consumed, .. } | Self::Compact { consumed, .. } => consumed,
+            Self::Input(input) => &input.consumed,
+        }
+    }
+}
+
 /// Everything an agent is about to be resumed with, and what that consumes.
 ///
 /// Every field is what the actor needs to journal the turn, so nothing below
