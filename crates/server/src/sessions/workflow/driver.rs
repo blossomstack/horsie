@@ -181,7 +181,6 @@ mod tests {
             memory_spaces: Vec::new(),
             thinking_effort: None,
             max_concurrent_subagents: None,
-            allow_recursive_delegation: false,
             auto_compact: None,
             plugins: Vec::new(),
         }

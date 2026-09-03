@@ -164,10 +164,6 @@ pub struct AgentSettings {
     /// [`crate::sessions::run_forest::DEFAULT_MAX_CONCURRENT_SUBAGENTS`].
     #[serde(default)]
     pub max_concurrent_subagents: Option<u32>,
-    /// Whether agents delegated by this session may delegate again. Missing
-    /// from an existing journal means no: recursive fan-out must be chosen.
-    #[serde(default)]
-    pub allow_recursive_delegation: bool,
     /// Standing instructions this session's agent runs under, resolved from its
     /// preset at creation and snapshotted here like everything else a preset
     /// contributes. `#[serde(default)]` so pre-instruction journal rows
@@ -197,11 +193,6 @@ impl AgentSettings {
     pub fn max_subagents(&self) -> u32 {
         self.max_concurrent_subagents
             .unwrap_or(crate::sessions::run_forest::DEFAULT_MAX_CONCURRENT_SUBAGENTS)
-    }
-
-    /// Whether a non-main agent may receive the delegation tools.
-    pub const fn allows_recursive_delegation(&self) -> bool {
-        self.allow_recursive_delegation
     }
 }
 
@@ -375,7 +366,6 @@ impl SessionSpec {
                     memory_spaces: vec![],
                     thinking_effort: None,
                     max_concurrent_subagents: None,
-                    allow_recursive_delegation: false,
                     auto_compact: None,
                     plugins: Vec::new(),
                 }),
@@ -625,7 +615,6 @@ mod tests {
             memory_spaces: vec![],
             thinking_effort: None,
             max_concurrent_subagents: None,
-            allow_recursive_delegation: false,
             auto_compact: None,
             plugins: Vec::new(),
         }
@@ -830,7 +819,6 @@ mod tests {
         let old = r#"{"source":"AdHoc","model":"m","allowed_tools":null,"use_plugins":null,"max_iterations":null,"max_retries":0}"#;
         let s: AgentSettings = serde_json::from_str(old).unwrap();
         assert_eq!(s.max_concurrent_subagents, None);
-        assert!(!s.allows_recursive_delegation());
         assert_eq!(
             s.max_subagents(),
             crate::sessions::run_forest::DEFAULT_MAX_CONCURRENT_SUBAGENTS
@@ -842,11 +830,6 @@ mod tests {
             ..serde_json::from_str::<AgentSettings>(old).unwrap()
         };
         assert_eq!(s.max_subagents(), 3);
-        let s = AgentSettings {
-            allow_recursive_delegation: true,
-            ..s
-        };
-        assert!(s.allows_recursive_delegation());
     }
 
     /// `source` is the one field here without `#[serde(default)]`, and that is
