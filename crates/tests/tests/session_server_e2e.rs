@@ -2052,6 +2052,30 @@ async fn a_dead_agent_link_fails_the_next_turn_visibly_instead_of_hanging() {
     .expect("test timed out");
 }
 
+/// A completed image read must let the agent continue its turn.
+///
+/// The model requests `read_image` and then requires its result before it can
+/// answer. If the tool handoff stays pending, the reply wait expires instead
+/// of leaving a session running forever.
+#[tokio::test]
+async fn reading_an_image_completes_the_session_turn() {
+    let mock = MockLlmServer::builder().build().await;
+    mock.queue_tool_call("read_image", serde_json::json!({ "path": "page.png" }));
+    mock.queue_response("I read the image successfully");
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
+    let client = reqwest::Client::new();
+
+    let id = create_session(&client, &server.api, &agent, "read page.png").await;
+    wait_for_reply(&client, &server.api, &id, "I read the image successfully").await;
+
+    server.shutdown().await;
+}
+
 /// #61 item 23: tool-call cancellation is never propagated to the sandbox.
 ///
 /// On cancel, `Agent::run` drops the in-flight tool futures
