@@ -281,30 +281,45 @@ mod tests {
     use super::*;
     use crate::agent_loop::agent_actor::testing::*;
     use horsie_agentcore::{ContentPart, LifecycleEvent, Message, Role};
-    use horsie_models::agent::{ToolCallPart, ToolResultPart, Usage};
+    use horsie_models::agent::{
+        ArtifactKind, ArtifactRef, ImageArtifact, ToolCallPart, ToolResultPart, Usage,
+    };
 
     #[test]
-    fn a_replayed_tool_result_keeps_its_original_stamp() {
-        // The stamp is journaled on the event rather than read from the clock
-        // in `apply_event`; folding the same log twice must therefore produce
-        // the same transcript, not one dated by whenever recovery happened.
+    fn a_replayed_tool_result_keeps_its_original_stamp_and_artifacts() {
+        let artifact = ArtifactRef {
+            id: "image-id".into(),
+            media_type: "image/png".into(),
+            kind: ArtifactKind::Image(ImageArtifact {
+                width: Some(640),
+                height: Some(480),
+            }),
+            byte_size: 12,
+            filename: Some("page.png".into()),
+        };
         let fold = || {
-            let mut state = AgentActor::initial_state();
-            state = AgentActor::apply_event(
-                state,
+            AgentActor::apply_event(
+                AgentActor::initial_state(),
                 AgentDomainEvent::ToolComplete {
                     at_ms: 1_700_000_000_123,
                     tool_call_id: "tc1".into(),
-                    output: "result".into(),
+                    output: "Image loaded.".into(),
                     is_error: false,
+                    artifacts: vec![artifact.clone()],
                 },
-            );
-            state
+            )
         };
         let first = fold();
         let second = fold();
         assert_eq!(first.log[0].at_ms, 1_700_000_000_123);
-        assert_eq!(first.log[0].at_ms, second.log[0].at_ms);
+        assert_eq!(first.log, second.log);
+        let AgentLogBody::Llm(message) = &first.log[0].body else {
+            panic!("expected tool result message")
+        };
+        let ContentPart::ToolResult(result) = &message.parts[0] else {
+            panic!("expected tool result part")
+        };
+        assert_eq!(result.artifacts, vec![artifact]);
     }
 
     /// A tool hook edits the tool's own output, so the tool result already
@@ -470,6 +485,7 @@ mod tests {
                 tool_call_id: "tc1".into(),
                 output: "denied".into(),
                 is_error: true,
+                artifacts: Vec::new(),
                 at_ms: 9,
             },
         );
@@ -531,6 +547,7 @@ mod tests {
                     tool_call_id: "tc1".into(),
                     output: "ok".into(),
                     is_error: false,
+                    artifacts: Vec::new(),
                     at_ms: 3,
                 },
                 // Not an entry: it must not consume a number, or two replays
@@ -602,6 +619,7 @@ mod tests {
                 tool_call_id: "tc1".into(),
                 output: "result".into(),
                 is_error: false,
+                artifacts: Vec::new(),
             },
         );
         state = AgentActor::apply_event(

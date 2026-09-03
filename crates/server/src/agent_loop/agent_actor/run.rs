@@ -406,10 +406,17 @@ impl Component for Run {
                 tool_call_id,
                 output,
                 is_error,
+                artifacts,
                 at_ms,
             } => state.push(
                 at_ms,
-                AgentLogBody::Llm(Message::tool_result(tool_call_id, output, is_error, at_ms)),
+                AgentLogBody::Llm(Message::tool_result(
+                    tool_call_id,
+                    output,
+                    is_error,
+                    artifacts,
+                    at_ms,
+                )),
             ),
             AgentDomainEvent::RunComplete {
                 usage,

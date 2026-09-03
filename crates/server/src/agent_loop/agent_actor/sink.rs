@@ -139,6 +139,7 @@ pub(super) fn coarse_event(e: &AgentEvent) -> Option<AgentDomainEvent> {
             tool_call_id: ev.tool_call_id.clone(),
             output: ev.output.clone(),
             is_error: ev.is_error,
+            artifacts: ev.artifacts.clone(),
             // Carried on the streaming event, not re-read here: the in-memory
             // history already holds a message stamped with it.
             at_ms: ev.at_ms,
@@ -197,24 +198,39 @@ pub(super) fn coarse_event(e: &AgentEvent) -> Option<AgentDomainEvent> {
 mod tests {
     use super::*;
     use horsie_agentcore::AgentInput;
-    use horsie_models::agent::Usage;
+    use horsie_models::agent::{ArtifactKind, ArtifactRef, ImageArtifact, Usage};
 
     #[test]
-    fn coarse_events_carry_the_stamp_the_agent_recorded() {
+    fn coarse_events_carry_the_tool_result_the_agent_recorded() {
+        let artifact = ArtifactRef {
+            id: "image-id".into(),
+            media_type: "image/png".into(),
+            kind: ArtifactKind::Image(ImageArtifact {
+                width: Some(640),
+                height: Some(480),
+            }),
+            byte_size: 12,
+            filename: Some("page.png".into()),
+        };
         let tool = coarse_event(&AgentEvent::ToolComplete(
             horsie_models::events::ToolCompleteEvent {
                 message_id: "result:tc1".into(),
                 tool_call_id: "tc1".into(),
                 output: "ok".into(),
                 is_error: false,
+                artifacts: vec![artifact.clone()],
                 at_ms: 42,
             },
         ))
         .expect("ToolComplete is journaled");
-        assert!(
-            matches!(tool, AgentDomainEvent::ToolComplete { at_ms, .. } if at_ms == 42),
-            "the streaming event's stamp must survive into the journal"
-        );
+        let AgentDomainEvent::ToolComplete {
+            artifacts, at_ms, ..
+        } = tool
+        else {
+            panic!("expected tool completion");
+        };
+        assert_eq!(at_ms, 42);
+        assert_eq!(artifacts, vec![artifact]);
 
         let run = coarse_event(&AgentEvent::RunComplete(
             horsie_models::events::RunCompleteEvent {

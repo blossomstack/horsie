@@ -398,6 +398,7 @@ impl agent::Message {
         tool_call_id: impl Into<String>,
         output: impl Into<String>,
         is_error: bool,
+        artifacts: Vec<agent::ArtifactRef>,
         created_at_ms: u64,
     ) -> Self {
         let tool_call_id = tool_call_id.into();
@@ -408,7 +409,7 @@ impl agent::Message {
                 tool_call_id,
                 output: output.into(),
                 is_error,
-                artifacts: Vec::new(),
+                artifacts,
             })],
             created_at_ms,
             started_at_ms: None,

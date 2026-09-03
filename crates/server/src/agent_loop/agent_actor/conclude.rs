@@ -466,6 +466,7 @@ impl AgentActor {
                 tool_call_id: c.tool_call_id.clone(),
                 output: reason.clone(),
                 is_error: true,
+                artifacts: Vec::new(),
                 at_ms,
             })
             .collect();

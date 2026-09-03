@@ -9,6 +9,7 @@ use super::*;
 use crate::agent_loop::context::AgentRunDef;
 use horsie_actor::ReplyTo;
 use horsie_agentcore::{LifecycleEvent, Message, Usage};
+use horsie_models::agent::ArtifactRef;
 use serde::{Deserialize, Serialize};
 
 /// Per-agent configuration distilled from an [`AgentRunDef`]. Runtime only.
@@ -376,6 +377,10 @@ pub enum AgentDomainEvent {
         tool_call_id: String,
         output: String,
         is_error: bool,
+        /// What the result produced besides text. Missing from journals written
+        /// before artifact-bearing tools existed.
+        #[serde(default)]
+        artifacts: Vec<ArtifactRef>,
         /// When the tool finished. Journaled rather than re-read at fold time:
         /// this variant rebuilds its `Message` in `apply_event`, so a recovered
         /// transcript would otherwise stamp every past tool result with the
@@ -557,5 +562,22 @@ mod tests {
     #[test]
     fn from_def_owes_no_result() {
         assert!(!AgentParams::from_def(&def_fixture()).requires_result);
+    }
+
+    #[test]
+    fn old_tool_complete_events_default_to_no_artifacts() {
+        let event: AgentDomainEvent = serde_json::from_value(serde_json::json!({
+            "ToolComplete": {
+                "tool_call_id": "tc1",
+                "output": "ok",
+                "is_error": false,
+                "at_ms": 42
+            }
+        }))
+        .unwrap();
+        assert!(matches!(
+            event,
+            AgentDomainEvent::ToolComplete { artifacts, .. } if artifacts.is_empty()
+        ));
     }
 }

@@ -5,6 +5,7 @@ use agent.AgentInput;
 use agent.CompactionSkippedLifecycle;
 use agent.CompactionTrigger;
 use agent.Message;
+use agent.ArtifactRef;
 use agent.Usage;
 use agent.Role;
 
@@ -36,7 +37,17 @@ struct ToolExecutingEvent { message_id: String, tool_call_id: String }
 /// event so the tool-result message held in memory and the one folded from the
 /// journal carry the identical stamp — read the clock twice and a replayed
 /// transcript would disagree with the live one.
-struct ToolCompleteEvent  { message_id: String, tool_call_id: String, output: String, is_error: bool, at_ms: u64 }
+struct ToolCompleteEvent  {
+    message_id: String,
+    tool_call_id: String,
+    output: String,
+    is_error: bool,
+    /// What the result produced besides text. Defaulted because agent events
+    /// cross a process boundary and an older sender has no such field.
+    #[default = "[]"]
+    artifacts: Vec<ArtifactRef>,
+    at_ms: u64,
+}
 
 /// Run lifecycle — message_id is a UUID for this run invocation.
 /// `usage` sums every provider call this run made (tool-loop iterations
