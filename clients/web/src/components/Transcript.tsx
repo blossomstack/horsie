@@ -19,6 +19,11 @@ import { HookNoticeRow } from "./HookNoticeRow";
 import { Prose } from "./Prose";
 import { ToolCallCard } from "./ToolCallCard";
 import { TurnActions } from "./TurnActions";
+import {
+  TranscriptCommentProvider,
+  TranscriptTurnComments,
+  type TranscriptCommenting,
+} from "./TranscriptComments";
 import { WorkGroup } from "./WorkGroup";
 import { useTranslation } from "react-i18next";
 
@@ -69,6 +74,8 @@ function SegmentView({
           // ask-card choices, so the two copy buttons returned different
           // content from each other.
           data-prose-segment=""
+          data-comment-anchor={segment.anchorId}
+          data-comment-disabled={segment.streaming ? "" : undefined}
           data-testid={
             segment.streaming ? "assistant-streaming" : "assistant-text"
           }
@@ -155,6 +162,9 @@ function AssistantTurn({
           ))
         )}
       </div>
+      {msgs.length > 0 && (
+        <TranscriptTurnComments anchorIds={msgs.map((msg) => msg.id)} />
+      )}
     </Turn>
   );
 }
@@ -169,6 +179,7 @@ function UserTurn({ msg }: { msg: RenderedMessage }) {
       className={cn((msg.optimistic || msg.queued) && "opacity-60")}
       data-testid="message"
       data-role={msg.role}
+      data-comment-anchor={settled ? msg.id : undefined}
       data-entry-ids={msg.id}
       data-queued={msg.queued ? "true" : undefined}
       actions={
@@ -195,6 +206,7 @@ function UserTurn({ msg }: { msg: RenderedMessage }) {
           {t("transcript.queued")}
         </div>
       )}
+      {settled && <TranscriptTurnComments anchorIds={[msg.id]} />}
     </Turn>
   );
 }
@@ -228,8 +240,11 @@ export function groupTurns(items: TranscriptItem[]): TurnGroup[] {
   const turns: TurnGroup[] = [];
   const intoAssistant = (m: RenderedMessage) => {
     const last = turns[turns.length - 1];
-    if (last?.kind === "assistant") last.msgs.push(m);
-    else turns.push({ kind: "assistant", id: m.id, msgs: [m] });
+    if (last?.kind === "assistant") {
+      last.msgs.push(m);
+      // The newest message remains stable when pagination prepends history.
+      last.id = m.id;
+    } else turns.push({ kind: "assistant", id: m.id, msgs: [m] });
   };
   for (const item of items) {
     if (item.kind === "notice") {
@@ -298,6 +313,7 @@ export function Transcript({
   showLive,
   showThinking,
   sessionId,
+  commenting,
 }: {
   items: TranscriptItem[];
   streaming: string;
@@ -306,8 +322,10 @@ export function Transcript({
   showThinking: boolean;
   /** Which session these agents belong to, so a sub session marker can link to one. */
   sessionId: string;
+  commenting?: TranscriptCommenting;
 }) {
   const turns = groupTurns(items);
+  const rootRef = useRef<HTMLDivElement>(null);
   // Gated on session status alone (not on whether content has arrived yet) so
   // the live tail — and its caret — is reachable during the gap between
   // "Running" and the first token or tool.
@@ -317,7 +335,11 @@ export function Transcript({
   const mergeLiveIntoLastTurn = hasLive && lastTurn?.kind === "assistant";
 
   return (
-    <div className="mx-auto flex w-full max-w-[54rem] flex-col gap-7 px-4 py-7 sm:px-6">
+    <TranscriptCommentProvider
+      rootRef={rootRef}
+      commenting={commenting}
+      className="mx-auto flex w-full max-w-[54rem] flex-col gap-7 px-4 py-7 sm:px-6"
+    >
       {turns.map((t, i) =>
         t.kind === "notice" ? (
           <HookNoticeRow key={t.id} record={t.record} />
@@ -350,6 +372,6 @@ export function Transcript({
           live={{ text: streaming, orphanTools }}
         />
       )}
-    </div>
+    </TranscriptCommentProvider>
   );
 }

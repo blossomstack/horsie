@@ -4,6 +4,7 @@ import {
   CircleAlert,
   ListTodo,
   MessageSquareText,
+  SendHorizontal,
   Square,
   Trash2,
   Waypoints,
@@ -34,6 +35,10 @@ import { SettingsMenu } from "../components/SettingsMenu";
 import { StatusLamp } from "../components/StatusBadge";
 import { TaskListPanel } from "../components/TaskListPanel";
 import { Transcript } from "../components/Transcript";
+import {
+  formatTranscriptComments,
+  type TranscriptComment,
+} from "../components/TranscriptComments";
 import { TranscriptSpine } from "../components/TranscriptSpine";
 import { formatOutput, retryUnavailable } from "./workflows/runGraph";
 import { useRetryStep, useWorkflowRun } from "../hooks/useWorkflows";
@@ -439,6 +444,13 @@ export function SessionView() {
   // navigated to at once, because a sub session is `provisioning` until its history
   // has been handed over.
   const [pendingSubSession, setPendingSubSession] = useState<string | null>(null);
+  const [transcriptComments, setTranscriptComments] = useState<TranscriptComment[]>([]);
+  const transcriptCommentScope = `${id ?? ""}:${agentId ?? MAIN_AGENT}`;
+  const transcriptCommentScopeRef = useRef(transcriptCommentScope);
+  transcriptCommentScopeRef.current = transcriptCommentScope;
+  useEffect(() => {
+    setTranscriptComments([]);
+  }, [transcriptCommentScope]);
   useEffect(() => {
     if (!pendingSubSession || !id) return;
     if (!subSessionReadyToOpen(detail?.subSessions, pendingSubSession)) return;
@@ -451,7 +463,8 @@ export function SessionView() {
     text: string,
     artifacts: ArtifactRef[],
   ) => {
-    setSendError(null);
+    const requestScope = `${sessionId}:${agentId ?? MAIN_AGENT}`;
+    if (transcriptCommentScopeRef.current === requestScope) setSendError(null);
     // Echo the message immediately — a live session's SSE push for this same
     // message can arrive before this request resolves, so the echo must exist
     // *before* the request goes out or the real message beats it and the
@@ -477,12 +490,50 @@ export function SessionView() {
       }
     } catch (e) {
       removeOptimisticUser(optimisticId);
-      setSendError(
-        e instanceof ApiRequestError ? e.message : "Failed to send message.",
-      );
+      if (transcriptCommentScopeRef.current === requestScope) {
+        setSendError(
+          e instanceof ApiRequestError ? e.message : "Failed to send message.",
+        );
+      }
       // Rethrown so the composer can restore what was typed. Swallowing it
       // here is what let an offline send clear the box and lose the message.
       throw e;
+    }
+  };
+
+  const sendTranscriptComments = async () => {
+    if (
+      !id ||
+      transcriptComments.length === 0 ||
+      transcriptComments.some((item) => !item.comment.trim())
+    )
+      return;
+    const sending = transcriptComments;
+    const sendingScope = transcriptCommentScope;
+    const text = formatTranscriptComments(sending, {
+      intro: t("transcript.commentPrompt"),
+      excerpt: t("transcript.excerpt"),
+      comment: t("transcript.comment"),
+    });
+    // The outgoing set stops being editable at send; a failed request restores it.
+    const sent = new Set(sending.map((item) => item.id));
+    setTranscriptComments((current) =>
+      current.filter((item) => !sent.has(item.id)),
+    );
+    try {
+      await handleSend(id, text, []);
+    } catch (error) {
+      // A late failure from a page already left must not seed its text into the
+      // session now on screen.
+      if (transcriptCommentScopeRef.current === sendingScope) {
+        setTranscriptComments((current) => [
+          ...sending.filter(
+            (item) => !current.some((saved) => saved.id === item.id),
+          ),
+          ...current,
+        ]);
+      }
+      throw error;
     }
   };
 
@@ -787,11 +838,11 @@ export function SessionView() {
     if (el && !overlayOpen) readEdges(el);
   });
 
-  // Reset scroll intent when switching sessions.
+  // Reset page-local state when switching sessions or agent runs.
   useEffect(() => {
     stick.current = true;
     setSendError(null);
-  }, [id]);
+  }, [transcriptCommentScope]);
 
   if (!id) return null;
   // Only on failure, not on `isLoading`: the chrome is drawn while the read is
@@ -955,6 +1006,36 @@ export function SessionView() {
                 Greyed and unpressable says the same thing and looks like it
                 meant to. */}
             <div className="flex shrink-0 items-center gap-0.5" data-testid="session-keys">
+              {!isRun && transcriptComments.length > 0 && (
+                <button
+                  type="button"
+                  className="key key-go key-sm mr-1"
+                  disabled={
+                    overlayOpen ||
+                    send.isPending ||
+                    transcriptComments.some((item) => !item.comment.trim()) ||
+                    (status !== undefined && !statusMeta(status).canSend)
+                  }
+                  onClick={() => void sendTranscriptComments().catch(() => {})}
+                  title={t("transcript.sendComments", {
+                    count: transcriptComments.length,
+                  })}
+                  aria-label={t("transcript.sendComments", {
+                    count: transcriptComments.length,
+                  })}
+                  data-testid="send-transcript-comments"
+                >
+                  <SendHorizontal size={13} aria-hidden />
+                  <span className="hidden sm:inline">
+                    {t("transcript.sendComments", { count: transcriptComments.length })}
+                  </span>
+                  <span className="sm:hidden">
+                    {t("transcript.sendCommentsShort", {
+                      count: transcriptComments.length,
+                    })}
+                  </span>
+                </button>
+              )}
               <ContextGauge
                 agent={mainAgent}
                 sessionTotal={detail?.usageTotal}
@@ -1134,12 +1215,32 @@ export function SessionView() {
                   </div>
                 )}
                 <Transcript
+                  key={`${id}:${agentId ?? MAIN_AGENT}`}
                   items={stream.items}
                   streaming={stream.streaming}
                   orphanTools={stream.orphanTools}
                   showLive={status === SessionStatusKind.Running}
                   showThinking={uiSettings.showThinking}
                   sessionId={id}
+                  commenting={
+                    isRun
+                      ? undefined
+                      : {
+                          comments: transcriptComments,
+                          onAdd: (comment) =>
+                            setTranscriptComments((current) => [...current, comment]),
+                          onUpdate: (commentId, comment) =>
+                            setTranscriptComments((current) =>
+                              current.map((item) =>
+                                item.id === commentId ? { ...item, comment } : item,
+                              ),
+                            ),
+                          onRemove: (commentId) =>
+                            setTranscriptComments((current) =>
+                              current.filter((item) => item.id !== commentId),
+                            ),
+                        }
+                  }
                 />
               </>
             )}

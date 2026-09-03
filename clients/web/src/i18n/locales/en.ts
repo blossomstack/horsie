@@ -346,6 +346,16 @@ const en = {
   transcript: {
     working: "The agent is working",
     queued: "Unsent \u2014 goes in with the next turn",
+    commentPlaceholder: "Add a comment…",
+    addComment: "Add comment",
+    editComment: "Edit comment",
+    removeComment: "Remove comment",
+    sendComments_one: "Send 1 comment",
+    sendComments_other: "Send {{count}} comments",
+    sendCommentsShort: "Send · {{count}}",
+    commentPrompt: "I have comments on these excerpts from the transcript.",
+    excerpt: "Excerpt",
+    comment: "Comment",
   },
 
   workGroup: {

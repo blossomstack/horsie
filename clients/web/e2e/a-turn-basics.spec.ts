@@ -108,3 +108,67 @@ test("A4: the composer only scrolls once the input passes the auto-grow cap", as
   await input.fill("");
   await expect(input).toHaveCSS("overflow-y", "hidden");
 });
+
+test("A5: selected transcript text can be commented on and sent from the header", async ({
+  page,
+  appBase,
+  mock,
+}) => {
+  await mock.queueText("Keep the retry limit at three attempts.");
+  await createSession(page, appBase);
+  await sendMessage(page, "Review the retry policy");
+  await expectStatus(page, "Idle");
+
+  const prompt = page
+    .locator('[data-testid="message"][data-role="User"]')
+    .getByTestId("collapsible-body");
+  await prompt.evaluate((element) => {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  });
+  await page.getByLabel("Add a comment…").fill("Keep this request in scope.");
+  await page.getByRole("button", { name: "Add comment" }).click();
+
+  const reply = page.getByTestId("assistant-text");
+  await reply.evaluate((element) => {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  });
+
+  await page.getByLabel("Add a comment…").fill("Increase this to five attempts.");
+  await page.getByRole("button", { name: "Add comment" }).click();
+  await expect(page.getByTestId("transcript-comment")).toHaveCount(2);
+  await expect(page.getByTestId("transcript-comment").last()).toContainText(
+    "Increase this to five attempts.",
+  );
+
+  const sendComments = page.getByTestId("send-transcript-comments");
+  await expect(sendComments).toHaveAccessibleName("Send 2 comments");
+  await mock.queueText("The retry limit is now five attempts.");
+  await sendComments.click();
+
+  const sentMessage = page.locator('[data-testid="message"][data-role="User"]').last();
+  await expect(sentMessage).toContainText("Keep this request in scope.");
+  await expect(sentMessage).toContainText("Increase this to five attempts.");
+  await expect(page.getByTestId("send-transcript-comments")).toHaveCount(0);
+  await expect(page.getByTestId("assistant-text").last()).toContainText(
+    "The retry limit is now five attempts.",
+  );
+  await expect
+    .poll(() => mock.capturedContains("Keep this request in scope."))
+    .toBe(true);
+  await expect
+    .poll(() => mock.capturedContains("Keep the retry limit at three attempts."))
+    .toBe(true);
+  await expect
+    .poll(() => mock.capturedContains("Increase this to five attempts."))
+    .toBe(true);
+});
