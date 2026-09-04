@@ -70,9 +70,9 @@ impl TaskLists {
         match cmd {
             TaskListCommand::TaskListOp { action, reply } => {
                 let mut next = state.task_list.clone();
-                match next.apply(action) {
+                match next.apply(action.clone()) {
                     Ok(()) => {
-                        let text = next.render();
+                        let text = next.render_result(&action);
                         let _ = reply.send(Ok(text));
                         CommandEffect::persist(vec![AgentDomainEvent::TaskListChanged {
                             snapshot: next,
