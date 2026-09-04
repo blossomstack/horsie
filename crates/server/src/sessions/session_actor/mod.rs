@@ -1449,52 +1449,49 @@ impl SessionActor {
         };
         let (who, end) = match TurnEnd::split(outcome) {
             Ok(pair) => pair,
-            // Usage is banked for every agent alike, and always: the tokens
-            // were spent whatever became of the turn that spent them. The main
-            // agent banks under a fixed name because its journal is keyed by
-            // the session id; every other agent banks under its own.
-            Err((
-                agent,
-                NotAnEnd::Usage {
-                    usage_total,
-                    context_tokens,
-                },
-            )) => {
-                let agent_id = match agent == self.id {
-                    true => MAIN_AGENT_ID.to_string(),
-                    false => agent.to_string(),
-                };
-                return CommandEffect::persist(vec![SessionDomainEvent::UsageRecorded {
-                    at_ms: now_ms(),
-                    agent_id,
-                    usage_total,
-                    context_tokens,
-                }]);
-            }
-            Err((agent, NotAnEnd::Started)) => {
-                return self.on_agent_started(state, agent).await;
-            }
-            // A summary taken for somebody else. Not this agent's turn ending —
-            // it may still be running — so it is answered here and the routing
-            // below never sees it.
-            Err((
-                _,
-                NotAnEnd::SeedSummary {
-                    sub_sessions,
-                    result,
-                },
-            )) => {
-                return SubSessions::handle(
-                    self,
-                    state,
-                    SubSessionCommand::Summarised {
+            Err(boxed) => match *boxed {
+                (
+                    agent,
+                    NotAnEnd::Usage {
+                        usage_total,
+                        context_tokens,
+                        efficiency,
+                    },
+                ) => {
+                    let agent_id = match agent == self.id {
+                        true => MAIN_AGENT_ID.to_string(),
+                        false => agent.to_string(),
+                    };
+                    return CommandEffect::persist(vec![SessionDomainEvent::UsageRecorded {
+                        at_ms: now_ms(),
+                        agent_id,
+                        usage_total,
+                        context_tokens,
+                        efficiency,
+                    }]);
+                }
+                (agent, NotAnEnd::Started) => {
+                    return self.on_agent_started(state, agent).await;
+                }
+                (
+                    _,
+                    NotAnEnd::SeedSummary {
                         sub_sessions,
                         result,
                     },
-                    ctx,
-                )
-                .await;
-            }
+                ) => {
+                    return SubSessions::handle(
+                        self,
+                        state,
+                        SubSessionCommand::Summarised {
+                            sub_sessions,
+                            result,
+                        },
+                        ctx,
+                    )
+                    .await;
+                }
+            },
         };
         // One lookup: the entry that hosts the agent says what its outcome
         // means. No ordering between registries to get right, because there is

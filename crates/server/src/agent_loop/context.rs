@@ -118,6 +118,7 @@ pub enum AgentOutcome {
         /// so its owner can bank both, and answer for either without waking
         /// the agent again.
         context_tokens: u32,
+        efficiency: crate::agent_loop::AgentEfficiencyStats,
     },
     /// A `/summary-n-fork` turn produced the summary the sub sessions
     /// branching off this agent are waiting on.

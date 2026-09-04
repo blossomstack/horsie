@@ -107,6 +107,68 @@ pub struct AgentState {
     /// right now.
     #[serde(default)]
     pub context_tokens: u32,
+    /// Durable operational counters used to explain costly runs.
+    #[serde(default)]
+    pub efficiency: AgentEfficiencyStats,
+}
+
+/// Cumulative counters that explain an agent's execution cost.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentEfficiencyStats {
+    pub provider_calls: u64,
+    pub tool_calls: u64,
+    pub failed_tool_calls: u64,
+    pub tool_result_bytes: u64,
+    pub completed_runs: u64,
+    pub aborted_runs: u64,
+    pub compactions: u64,
+}
+
+impl AgentEfficiencyStats {
+    pub(super) fn observe(&mut self, event: &AgentDomainEvent) {
+        match event {
+            AgentDomainEvent::MessageComplete { message }
+            | AgentDomainEvent::MessageAborted { message } => {
+                self.provider_calls = self.provider_calls.saturating_add(1);
+                let calls = message
+                    .parts
+                    .iter()
+                    .filter(|part| matches!(part, horsie_agentcore::ContentPart::ToolCall(_)))
+                    .count() as u64;
+                self.tool_calls = self.tool_calls.saturating_add(calls);
+            }
+            AgentDomainEvent::ToolComplete {
+                output, is_error, ..
+            } => {
+                self.tool_result_bytes = self.tool_result_bytes.saturating_add(output.len() as u64);
+                if *is_error {
+                    self.failed_tool_calls = self.failed_tool_calls.saturating_add(1);
+                }
+            }
+            AgentDomainEvent::RunComplete { .. } => {
+                self.completed_runs = self.completed_runs.saturating_add(1);
+            }
+            AgentDomainEvent::RunAborted { .. } | AgentDomainEvent::RunCancelled { .. } => {
+                self.aborted_runs = self.aborted_runs.saturating_add(1);
+            }
+            AgentDomainEvent::Compacted { .. } => {
+                self.compactions = self.compactions.saturating_add(1);
+            }
+            AgentDomainEvent::Seeded { .. }
+            | AgentDomainEvent::InputMessage { .. }
+            | AgentDomainEvent::HookRan { .. }
+            | AgentDomainEvent::TimerArmed { .. }
+            | AgentDomainEvent::TimerCancelled { .. }
+            | AgentDomainEvent::TimerFired { .. }
+            | AgentDomainEvent::TaskListChanged { .. }
+            | AgentDomainEvent::LifecycleRecorded { .. }
+            | AgentDomainEvent::Received { .. }
+            | AgentDomainEvent::TurnBegan { .. }
+            | AgentDomainEvent::AskRecorded { .. }
+            | AgentDomainEvent::Parked { .. }
+            | AgentDomainEvent::Nudged { .. } => {}
+        }
+    }
 }
 
 /// Running token totals held in [`AgentState`]. Distinct from the per-turn
@@ -254,6 +316,7 @@ impl AgentState {
             usage_total: self.usage_total,
             last_turn_usage: self.last_turn_usage.clone(),
             context_tokens: self.context_tokens,
+            efficiency: self.efficiency,
             as_of_seq: self.tail_seq().unwrap_or(0),
         }
     }
@@ -266,6 +329,7 @@ impl AgentState {
             usage_total: self.usage_total,
             last_turn_usage: self.last_turn_usage.clone(),
             context_tokens: self.context_tokens,
+            efficiency: self.efficiency,
         }
     }
 }
@@ -795,6 +859,52 @@ mod tests {
         assert_eq!(state.usage_total.input_tokens, 50);
         assert_eq!(state.usage_total.cache_creation_tokens, Some(15));
         assert_eq!(state.usage_total.cache_read_tokens, Some(25));
+    }
+
+    #[test]
+    fn efficiency_counters_are_rebuilt_from_durable_events() {
+        let mut state = AgentActor::initial_state();
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::MessageComplete {
+                message: Message {
+                    id: "assistant".into(),
+                    role: Role::Assistant,
+                    parts: vec![ContentPart::ToolCall(ToolCallPart {
+                        id: "call".into(),
+                        name: "bash".into(),
+                        input: serde_json::json!({}),
+                    })],
+                    created_at_ms: 1,
+                    started_at_ms: None,
+                },
+            },
+        );
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::ToolComplete {
+                tool_call_id: "call".into(),
+                output: "failed".into(),
+                is_error: true,
+                artifacts: Vec::new(),
+                at_ms: 2,
+            },
+        );
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::RunComplete {
+                usage: Usage::without_cache(10, 2),
+                iterations: 1,
+                context_tokens: 10,
+                at_ms: 3,
+            },
+        );
+
+        assert_eq!(state.efficiency.provider_calls, 1);
+        assert_eq!(state.efficiency.tool_calls, 1);
+        assert_eq!(state.efficiency.failed_tool_calls, 1);
+        assert_eq!(state.efficiency.tool_result_bytes, 6);
+        assert_eq!(state.efficiency.completed_runs, 1);
     }
 
     #[test]

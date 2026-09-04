@@ -10,6 +10,7 @@ use session.SessionDetail;
 use agent.TaskItem;
 use agent.ArtifactRef;
 use session.UsageView;
+use session.EfficiencyStats;
 use session.SubAgentView;
 use agent.Usage;
 use agent.Message;
@@ -154,6 +155,8 @@ struct AgentDocument {
     /// The model's configured context window, when known. Attached by the HTTP
     /// layer from model config — this one field is not agent state.
     context_window: Option<u32>,
+    /// Operational counters for diagnosing expensive runs.
+    efficiency: EfficiencyStats,
     /// The log position this document reflects.
     ///
     /// What makes reading this alongside the log safe rather than a race: a

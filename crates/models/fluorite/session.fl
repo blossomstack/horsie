@@ -159,6 +159,19 @@ struct AgentStats {
     /// The window the model it runs allows, when that model is configured.
     /// Absent when it is not — a number with no denominator is not a gauge.
     context_window: Option<u32>,
+    /// Operational counters for diagnosing expensive agent runs.
+    efficiency: EfficiencyStats,
+}
+
+/// Cumulative counters that explain where an agent run spent work and context.
+struct EfficiencyStats {
+    provider_calls: u64,
+    tool_calls: u64,
+    failed_tool_calls: u64,
+    tool_result_bytes: u64,
+    completed_runs: u64,
+    aborted_runs: u64,
+    compactions: u64,
 }
 
 /// Answers to every question one agent is parked on, delivered together

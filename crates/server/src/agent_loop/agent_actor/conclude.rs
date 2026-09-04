@@ -96,6 +96,7 @@ impl AgentActor {
                         agent,
                         usage_total: state.usage_total,
                         context_tokens: state.context_tokens,
+                        efficiency: state.efficiency,
                     })
                     .await;
                 if self.params.requires_result {
@@ -146,6 +147,7 @@ impl AgentActor {
                                 agent,
                                 usage_total: state.usage_total,
                                 context_tokens: state.context_tokens,
+                                efficiency: state.efficiency,
                             })
                             .await;
                         parent
@@ -178,6 +180,7 @@ impl AgentActor {
                                 agent,
                                 usage_total: state.usage_total,
                                 context_tokens: state.context_tokens,
+                                efficiency: state.efficiency,
                             })
                             .await;
                         parent
@@ -211,6 +214,7 @@ impl AgentActor {
                                 agent,
                                 usage_total: state.usage_total,
                                 context_tokens: state.context_tokens,
+                                efficiency: state.efficiency,
                             })
                             .await;
                         self.correct_contradiction(calls, state, ctx).await
@@ -227,6 +231,7 @@ impl AgentActor {
                         agent,
                         usage_total: state.usage_total,
                         context_tokens: state.context_tokens,
+                        efficiency: state.efficiency,
                     })
                     .await;
                 // A cancelled tool call has no result and never will get one.
@@ -272,6 +277,7 @@ impl AgentActor {
                         agent,
                         usage_total: state.usage_total,
                         context_tokens: state.context_tokens,
+                        efficiency: state.efficiency,
                     })
                     .await;
                 parent

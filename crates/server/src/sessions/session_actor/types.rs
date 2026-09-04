@@ -649,6 +649,8 @@ pub enum SessionDomainEvent {
         /// Tokens the agent's context held at that point. Zero before the
         /// agent has run a turn.
         context_tokens: u32,
+        #[serde(default)]
+        efficiency: crate::agent_loop::AgentEfficiencyStats,
     },
     /// A subagent was spawned by agent `parent` — main, a step, a sub session,
     /// or another subagent. Persisted before the child actor exists — a crash
@@ -864,7 +866,7 @@ impl TurnEnd {
     /// routing path with a non-ending outcome still in hand — the narrowing is
     /// total, and nothing below it needs a case for a variant that never
     /// arrives.
-    pub(super) fn split(outcome: AgentOutcome) -> Result<(Uuid, Self), (Uuid, NotAnEnd)> {
+    pub(super) fn split(outcome: AgentOutcome) -> Result<(Uuid, Self), Box<(Uuid, NotAnEnd)>> {
         match outcome {
             AgentOutcome::Concluded { agent, output } => Ok((agent, Self::Concluded { output })),
             AgentOutcome::Asked { agent, .. } => Ok((agent, Self::Asked)),
@@ -880,25 +882,27 @@ impl TurnEnd {
                 agent,
                 usage_total,
                 context_tokens,
-            } => Err((
+                efficiency,
+            } => Err(Box::new((
                 agent,
                 NotAnEnd::Usage {
                     usage_total,
                     context_tokens,
+                    efficiency,
                 },
-            )),
-            AgentOutcome::Started { agent } => Err((agent, NotAnEnd::Started)),
+            ))),
+            AgentOutcome::Started { agent } => Err(Box::new((agent, NotAnEnd::Started))),
             AgentOutcome::SeedSummary {
                 agent,
                 sub_sessions,
                 result,
-            } => Err((
+            } => Err(Box::new((
                 agent,
                 NotAnEnd::SeedSummary {
                     sub_sessions,
                     result,
                 },
-            )),
+            ))),
         }
     }
 }
@@ -912,6 +916,7 @@ pub(super) enum NotAnEnd {
     Usage {
         usage_total: UsageTotal,
         context_tokens: u32,
+        efficiency: crate::agent_loop::AgentEfficiencyStats,
     },
     /// The summary a `/summary-n-fork` turn was asked for. Nothing about how
     /// that turn ended — it is still running, or it ended some other way.
@@ -1052,6 +1057,8 @@ pub struct SessionState {
     /// without waking anything.
     #[serde(default)]
     pub agent_context_tokens: HashMap<String, u32>,
+    #[serde(default)]
+    pub agent_efficiency: HashMap<String, crate::agent_loop::AgentEfficiencyStats>,
     /// Every unit of work this session hosts — the main session, its
     /// workflow runs, every subagent and every sub session — as one hierarchy.
     #[serde(default)]
@@ -1168,6 +1175,7 @@ impl SessionState {
                 .get(key)
                 .copied()
                 .unwrap_or_default(),
+            efficiency: self.agent_efficiency.get(key).copied().unwrap_or_default(),
         }
     }
 
@@ -1438,6 +1446,7 @@ pub struct AgentStats {
     pub subtree_usage: UsageTotal,
     /// Tokens its context held at the end of its last turn.
     pub context_tokens: u32,
+    pub efficiency: crate::agent_loop::AgentEfficiencyStats,
 }
 
 /// Everything a session knows about one of its agents: its entry in the roster,

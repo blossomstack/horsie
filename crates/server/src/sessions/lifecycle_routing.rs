@@ -534,6 +534,7 @@ mod tests {
                 agent_id: "main".into(),
                 usage_total: crate::agent_loop::UsageTotal::default(),
                 context_tokens: 0,
+                efficiency: crate::agent_loop::AgentEfficiencyStats::default(),
             },
             E::SubAgentSpawned {
                 at_ms: 1,

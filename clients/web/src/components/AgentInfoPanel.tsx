@@ -96,7 +96,20 @@ function selectRun(
     opens: group.root,
     // No context figure: a run has no single window to fill, which is why its
     // own page carries no gauge either.
-    stats: { usage, subtreeUsage: usage, contextTokens: 0 },
+    stats: {
+      usage,
+      subtreeUsage: usage,
+      contextTokens: 0,
+      efficiency: {
+        providerCalls: 0,
+        toolCalls: 0,
+        failedToolCalls: 0,
+        toolResultBytes: 0,
+        completedRuns: 0,
+        abortedRuns: 0,
+        compactions: 0,
+      },
+    },
   };
 }
 

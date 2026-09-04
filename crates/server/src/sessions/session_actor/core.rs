@@ -352,10 +352,14 @@ impl Component for SessionCore {
                 agent_id,
                 usage_total,
                 context_tokens,
+                efficiency,
                 ..
             } => {
                 state.agent_usage.insert(agent_id.clone(), usage_total);
-                state.agent_context_tokens.insert(agent_id, context_tokens);
+                state
+                    .agent_context_tokens
+                    .insert(agent_id.clone(), context_tokens);
+                state.agent_efficiency.insert(agent_id, efficiency);
             }
             SessionDomainEvent::SpecRecorded {
                 at_ms,

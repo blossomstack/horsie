@@ -1,4 +1,5 @@
 
+import { EfficiencyStats } from './efficiencyStats';
 import { UsageView } from './usageView';
 /**
  * One agent's banked numbers: what it spent, what everything under it spent,
@@ -29,4 +30,8 @@ export interface AgentStats {
    * Absent when it is not — a number with no denominator is not a gauge.
    */
   contextWindow?: number;
+  /**
+   * Operational counters for diagnosing expensive agent runs.
+   */
+  efficiency: EfficiencyStats;
 }
