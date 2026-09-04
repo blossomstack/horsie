@@ -338,8 +338,8 @@ successful call wins.";
 const SUBAGENT_PROMPT_SUFFIX: &str = "\n\n# Subagent role\n\
 You are a subagent, spawned to work on one task. Your final message is your report: \
 it is automatically delivered to the agent that spawned you — make it self-contained. Do the \
-assigned work yourself; you cannot delegate it further. You cannot ask the user or rename the \
-session; if you are blocked, \
+assigned work yourself. The delegation guidance in your system prompt applies to you too. You \
+cannot ask the user or rename the session; if you are blocked, \
 report that instead.";
 
 /// Appended to a workflow step's system prompt: what a step is, how it ends,
@@ -1144,22 +1144,21 @@ impl ContextProvider for SessionContextProvider {
             | SessionAgentKind::SubSession(id)
             | SessionAgentKind::Sub(id) => id.to_string(),
         };
-        // A zero cap disables delegation outright. Only the session's main
-        // agent receives the tools, so normal delegation is one level deep.
-        let with_spawn: Arc<dyn Toolbox> =
-            if settings.max_subagents() == 0 || !matches!(self.kind, SessionAgentKind::Main) {
-                with_memory
-            } else {
-                Arc::new(SubAgentToolbox::new(
-                    with_memory,
-                    self.session.clone(),
-                    caller,
-                    shared
-                        .as_ref()
-                        .map(|s| Arc::clone(&s.agents))
-                        .unwrap_or_default(),
-                ))
-            };
+        // A zero cap disables delegation outright: no tools advertised, so the
+        // model never meets a tool that only ever rejects.
+        let with_spawn: Arc<dyn Toolbox> = if settings.max_subagents() == 0 {
+            with_memory
+        } else {
+            Arc::new(SubAgentToolbox::new(
+                with_memory,
+                self.session.clone(),
+                caller,
+                shared
+                    .as_ref()
+                    .map(|s| Arc::clone(&s.agents))
+                    .unwrap_or_default(),
+            ))
+        };
         // Every kind of agent may invoke a workflow — main, subagents, steps
         // and sub sessions alike; the session gates at call time (depth, live
         // runs). The saved workflows ride in the tool description so the model
@@ -1473,10 +1472,7 @@ mod tests {
             .unwrap();
         let sub_tools: Vec<String> = sub.toolbox.specs().into_iter().map(|s| s.name).collect();
         for t in ["spawn_agent", "subagent_status"] {
-            assert!(
-                !sub_tools.contains(&t.to_string()),
-                "an ordinary subagent must not have {t}"
-            );
+            assert!(sub_tools.contains(&t.to_string()), "sub lacks {t}");
         }
         for t in ["set_session_title", "ask_user"] {
             assert!(!sub_tools.contains(&t.to_string()), "sub must not have {t}");
@@ -1487,7 +1483,7 @@ mod tests {
             "the subagent prompt must explain its role"
         );
         assert!(prompt.contains("automatically delivered"), "{prompt}");
-        assert!(prompt.contains("cannot delegate it further"), "{prompt}");
+        assert!(prompt.contains("delegation guidance"), "{prompt}");
     }
 
     #[tokio::test]

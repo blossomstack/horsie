@@ -104,4 +104,4 @@ immediately, and the child's final report or failure is automatically delivered
 as a message. Continue with independent work, or wait if none remains; do not
 poll `subagent_status` or call it repeatedly. Use `subagent_status` only when
 the user requests a progress update or to diagnose a suspected runtime or
-result-delivery problem. Subagents cannot recursively delegate.
+result-delivery problem.
