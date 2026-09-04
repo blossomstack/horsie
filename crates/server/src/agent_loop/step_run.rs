@@ -34,7 +34,7 @@ enum ForegroundStep {
         marker_seq: u64,
         cancel: CancellationToken,
     },
-    StartingHooks {
+    PreparingInput {
         marker_seq: u64,
         cancel: CancellationToken,
     },
@@ -121,7 +121,7 @@ impl StepRun {
 
     pub fn begin_start_hooks(&mut self, marker_seq: u64) -> CancellationToken {
         let (returned, cancel) = Self::token();
-        self.foreground = ForegroundStep::StartingHooks { marker_seq, cancel };
+        self.foreground = ForegroundStep::PreparingInput { marker_seq, cancel };
         returned
     }
 
@@ -195,7 +195,7 @@ impl StepRun {
             ForegroundStep::Idle => return false,
             ForegroundStep::Initializing { marker_seq, .. }
             | ForegroundStep::Connecting { marker_seq, .. }
-            | ForegroundStep::StartingHooks { marker_seq, .. }
+            | ForegroundStep::PreparingInput { marker_seq, .. }
             | ForegroundStep::CallingProvider { marker_seq, .. }
             | ForegroundStep::RunningTools { marker_seq, .. }
             | ForegroundStep::RunningStopHook { marker_seq, .. }
@@ -223,7 +223,7 @@ impl StepRun {
 
     pub fn finish_start_hooks(&mut self, marker_seq: u64) -> bool {
         self.finish_matching(marker_seq, |step| {
-            matches!(step, ForegroundStep::StartingHooks { .. })
+            matches!(step, ForegroundStep::PreparingInput { .. })
         })
     }
 
@@ -321,7 +321,7 @@ impl StepRun {
             ForegroundStep::Idle => {}
             ForegroundStep::Initializing { cancel, .. }
             | ForegroundStep::Connecting { cancel, .. }
-            | ForegroundStep::StartingHooks { cancel, .. }
+            | ForegroundStep::PreparingInput { cancel, .. }
             | ForegroundStep::CallingProvider { cancel, .. }
             | ForegroundStep::RunningTools { cancel, .. }
             | ForegroundStep::RunningStopHook { cancel, .. }

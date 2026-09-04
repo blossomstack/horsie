@@ -40,9 +40,7 @@ pub fn boundary_message(entry: &CompactionEntry, at_ms: u64) -> Message {
 }
 
 impl AgentState {
-    /// Build exactly what the provider sees from the projected transcript.
-    pub fn prompt_messages(&self) -> Vec<Message> {
-        let transcript = self.transcript();
+    fn prompt_from(transcript: &Transcript) -> Vec<Message> {
         let boundary = transcript.entries().iter().rev().find_map(|entry| {
             let AgentLogBody::Compaction(compaction) = &entry.body else {
                 return None;
@@ -68,6 +66,19 @@ impl AgentState {
                     }),
             )
             .collect()
+    }
+
+    /// Build the current provider prompt.
+    pub fn prompt_messages(&self) -> Vec<Message> {
+        Self::prompt_from(&self.transcript())
+    }
+
+    /// Build the provider prompt sealed by a step marker.
+    pub fn prompt_messages_through(&self, marker_seq: u64) -> Vec<Message> {
+        let end = self
+            .history()
+            .partition_point(|entry| entry.seq <= marker_seq);
+        Self::prompt_from(&project_transcript(&self.history()[..end]))
     }
 
     #[must_use]
@@ -124,7 +135,7 @@ impl CompactionStep {
         // The history and the carried state are read here, at handling time: a
         // task-list change earlier in the same turn is already folded, so a
         // compaction between two calls carries it verbatim.
-        let history = repair_unanswered_tool_calls(cx.state.prompt_messages());
+        let history = repair_unanswered_tool_calls(cx.state.prompt_messages_through(marker_seq));
         let carried_state =
             crate::agent_loop::shared::carried_state::render_carried_state(cx.state);
         let self_ref = cx.actor.self_ref();

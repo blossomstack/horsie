@@ -472,27 +472,28 @@ impl AgentState {
     /// are all answered, so nothing before it can still be open.
     #[must_use]
     pub fn open_tool_calls(&self) -> Vec<String> {
-        let from = self
-            .history
+        let transcript = self.transcript();
+        let messages: Vec<_> = transcript
+            .entries()
             .iter()
-            .rposition(|entry| {
-                event_message(&entry.record).is_some_and(|message| {
-                    message
-                        .parts
-                        .iter()
-                        .any(|part| matches!(part, horsie_agentcore::ContentPart::ToolCall(_)))
-                })
+            .filter_map(|entry| match &entry.body {
+                horsie_agentcore::AgentLogBody::Llm(message) => Some(message),
+                horsie_agentcore::AgentLogBody::Hook(_)
+                | horsie_agentcore::AgentLogBody::Lifecycle(_)
+                | horsie_agentcore::AgentLogBody::Compaction(_) => None,
             })
-            .unwrap_or(self.history.len());
+            .collect();
+        let from = messages
+            .iter()
+            .rposition(|message| {
+                message
+                    .parts
+                    .iter()
+                    .any(|part| matches!(part, horsie_agentcore::ContentPart::ToolCall(_)))
+            })
+            .unwrap_or(messages.len());
         let mut open = Vec::new();
-        for entry in self.history.iter().skip(from) {
-            if let AgentDomainEvent::ToolComplete { tool_call_id, .. } = &entry.record {
-                open.retain(|id| id != tool_call_id);
-                continue;
-            }
-            let Some(message) = event_message(&entry.record) else {
-                continue;
-            };
+        for message in messages.into_iter().skip(from) {
             for part in &message.parts {
                 match part {
                     horsie_agentcore::ContentPart::ToolCall(call) => open.push(call.id.clone()),
@@ -608,7 +609,7 @@ impl AgentState {
 
     /// The next history-backed offer, if one can run now.
     #[must_use]
-    pub fn next_input(&self) -> Option<crate::agent_loop::PendingInput> {
+    pub(crate) fn next_input(&self) -> Option<crate::agent_loop::PendingInput> {
         let incoming = self.pending_incoming();
         let asks = self.pending_asks();
         crate::agent_loop::next_input(&incoming, &asks)
@@ -851,7 +852,8 @@ mod history_tests {
             },
             AgentDomainEvent::TurnBegan {
                 consumed: vec!["one".into()],
-                answered: Vec::new(),
+                abandoned: Vec::new(),
+                rewritten: None,
                 at_ms: 3,
             },
         ]
@@ -860,6 +862,31 @@ mod history_tests {
 
         assert_eq!(state.pending_incoming(), vec![incoming("two", "second")]);
         assert!(state.turn_in_flight());
+        assert!(matches!(
+            state.next_input(),
+            Some(crate::agent_loop::PendingInput::Input(_))
+        ));
+    }
+
+    #[test]
+    fn cancellation_preserves_input_received_during_a_step() {
+        let state = [
+            AgentDomainEvent::StepStarted {
+                kind: StepKind::Provider,
+            },
+            AgentDomainEvent::Received {
+                item: incoming("later", "next run"),
+                at_ms: 1,
+            },
+            AgentDomainEvent::RunEnded {
+                reason: RunEnd::Cancelled,
+                at_ms: 2,
+            },
+        ]
+        .into_iter()
+        .fold(AgentActor::initial_state(), fold);
+
+        assert_eq!(state.pending_incoming(), [incoming("later", "next run")]);
         assert!(matches!(
             state.next_input(),
             Some(crate::agent_loop::PendingInput::Input(_))

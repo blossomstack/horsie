@@ -359,12 +359,14 @@ pub enum CoreCommand {
 /// prepare step decides nothing about what the turn consumes, it only learns
 /// what the hooks said.
 pub struct PreparedInput {
-    /// The open Agent marker the hooks prepare.
+    /// The open preparation marker that fences this callback.
     pub marker_seq: u64,
     pub input: crate::agent_loop::TurnInput,
     /// Records to journal before the turn snapshots its history — which is the
     /// whole reason this round-trip exists. Empty when no hook fired.
     pub records: Vec<horsie_models::hooks::HookRecord>,
+    /// A hook rewrite. `None` keeps the accepted input unchanged.
+    pub rewritten: Option<String>,
     /// `Some` abandons the turn.
     pub rejection: Option<RejectedInput>,
 }

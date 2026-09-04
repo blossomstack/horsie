@@ -16,7 +16,7 @@ This design makes the append-only agent history the source of truth. The actor h
 | D2 | Durable history is one chronological append-only log. `StepStarted` markers seal the history prefix used by a foreground step. |
 | D3 | The actor holds at most one transient `StepRun`, reconstructed from the newest history segment. It is never persisted. |
 | D4 | A normal step may start only after the previous step stopped and every tool call in its assistant message has a durable result. |
-| D5 | Incoming user, timer, subagent, and hook-continuation messages are appended immediately. Anything arriving after the current marker is pending and cannot change the request already in flight. |
+| D5 | Incoming user, timer, subagent, answer, and hook-continuation messages are appended immediately. Anything arriving after the current marker is pending and cannot change the request already in flight. |
 | D6 | There is no second queue state. Unconsumed incoming history records are the queue. The next normal `StepStarted` consumes every eligible pending record in order. |
 | D7 | There is no durable tool-start registry. Live `StepRun` dispatches one tool batch once. Recovery fails every call without a result and never re-executes it. |
 | D8 | An unresolved `ask_user` call is the pending question. There is no separate ask registry. |
@@ -86,6 +86,7 @@ enum AgentHistoryRecord {
 enum StepKind {
     Initialize,
     Connect,
+    PrepareInput,
     Agent,
     StopHook,
     Compaction,
@@ -102,9 +103,10 @@ The final names may follow the existing event vocabulary, but the distinctions a
 For a normal provider step:
 
 1. All eligible incoming messages and previous tool results are already durable.
-2. `StepStarted { kind: Agent }` is appended.
-3. `run_step` receives the model-visible history through that marker plus immutable system-prompt records.
-4. Anything appended after the marker is pending for a later step.
+2. If pre-turn hooks exist, `PrepareInput` fences their callback while the incoming records remain pending. Its durable result is the hook records and `TurnBegan` consumption.
+3. `StepStarted { kind: Agent }` is appended after that exact input.
+4. `run_step` receives the model-visible history through that marker plus immutable system-prompt records.
+5. Anything appended after the marker is pending for a later step.
 
 A run identity is the sequence of the first normal `StepStarted` after the previous `RunEnded`. Start, intermediate, and end are derived positions. A one-step run is both its start and its end.
 
@@ -126,7 +128,7 @@ enum ForegroundStep {
     Idle,
     Initializing { marker_seq, cancel },
     Connecting { marker_seq, cancel },
-    StartingHooks { marker_seq, cancel },
+    PreparingInput { marker_seq, cancel },
     CallingProvider { marker_seq, attempt, cancel },
     RunningTools { marker_seq, cancel, calls, stopped },
     RunningStopHook { marker_seq, cancel },
@@ -151,20 +153,23 @@ After every durable append and every live transition that wrote nothing, the act
 2. If the agent has never been initialized, start initialization.
 3. If execution requires live resources and they are disconnected, start connection work.
 4. If recovery left a step incomplete, append its repairs first.
-5. If a normal step has no assistant response, run `agentcore::run_step`.
-6. If its assistant message has tool calls and any lack results, dispatch the whole unresolved batch once and wait.
-7. If an unresolved `ask_user` remains, wait for its result.
-8. If a boundary operation is due, start the appropriate special step.
-9. If tool results or pending incoming messages provide continuation input, append the next normal `StepStarted`.
-10. Otherwise append `StepStarted { kind: StopHook }` and run the Stop hook.
-11. When the Stop hook returns, re-read history. New pending input wins over an allow-to-stop result.
-12. Append exactly one `RunEnded` only when nothing can continue the run.
+5. If pending input needs pre-turn hooks, prepare it without consuming it; then append the hook records, consumption, and normal marker together.
+6. If a normal step has no assistant response, run `agentcore::run_step`.
+7. If its assistant message has tool calls and any lack results, dispatch the whole unresolved batch once and wait.
+8. If an unresolved `ask_user` remains, wait for its result.
+9. If a boundary operation is due, start the appropriate special step.
+10. If tool results or pending incoming messages provide continuation input, append the next normal `StepStarted`.
+11. Otherwise append `StepStarted { kind: StopHook }` and run the Stop hook.
+12. When the Stop hook returns, re-read history. New pending input wins over an allow-to-stop result.
+13. Append exactly one durable `RunEnded` only when nothing can continue the run.
 
 A component may append its own event and tool result, but it does not decide whether another agent step starts. That remains the actor's one decision.
 
 ## Incoming messages and cancellation
 
-An accepted incoming message is durable before its caller is acknowledged. While a foreground step is open, the message belongs to that step's `pending_messages`. It never enters an in-flight provider request.
+An accepted incoming message or answer is durable before its caller is acknowledged. Raw incoming content is stored once in `Received`; `TurnBegan` names what was consumed, and transcript projection derives the model message. While a foreground step is open, later input remains pending and never enters the in-flight request.
+
+Pre-turn hooks use their own marker. A crash interrupts that preparation marker but does not consume its input, so recovery can start a fresh preparation step without losing the accepted message. The provider marker is appended only after the prepared input is durable.
 
 Cancellation is one ordered actor command. It:
 
@@ -184,6 +189,7 @@ Recovery performs no provider, tool, hook, workspace-scan, compaction, or seed-s
 Repairs are deterministic:
 
 - Normal step with no completed provider response: append `StepFailed(Interrupted)` and end that run, unless pending input starts a new one.
+- Interrupted input preparation: append `StepFailed(Interrupted)` and leave its incoming records pending.
 - Assistant message with tool calls lacking results: append one interrupted error result per open call. The normal decision then starts the next step, allowing the model to decide whether to retry.
 - Interrupted Stop hook: append a typed interrupted failure and end the run; never replay the hook.
 - Interrupted compaction: append a skipped/interrupted result and continue with unchanged prompt history.
@@ -266,7 +272,8 @@ The module tree mirrors ownership rather than execution mechanics:
 - `run_loop/decision.rs`: the single ordered next-step decision.
 - `run_loop/provider/`: one provider call plus interpretation of its ending.
 - `run_loop/context_step.rs`, `compaction_step.rs`, and `seed_step.rs`: fenced special steps.
-- `run_loop/incoming/`: pure pending-input projections and their stateless command handler.
+- `run_loop/incoming.rs`: incoming types and pure pending/model-input projections.
+- `run_loop/reads.rs`: state-only reads.
 - `step_run.rs`: all process-local foreground state.
 - `state.rs` and `events.rs`: durable history, usage projections, and component state.
 - `transcript.rs`: the pure history-to-transcript projection and branch-context conversion.

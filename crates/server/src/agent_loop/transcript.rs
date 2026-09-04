@@ -11,7 +11,6 @@ use horsie_agentcore::{
     QueuedLifecycle, TurnBeganLifecycle,
 };
 use horsie_models::agent::TaskListLifecycle;
-use std::collections::HashSet;
 
 /// A deterministic user-facing projection of agent history.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -86,45 +85,71 @@ impl Transcript {
 #[must_use]
 pub fn project_transcript(history: &[AgentHistoryEntry]) -> Transcript {
     let mut transcript = Transcript::default();
-    let mut pending_users = HashSet::new();
+    let mut pending_items = Vec::new();
 
     for entry in history {
         match &entry.record {
-            AgentDomainEvent::Received {
-                item: Incoming::User { id, text, .. },
-                at_ms,
-            } => {
-                pending_users.insert(id.clone());
-                transcript.push(
-                    *at_ms,
-                    AgentLogBody::Lifecycle(LifecycleEvent::MessageQueued(QueuedLifecycle {
-                        id: id.clone(),
-                        text: text.clone(),
-                    })),
-                );
+            AgentDomainEvent::Received { item, at_ms } => {
+                pending_items.push(item.clone());
+                if let Incoming::User { id, text, .. } = item {
+                    transcript.push(
+                        *at_ms,
+                        AgentLogBody::Lifecycle(LifecycleEvent::MessageQueued(QueuedLifecycle {
+                            id: id.clone(),
+                            text: text.clone(),
+                        })),
+                    );
+                }
             }
-            AgentDomainEvent::Received { .. } => {}
             AgentDomainEvent::Consumed { ids, .. } => {
-                pending_users.retain(|id| !ids.contains(id));
+                pending_items.retain(|item| !ids.iter().any(|id| id == item.id()));
             }
             AgentDomainEvent::TurnBegan {
                 consumed,
-                answered,
+                abandoned,
+                rewritten,
                 at_ms,
             } => {
-                let visible = consumed
+                let selected: Vec<_> = pending_items
                     .iter()
-                    .filter(|id| pending_users.contains(*id))
+                    .filter(|item| consumed.iter().any(|id| id == item.id()))
                     .cloned()
+                    .collect();
+                let visible = selected
+                    .iter()
+                    .filter_map(|item| match item {
+                        Incoming::User { id, .. } => Some(id.clone()),
+                        Incoming::SubAgent { .. }
+                        | Incoming::Timer { .. }
+                        | Incoming::Continue { .. }
+                        | Incoming::Answers { .. }
+                        | Incoming::Compact { .. }
+                        | Incoming::SubSession { .. } => None,
+                    })
+                    .collect();
+                let mut input = crate::agent_loop::run_loop::drain(&selected);
+                input.abandoned.clone_from(abandoned);
+                let answered = input
+                    .answered
+                    .iter()
+                    .map(|answer| answer.tool_call_id.clone())
                     .collect();
                 transcript.push(
                     *at_ms,
                     AgentLogBody::Lifecycle(LifecycleEvent::TurnBegan(TurnBeganLifecycle {
                         consumed: visible,
-                        answered: answered.clone(),
+                        answered,
                     })),
                 );
-                pending_users.retain(|id| !consumed.contains(id));
+                for message in crate::agent_loop::run_loop::messages(
+                    &input,
+                    rewritten.as_deref(),
+                    format!("turn:{}", entry.seq),
+                    *at_ms,
+                ) {
+                    transcript.push(*at_ms, AgentLogBody::Llm(message));
+                }
+                pending_items.retain(|item| !consumed.iter().any(|id| id == item.id()));
             }
             AgentDomainEvent::AskRecorded { asks, at_ms } => {
                 for ask in asks {
@@ -288,7 +313,7 @@ pub fn hook_entry_id(seq: usize) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::wildcard_enum_match_arm)]
 mod tests {
     use super::*;
     use crate::agent_loop::run_loop::RunLoop;
@@ -317,11 +342,9 @@ mod tests {
             },
             AgentDomainEvent::TurnBegan {
                 consumed: vec!["incoming-1".into()],
-                answered: Vec::new(),
+                abandoned: Vec::new(),
+                rewritten: None,
                 at_ms: 2,
-            },
-            AgentDomainEvent::InputMessage {
-                message: Message::user("user-1", "hello", 3),
             },
             AgentDomainEvent::MessageComplete {
                 message: Message::assistant_text("assistant-1", "hi", 4),
@@ -368,15 +391,90 @@ mod tests {
 
     #[test]
     fn agent_state_serializes_history_without_a_transcript_copy() {
-        let state = fold([AgentDomainEvent::InputMessage {
-            message: Message::user("only-once", "unique payload", 1),
-        }]);
+        let state = fold([
+            AgentDomainEvent::Received {
+                item: Incoming::User {
+                    id: "incoming-1".into(),
+                    text: "unique payload".into(),
+                    artifacts: Vec::new(),
+                },
+                at_ms: 1,
+            },
+            AgentDomainEvent::TurnBegan {
+                consumed: vec!["incoming-1".into()],
+                abandoned: Vec::new(),
+                rewritten: None,
+                at_ms: 2,
+            },
+        ]);
         let expected = state.transcript();
         let json = serde_json::to_string(&state).unwrap();
         assert!(!json.contains("transcript"), "{json}");
         assert_eq!(json.matches("unique payload").count(), 1, "{json}");
         let restored: AgentState = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.transcript(), expected);
+    }
+
+    #[test]
+    fn input_after_a_marker_first_reaches_the_next_provider_step() {
+        let state = fold([
+            AgentDomainEvent::Received {
+                item: Incoming::User {
+                    id: "first".into(),
+                    text: "first input".into(),
+                    artifacts: Vec::new(),
+                },
+                at_ms: 1,
+            },
+            AgentDomainEvent::TurnBegan {
+                consumed: vec!["first".into()],
+                abandoned: Vec::new(),
+                rewritten: None,
+                at_ms: 2,
+            },
+            AgentDomainEvent::StepStarted {
+                kind: StepKind::Provider,
+            },
+            AgentDomainEvent::Received {
+                item: Incoming::User {
+                    id: "later".into(),
+                    text: "later input".into(),
+                    artifacts: Vec::new(),
+                },
+                at_ms: 3,
+            },
+            AgentDomainEvent::MessageComplete {
+                message: Message::assistant_text("assistant", "done", 4),
+                usage: horsie_agentcore::Usage::without_cache(1, 1),
+            },
+            AgentDomainEvent::TurnCompleted {
+                iterations: 1,
+                at_ms: 4,
+            },
+            AgentDomainEvent::TurnBegan {
+                consumed: vec!["later".into()],
+                abandoned: Vec::new(),
+                rewritten: None,
+                at_ms: 5,
+            },
+            AgentDomainEvent::StepStarted {
+                kind: StepKind::Provider,
+            },
+        ]);
+
+        let text_through = |marker| {
+            state
+                .prompt_messages_through(marker)
+                .into_iter()
+                .flat_map(|message| message.parts)
+                .filter_map(|part| match part {
+                    horsie_agentcore::ContentPart::Text(text) => Some(text.text),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(text_through(2), ["first input"]);
+        assert_eq!(text_through(7), ["first input", "done", "later input"]);
     }
 
     #[test]
@@ -392,16 +490,14 @@ mod tests {
             },
             AgentDomainEvent::TurnBegan {
                 consumed: vec!["incoming-1".into()],
-                answered: Vec::new(),
+                abandoned: Vec::new(),
+                rewritten: None,
                 at_ms: 2,
-            },
-            AgentDomainEvent::InputMessage {
-                message: Message::user("user-1", "hello", 3),
             },
             AgentDomainEvent::Compacted {
                 summary: "summary".into(),
                 carried_state: String::new(),
-                retained_from_message_id: Some("user-1".into()),
+                retained_from_message_id: Some("turn:1".into()),
                 trigger: horsie_agentcore::CompactionTrigger::Manual(EmptyOutcome {}),
                 instructions: None,
                 tokens_before: 10,

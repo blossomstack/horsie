@@ -143,6 +143,9 @@ fn recovery_repairs(state: &AgentState) -> Vec<AgentDomainEvent> {
     let at_ms = horsie_models::now_ms();
     match kind {
         StepKind::Initialize | StepKind::Connect => Vec::new(),
+        StepKind::PrepareInput => vec![AgentDomainEvent::StepFailed {
+            reason: StepFailure::Interrupted,
+        }],
         StepKind::Provider => {
             if !state.open_step_has_response() {
                 vec![
@@ -475,7 +478,8 @@ mod tests {
         let state = fold(vec![
             AgentDomainEvent::TurnBegan {
                 consumed: vec!["u".into()],
-                answered: Vec::new(),
+                abandoned: Vec::new(),
+                rewritten: None,
                 at_ms: 1,
             },
             AgentDomainEvent::StepStarted {
@@ -526,6 +530,33 @@ mod tests {
                 }
             ]
         ));
+    }
+
+    #[test]
+    fn recovery_keeps_input_pending_when_preparation_was_interrupted() {
+        let state = fold(vec![
+            AgentDomainEvent::Received {
+                item: crate::agent_loop::Incoming::User {
+                    id: "u".into(),
+                    text: "keep me".into(),
+                    artifacts: Vec::new(),
+                },
+                at_ms: 1,
+            },
+            AgentDomainEvent::StepStarted {
+                kind: StepKind::PrepareInput,
+            },
+        ]);
+
+        let repairs = recovery_repairs(&state);
+        assert!(matches!(
+            repairs.as_slice(),
+            [AgentDomainEvent::StepFailed {
+                reason: StepFailure::Interrupted
+            }]
+        ));
+        let repaired = repairs.into_iter().fold(state, AgentActor::apply_event);
+        assert_eq!(repaired.pending_incoming().len(), 1);
     }
 
     #[test]

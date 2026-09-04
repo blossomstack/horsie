@@ -62,10 +62,8 @@ pub use events::{
 };
 pub use params::AgentParams;
 pub use read_image_toolbox::{READ_IMAGE_TOOL, ReadImageToolbox};
-pub use run_loop::{
-    ABANDONED_ASK_RESULT, AnswerError, AskAnswer, Incoming, MERGE_SEPARATOR, PendingInput,
-    ReadOutcome, ReplayWindow, TurnInput, answered_input, next_input,
-};
+pub use run_loop::{AnswerError, AskAnswer, Incoming, ReadOutcome, ReplayWindow};
+pub(crate) use run_loop::{PendingInput, TurnInput, next_input, validate_answers};
 pub use shared::agent_log::{
     Anchor, Cursor, LogFilter, LogPage, REPLAY_CAP, kind_of, page, replay_window, search,
     seq_of_id, since,

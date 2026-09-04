@@ -5,10 +5,9 @@
 mod compaction_step;
 mod context_step;
 mod decision;
-mod history;
 mod incoming;
 mod provider;
-mod queries;
+mod reads;
 mod seed_step;
 
 use crate::agent_loop::components::{TaskLists, Timers};
@@ -17,23 +16,40 @@ use horsie_actor::CommandEffect;
 
 use compaction_step::CompactionStep;
 use context_step::ContextStep;
-use history::HistoryHandler;
-use incoming::IncomingHandler;
 use provider::ProviderStep;
-use queries::QueryHandler;
 use seed_step::SeedStep;
 
-pub use incoming::{
-    ABANDONED_ASK_RESULT, AnswerError, AskAnswer, Incoming, MERGE_SEPARATOR, PendingInput,
-    TurnInput, answered_input, next_input,
-};
-pub use queries::{ReadOutcome, ReplayWindow};
+pub use incoming::{AnswerError, AskAnswer, Incoming};
+pub(crate) use incoming::{PendingInput, TurnInput, drain, messages, next_input, validate_answers};
+pub use reads::{ReadOutcome, ReplayWindow};
 
 /// The actor's run-loop driver. It owns only genuine stateful tool
 /// components; all other work is expressed by history plus [`StepRun`].
 pub(crate) struct RunLoop {
     pub(crate) timers: Timers,
     pub(crate) task_lists: TaskLists,
+}
+
+fn runtime_readiness(event: &horsie_agentcore::LifecycleEvent) -> Option<bool> {
+    use horsie_agentcore::LifecycleEvent;
+    match event {
+        LifecycleEvent::Runtime(runtime) => Some(match runtime.status {
+            horsie_agentcore::RuntimeStatus::Ready(_) => true,
+            horsie_agentcore::RuntimeStatus::Acquiring(_)
+            | horsie_agentcore::RuntimeStatus::Failed(_) => false,
+        }),
+        LifecycleEvent::SessionFailed(_) => Some(false),
+        LifecycleEvent::Preparing(_)
+        | LifecycleEvent::MessageQueued(_)
+        | LifecycleEvent::TurnBegan(_)
+        | LifecycleEvent::TurnEnded(_)
+        | LifecycleEvent::AskRecorded(_)
+        | LifecycleEvent::SubAgent(_)
+        | LifecycleEvent::SubSession(_)
+        | LifecycleEvent::CompactionSkipped(_)
+        | LifecycleEvent::Step(_)
+        | LifecycleEvent::TaskList(_) => None,
+    }
 }
 
 impl RunLoop {
@@ -55,11 +71,11 @@ impl RunLoop {
         cx: &mut CommandContext<'_>,
     ) -> Option<CommandEffect<AgentDomainEvent>> {
         Some(match cmd {
-            AgentCommand::Incoming(c) => IncomingHandler::handle(c, cx).await,
+            AgentCommand::Incoming(c) => self.handle_incoming(c, cx).await,
             AgentCommand::Provider(c) => ProviderStep::handle(c, cx).await,
             AgentCommand::Timer(c) => self.timers.handle(c, cx).await,
-            AgentCommand::Query(c) => QueryHandler::handle(c, cx).await,
-            AgentCommand::History(c) => HistoryHandler::handle(c, cx).await,
+            AgentCommand::Query(c) => reads::query(c, cx).await,
+            AgentCommand::History(c) => Self::record_history(c, cx),
             AgentCommand::Seed(c) => SeedStep::handle(c, cx).await,
             AgentCommand::TaskList(c) => self.task_lists.handle(c, cx).await,
             AgentCommand::Context(c) => ContextStep::handle(c, cx).await,
@@ -79,6 +95,30 @@ impl RunLoop {
             AgentCommand::Core(CoreCommand::Cancel { ack }) => self.cancel(ack, cx).await,
             AgentCommand::Core(CoreCommand::Shutdown) => return None,
         })
+    }
+
+    fn record_history(
+        cmd: HistoryCommand,
+        cx: &mut CommandContext<'_>,
+    ) -> CommandEffect<AgentDomainEvent> {
+        match cmd {
+            HistoryCommand::RecordLifecycle { event, at_ms } => {
+                if let Some(ready) =
+                    runtime_readiness(&event).filter(|ready| *ready != cx.step_run.runtime_ready)
+                {
+                    cx.step_run.runtime_ready = ready;
+                }
+                CommandEffect::persist(vec![AgentDomainEvent::LifecycleRecorded { event, at_ms }])
+            }
+            HistoryCommand::HooksRan { records } => {
+                let at_ms = horsie_models::now_ms();
+                let events = (cx.state.hook_entry_count()..)
+                    .zip(records)
+                    .map(|(seq, record)| AgentDomainEvent::HookRan { record, seq, at_ms })
+                    .collect();
+                CommandEffect::persist(events)
+            }
+        }
     }
 
     /// Toolboxes vended by the two genuine stateful components. Provisioning

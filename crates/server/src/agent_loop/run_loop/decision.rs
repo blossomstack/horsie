@@ -6,7 +6,7 @@
 //! 1. Wait while foreground work is running or the runtime is unavailable.
 //! 2. Initialize or reconnect live clients when work needs them.
 //! 3. Finish unresolved tools, or remain parked on an unanswered question.
-//! 4. Consume the next history-derived input.
+//! 4. Prepare and consume the next history-derived input.
 //! 5. Run a Stop hook for a settled provider step.
 //! 6. Compact when required, then start exactly one provider step.
 //!
@@ -14,7 +14,7 @@
 //! tool execution remains pending until that step and all its tool results are
 //! durable.
 
-use super::{CompactionStep, ContextStep, IncomingHandler, ProviderStep, SeedStep};
+use super::{CompactionStep, ContextStep, ProviderStep, SeedStep};
 use crate::agent_loop::prelude::*;
 use crate::agent_loop::step_run::DispatchedCall;
 use horsie_actor::{ActorRef, CommandEffect, ReplyTo};
@@ -70,6 +70,191 @@ fn cap_stop_records(records: &mut [horsie_models::hooks::HookRecord]) {
 }
 
 impl RunLoop {
+    pub(crate) async fn handle_incoming(
+        &mut self,
+        cmd: IncomingCommand,
+        cx: &mut CommandContext<'_>,
+    ) -> CommandEffect<AgentDomainEvent> {
+        match cmd {
+            IncomingCommand::Receive { item, ack } => {
+                let effect = CommandEffect::persist(vec![AgentDomainEvent::Received {
+                    item,
+                    at_ms: horsie_models::now_ms(),
+                }]);
+                match ack {
+                    Some(ack) => effect.and_ack(ack),
+                    None => effect,
+                }
+            }
+            IncomingCommand::Answer { answers, reply } => {
+                let asks = cx.state.pending_asks();
+                let already_answered = cx
+                    .state
+                    .pending_incoming()
+                    .iter()
+                    .any(|item| matches!(item, crate::agent_loop::Incoming::Answers { .. }));
+                if already_answered {
+                    let _ = reply.send(Err(crate::agent_loop::AnswerError::NothingPending));
+                    return CommandEffect::none();
+                }
+                if let Err(error) = crate::agent_loop::validate_answers(&asks, &answers) {
+                    let _ = reply.send(Err(error));
+                    return CommandEffect::none();
+                }
+                let (durable, persisted) =
+                    tokio::sync::oneshot::channel::<Result<(), horsie_actor::JournalError>>();
+                tokio::spawn(async move {
+                    let result = match persisted.await {
+                        Ok(Ok(())) => Ok(()),
+                        Ok(Err(error)) => Err(crate::agent_loop::AnswerError::Unavailable(
+                            error.to_string(),
+                        )),
+                        Err(_) => Err(crate::agent_loop::AnswerError::Unavailable(
+                            "the journal did not acknowledge the write".to_string(),
+                        )),
+                    };
+                    let _ = reply.send(result);
+                });
+                CommandEffect::persist(vec![AgentDomainEvent::Received {
+                    item: crate::agent_loop::Incoming::Answers {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        answers,
+                    },
+                    at_ms: horsie_models::now_ms(),
+                }])
+                .and_ack(ReplyTo::from_sender(durable))
+            }
+            IncomingCommand::InputPrepared(prepared) => {
+                let PreparedInput {
+                    marker_seq,
+                    input,
+                    records,
+                    rewritten,
+                    rejection,
+                } = *prepared;
+                let marker_is_open = cx.state.open_step().is_some_and(|(seq, kind)| {
+                    seq == marker_seq && *kind == StepKind::PrepareInput
+                });
+                if !marker_is_open || !cx.step_run.finish_start_hooks(marker_seq) {
+                    return CommandEffect::none();
+                }
+                CommandEffect::persist(Self::input_events(
+                    input, records, rewritten, rejection, cx.state,
+                ))
+            }
+        }
+    }
+
+    fn input_events(
+        input: crate::agent_loop::TurnInput,
+        records: Vec<horsie_models::hooks::HookRecord>,
+        rewritten: Option<String>,
+        rejection: Option<RejectedInput>,
+        state: &AgentState,
+    ) -> Vec<AgentDomainEvent> {
+        let at_ms = horsie_models::now_ms();
+        let mut events: Vec<_> = (state.hook_entry_count()..)
+            .zip(records)
+            .map(|(seq, record)| AgentDomainEvent::HookRan { record, seq, at_ms })
+            .collect();
+        events.push(AgentDomainEvent::TurnBegan {
+            consumed: input.consumed,
+            abandoned: input.abandoned,
+            rewritten,
+            at_ms,
+        });
+        events.push(AgentDomainEvent::StepStarted {
+            kind: StepKind::Provider,
+        });
+        if let Some(rejection) = rejection {
+            let (error, recoverable, terminal) = match rejection {
+                RejectedInput::Blocked(reason) => (reason, false, false),
+                RejectedInput::Failed(error) => (error.message, true, error.terminal),
+            };
+            events.extend([
+                AgentDomainEvent::StepFailed {
+                    reason: StepFailure::Provider(error.clone()),
+                },
+                AgentDomainEvent::TurnCancelled { at_ms },
+                AgentDomainEvent::RunEnded {
+                    reason: RunEnd::Failed {
+                        error,
+                        recoverable,
+                        terminal,
+                    },
+                    at_ms,
+                },
+            ]);
+        }
+        events
+    }
+
+    fn prepare_input(
+        &mut self,
+        input: crate::agent_loop::TurnInput,
+        cx: &mut CommandContext<'_>,
+    ) -> CommandEffect<AgentDomainEvent> {
+        let start = crate::agent_loop::StartTurn {
+            start_source: (!cx.step_run.start_hooks_ran()).then_some(match cx.state.has_run() {
+                false => horsie_models::runtime::SessionStartSource::Startup,
+                true => horsie_models::runtime::SessionStartSource::Resume,
+            }),
+            prompt: input.message.clone(),
+        };
+        let nothing_due = start.start_source.is_none() && start.prompt.is_none();
+        if nothing_due || !cx.runtime.context_provider.has_start_hooks() {
+            return CommandEffect::persist(Self::input_events(
+                input,
+                Vec::new(),
+                None,
+                None,
+                cx.state,
+            ));
+        }
+
+        let marker = cx
+            .state
+            .open_step()
+            .filter(|(_, kind)| **kind == StepKind::PrepareInput)
+            .map(|(seq, _)| seq);
+        let Some(marker_seq) = marker.filter(|_| !cx.state.open_step_has_response()) else {
+            return CommandEffect::persist(vec![AgentDomainEvent::StepStarted {
+                kind: StepKind::PrepareInput,
+            }]);
+        };
+        let cancel = cx.step_run.begin_start_hooks(marker_seq);
+        cx.step_run.mark_start_hooks_ran();
+        let provider = cx.runtime.context_provider.clone();
+        let self_ref = cx.actor.self_ref();
+        tokio::spawn(async move {
+            let outcome = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return,
+                outcome = provider.start_hooks(start) => outcome,
+            };
+            let (records, rewritten, rejection) = match outcome {
+                Ok(preparation) => {
+                    let rejection = crate::agent_loop::start_blocked(&preparation.records)
+                        .map(RejectedInput::Blocked);
+                    (preparation.records, preparation.message, rejection)
+                }
+                Err(error) => (Vec::new(), None, Some(RejectedInput::Failed(error))),
+            };
+            let _ = self_ref
+                .tell(AgentCommand::Incoming(IncomingCommand::InputPrepared(
+                    Box::new(PreparedInput {
+                        marker_seq,
+                        input,
+                        records,
+                        rewritten,
+                        rejection,
+                    }),
+                )))
+                .await;
+        });
+        CommandEffect::none()
+    }
+
     /// Decide what happens next, and start it.
     pub(crate) async fn advance(
         &mut self,
@@ -150,7 +335,7 @@ impl RunLoop {
             // is what makes this agent owe the provider a call. The advance
             // that follows the persist is what runs it.
             Some(crate::agent_loop::PendingInput::Input(turn)) => {
-                return IncomingHandler::take(*turn, cx).await;
+                return self.prepare_input(*turn, cx);
             }
             None => {}
         }
@@ -490,7 +675,7 @@ impl RunLoop {
                 StepKind::StopHook => events.push(AgentDomainEvent::StopHookCompleted {
                     outcome: StopHookOutcome::Interrupted,
                 }),
-                StepKind::Compaction | StepKind::SeedSummary { .. } => {
+                StepKind::PrepareInput | StepKind::Compaction | StepKind::SeedSummary { .. } => {
                     events.push(AgentDomainEvent::StepFailed {
                         reason: StepFailure::Interrupted,
                     });
@@ -569,4 +754,32 @@ pub(super) fn spawn_tool_call(
             }))
             .await;
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_marker_follows_its_exact_input() {
+        let events = RunLoop::input_events(
+            crate::agent_loop::TurnInput {
+                consumed: vec!["input".into()],
+                message: Some("hello".into()),
+                ..Default::default()
+            },
+            Vec::new(),
+            None,
+            None,
+            &AgentState::default(),
+        );
+
+        assert!(matches!(events[0], AgentDomainEvent::TurnBegan { .. }));
+        assert!(matches!(
+            events[1],
+            AgentDomainEvent::StepStarted {
+                kind: StepKind::Provider
+            }
+        ));
+    }
 }

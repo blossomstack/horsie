@@ -133,7 +133,7 @@ impl SeedStep {
         let cancel = cx.step_run.begin_seed_summary(marker_seq);
         // The summary must describe the history at the branch point, read
         // before anything can append behind it.
-        let history = repair_unanswered_tool_calls(cx.state.prompt_messages());
+        let history = repair_unanswered_tool_calls(cx.state.prompt_messages_through(marker_seq));
         let self_ref = cx.actor.self_ref();
         tokio::spawn(async move {
             let result = tokio::select! {

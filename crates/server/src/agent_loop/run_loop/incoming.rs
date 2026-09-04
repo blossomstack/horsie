@@ -1,9 +1,10 @@
-//! Pure projections from incoming history to the next provider input.
+//! Incoming records and their pure projection into provider input.
 //!
 //! `Received` records append everything addressed to the agent. `Consumed`
 //! and `TurnBegan` records identify what has already been taken. Folding those
 //! records yields pending messages and exactly one next input; there is no
 //! second queue container and no I/O in this module.
+use horsie_agentcore::{AgentInput, Message};
 use horsie_models::agent::{SubAgentResultPart, ToolResultInput};
 use serde::{Deserialize, Serialize};
 
@@ -12,10 +13,10 @@ use serde::{Deserialize, Serialize};
 /// Anthropic requires alternating roles, so several queued messages become one
 /// user turn rather than consecutive user ones. Provenance survives in the
 /// `Received` events.
-pub const MERGE_SEPARATOR: &str = "\n\n";
+const MERGE_SEPARATOR: &str = "\n\n";
 
 /// The tool result recorded for a question the user walked away from.
-pub const ABANDONED_ASK_RESULT: &str = "not answered — the user sent a new message instead";
+const ABANDONED_ASK_RESULT: &str = "not answered — the user sent a new message instead";
 
 /// One accepted-but-undelivered thing addressed to an agent.
 ///
@@ -43,6 +44,8 @@ pub enum Incoming {
     /// A `Stop` hook blocked the end of a turn, so the turn continues with the
     /// hook's reason as its input.
     Continue { id: String, reason: String },
+    /// Answers to every question on which the agent is currently parked.
+    Answers { id: String, answers: Vec<AskAnswer> },
     /// Someone typed `/compact`.
     ///
     /// Queued rather than acted on directly so it happens *in order*: a turn in
@@ -73,6 +76,7 @@ impl Incoming {
             | Self::SubAgent { id, .. }
             | Self::Timer { id, .. }
             | Self::Continue { id, .. }
+            | Self::Answers { id, .. }
             | Self::Compact { id, .. }
             | Self::SubSession { id, .. } => id,
         }
@@ -100,7 +104,7 @@ impl Incoming {
             // A report is its own content part, never merged into the text:
             // joined in, a reader could not tell a subagent's words from the
             // person's, and both would render as one user bubble.
-            Self::SubAgent { .. } => None,
+            Self::SubAgent { .. } | Self::Answers { .. } => None,
             // `/compact` is an instruction to the *server*. Merging it into the
             // turn's text would send the model the word "compact" and compact
             // nothing. `/summary-n-fork` is the same, and its message was never
@@ -117,7 +121,7 @@ impl Incoming {
 /// it *does* with it is none of this module's business. Whoever takes an offer
 /// journals the ids in `consumed`, which is what removes them from the queue.
 #[derive(Debug, Clone, PartialEq)]
-pub enum PendingInput {
+pub(crate) enum PendingInput {
     /// `/summary-n-fork`: the summary is not this session's to keep. It seeds
     /// these sub sessions, and this history is left exactly as it was.
     ///
@@ -157,9 +161,10 @@ impl PendingInput {
 pub struct TurnInput {
     /// Ids of the queue items this turn carries.
     pub consumed: Vec<String>,
-    /// Tool-call ids of the questions this turn *answered*. Empty when the turn
-    /// abandoned them instead — the two are deliberately not the same thing.
-    pub answered: Vec<String>,
+    /// Answers carried by this turn.
+    pub answered: Vec<AskAnswer>,
+    /// Tool calls abandoned by a new user message rather than answered.
+    pub abandoned: Vec<String>,
     pub message: Option<String>,
     /// What the people who sent this turn's messages attached, in order.
     ///
@@ -167,7 +172,6 @@ pub struct TurnInput {
     /// merge into one user turn: the text joins, and so do the attachments.
     pub artifacts: Vec<horsie_models::agent::ArtifactRef>,
     pub subagent_results: Vec<SubAgentResultPart>,
-    pub results: Vec<ToolResultInput>,
 }
 
 /// One answer to one pending question.
@@ -187,6 +191,8 @@ pub enum AnswerError {
         missing: Vec<String>,
         unexpected: Vec<String>,
     },
+    /// The answer was valid but could not be written durably.
+    Unavailable(String),
 }
 
 impl std::fmt::Display for AnswerError {
@@ -202,6 +208,7 @@ impl std::fmt::Display for AnswerError {
                 missing.join(", "),
                 unexpected.join(", ")
             ),
+            Self::Unavailable(error) => write!(f, "could not save the answer: {error}"),
         }
     }
 }
@@ -218,12 +225,20 @@ impl std::fmt::Display for AnswerError {
 /// of typing it is to shrink the context the *next* turn reads. Everything
 /// else is one merged input.
 #[must_use]
-pub fn next_input(
+pub(crate) fn next_input(
     inbox: &[Incoming],
     asks: &[crate::agent_loop::AskedQuestion],
 ) -> Option<PendingInput> {
     if inbox.is_empty() {
         return None;
+    }
+    if !asks.is_empty()
+        && inbox
+            .iter()
+            .any(|item| matches!(item, Incoming::Answers { .. }))
+    {
+        let turn = drain(inbox);
+        return (!turn.consumed.is_empty()).then(|| PendingInput::Input(Box::new(turn)));
     }
     // Parked, and nothing queued is a person changing their mind: hold
     // everything, including a `/compact`, until the questions are answered.
@@ -238,6 +253,7 @@ pub fn next_input(
             | Incoming::SubAgent { .. }
             | Incoming::Timer { .. }
             | Incoming::Continue { .. }
+            | Incoming::Answers { .. }
             | Incoming::Compact { .. } => None,
         })
         .collect();
@@ -255,6 +271,7 @@ pub fn next_input(
             | Incoming::SubAgent { .. }
             | Incoming::Timer { .. }
             | Incoming::Continue { .. }
+            | Incoming::Answers { .. }
             | Incoming::SubSession { .. } => None,
         })
         .collect();
@@ -273,42 +290,31 @@ pub fn next_input(
     if turn.consumed.is_empty() {
         return None;
     }
-    // Abandoned, not answered: every parked call still gets a result, so
-    // nothing dangles on the wire, but the result says the question went
-    // unanswered. Answering for real goes through `answered_input`, which
-    // requires all of them at once.
-    turn.results = asks
+    // Abandoned, not answered: every parked call still gets a result so
+    // nothing dangles on the provider wire.
+    turn.abandoned = asks
         .iter()
         .filter_map(|ask| ask.tool_call_id.clone())
-        .map(|tool_call_id| ToolResultInput {
-            tool_call_id,
-            output: ABANDONED_ASK_RESULT.to_string(),
-            is_error: true,
-            artifacts: Vec::new(),
-        })
         .collect();
     Some(PendingInput::Input(Box::new(turn)))
 }
 
-/// The turn an answered park starts: the answers, plus whatever queued behind
-/// them.
-///
-/// Refused unless the answers cover the pending questions exactly. A
-/// half-answered park could not resume anyway — the run would go back to the
-/// provider with a `tool_use` that has no result — and refusing costs nothing,
-/// because nothing has been journaled yet.
-pub fn answered_input(
-    inbox: &[Incoming],
+/// Refuse answer sets that do not cover the pending questions exactly.
+pub(crate) fn validate_answers(
     asks: &[crate::agent_loop::AskedQuestion],
-    answers: Vec<AskAnswer>,
-) -> Result<TurnInput, AnswerError> {
-    let pending: std::collections::HashSet<String> =
-        asks.iter().filter_map(|a| a.tool_call_id.clone()).collect();
+    answers: &[AskAnswer],
+) -> Result<(), AnswerError> {
+    let pending: std::collections::HashSet<String> = asks
+        .iter()
+        .filter_map(|ask| ask.tool_call_id.clone())
+        .collect();
     if pending.is_empty() {
         return Err(AnswerError::NothingPending);
     }
-    let answered: std::collections::HashSet<String> =
-        answers.iter().map(|a| a.tool_call_id.clone()).collect();
+    let answered: std::collections::HashSet<String> = answers
+        .iter()
+        .map(|answer| answer.tool_call_id.clone())
+        .collect();
     if answered != pending {
         let mut missing: Vec<String> = pending.difference(&answered).cloned().collect();
         let mut unexpected: Vec<String> = answered.difference(&pending).cloned().collect();
@@ -319,52 +325,24 @@ pub fn answered_input(
             unexpected,
         });
     }
-    // The queue rides along rather than waiting for another boundary: a
-    // subagent that finished while the person was typing their answer is news
-    // the same turn wants, and holding it back would strand it until something
-    // else happened to start a turn.
-    let mut turn = drain(inbox);
-    turn.answered = answers.iter().map(|a| a.tool_call_id.clone()).collect();
-    turn.results = answers
-        .into_iter()
-        .map(|a| ToolResultInput {
-            tool_call_id: a.tool_call_id,
-            output: a.text,
-            is_error: false,
-            // An answer the person typed; a form that accepts a file is a
-            // separate feature.
-            artifacts: Vec::new(),
-        })
-        .collect();
-    Ok(turn)
+    Ok(())
 }
 
-/// Fold the whole queue into one turn's input. Never partial: an agent that is
-/// starting a turn at all is starting it on everything it has been told.
-fn drain(inbox: &[Incoming]) -> TurnInput {
-    // A `/compact` and a `/summary-n-fork` are instructions to the server, not
-    // input, and they are taken as their own offers. Left in the queue here,
-    // they would be crossed off by a turn that did nothing about them.
+/// Fold every model-addressed item into one turn.
+pub(crate) fn drain(inbox: &[Incoming]) -> TurnInput {
     let inbox: Vec<&Incoming> = inbox
         .iter()
-        .filter(|i| !matches!(i, Incoming::Compact { .. } | Incoming::SubSession { .. }))
+        .filter(|item| !matches!(item, Incoming::Compact { .. } | Incoming::SubSession { .. }))
         .collect();
     let texts: Vec<&str> = inbox.iter().copied().filter_map(Incoming::text).collect();
     TurnInput {
-        consumed: inbox.iter().map(|i| i.id().to_string()).collect(),
-        answered: Vec::new(),
-        // `None`, not an empty string, when nothing contributed text: Anthropic
-        // rejects an empty content block, so a report-only turn must have no
-        // user message at all rather than a blank one.
-        message: (!texts.is_empty()).then(|| texts.join(MERGE_SEPARATOR)),
-        artifacts: inbox
+        consumed: inbox.iter().map(|item| item.id().to_string()).collect(),
+        answered: inbox
             .iter()
-            .copied()
-            .filter_map(|i| match i {
-                Incoming::User { artifacts, .. } => Some(artifacts.clone()),
-                // Nothing else can carry one: a timer and a `Stop` hook are
-                // server text, and a subagent reports through its own part.
-                Incoming::SubAgent { .. }
+            .filter_map(|item| match item {
+                Incoming::Answers { answers, .. } => Some(answers.clone()),
+                Incoming::User { .. }
+                | Incoming::SubAgent { .. }
                 | Incoming::Timer { .. }
                 | Incoming::Continue { .. }
                 | Incoming::Compact { .. }
@@ -372,18 +350,144 @@ fn drain(inbox: &[Incoming]) -> TurnInput {
             })
             .flatten()
             .collect(),
+        abandoned: Vec::new(),
+        message: (!texts.is_empty()).then(|| texts.join(MERGE_SEPARATOR)),
+        artifacts: inbox
+            .iter()
+            .filter_map(|item| match item {
+                Incoming::User { artifacts, .. } => Some(artifacts.clone()),
+                Incoming::SubAgent { .. }
+                | Incoming::Timer { .. }
+                | Incoming::Continue { .. }
+                | Incoming::Answers { .. }
+                | Incoming::Compact { .. }
+                | Incoming::SubSession { .. } => None,
+            })
+            .flatten()
+            .collect(),
         subagent_results: inbox
             .iter()
-            .copied()
-            .filter_map(|i| match i {
+            .filter_map(|item| match item {
                 Incoming::SubAgent { part, .. } => Some((**part).clone()),
                 Incoming::User { .. }
                 | Incoming::Timer { .. }
                 | Incoming::Continue { .. }
+                | Incoming::Answers { .. }
                 | Incoming::Compact { .. }
                 | Incoming::SubSession { .. } => None,
             })
             .collect(),
-        results: Vec::new(),
+    }
+}
+
+/// Build the exact model-visible messages for one consumed input batch.
+pub(crate) fn messages(
+    turn: &TurnInput,
+    rewritten: Option<&str>,
+    message_id: String,
+    at_ms: u64,
+) -> Vec<Message> {
+    let results: Vec<ToolResultInput> = turn
+        .answered
+        .iter()
+        .map(|answer| ToolResultInput {
+            tool_call_id: answer.tool_call_id.clone(),
+            output: answer.text.clone(),
+            is_error: false,
+            artifacts: Vec::new(),
+        })
+        .chain(turn.abandoned.iter().map(|tool_call_id| ToolResultInput {
+            tool_call_id: tool_call_id.clone(),
+            output: ABANDONED_ASK_RESULT.to_string(),
+            is_error: true,
+            artifacts: Vec::new(),
+        }))
+        .collect();
+    let text = rewritten
+        .map(str::to_string)
+        .or_else(|| turn.message.clone());
+    let starts_user_turn = text.is_some() || !turn.subagent_results.is_empty();
+    let mut messages = Vec::new();
+    if starts_user_turn {
+        if !results.is_empty() {
+            messages.push(AgentInput::tool_results(results).to_message(at_ms));
+        }
+        messages.push(
+            AgentInput::user_message_with_results(
+                message_id,
+                text.unwrap_or_default(),
+                turn.subagent_results.clone(),
+                turn.artifacts.clone(),
+            )
+            .to_message(at_ms),
+        );
+    } else if !results.is_empty() {
+        messages.push(AgentInput::tool_results(results).to_message(at_ms));
+    }
+    messages
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    fn question(id: &str) -> crate::agent_loop::AskedQuestion {
+        crate::agent_loop::AskedQuestion {
+            tool_call_id: Some(id.to_string()),
+            question: "question".to_string(),
+            choices: Vec::new(),
+            multiple: false,
+        }
+    }
+
+    #[test]
+    fn answers_are_durable_incoming_input() {
+        let answers = vec![AskAnswer {
+            tool_call_id: "call".into(),
+            text: "answer".into(),
+        }];
+        let inbox = vec![Incoming::Answers {
+            id: "answers".into(),
+            answers: answers.clone(),
+        }];
+
+        let Some(PendingInput::Input(turn)) = next_input(&inbox, &[question("call")]) else {
+            panic!("expected provider input");
+        };
+        assert_eq!(turn.answered, answers);
+        assert_eq!(turn.consumed, ["answers"]);
+        assert_eq!(messages(&turn, None, "turn".into(), 1).len(), 1);
+    }
+
+    #[test]
+    fn a_new_message_abandons_every_pending_question() {
+        let inbox = vec![Incoming::User {
+            id: "user".into(),
+            text: "new work".into(),
+            artifacts: Vec::new(),
+        }];
+
+        let Some(PendingInput::Input(turn)) =
+            next_input(&inbox, &[question("one"), question("two")])
+        else {
+            panic!("expected provider input");
+        };
+        assert_eq!(turn.abandoned, ["one", "two"]);
+        let projected = messages(&turn, None, "turn".into(), 1);
+        assert_eq!(projected.len(), 2);
+    }
+
+    #[test]
+    fn an_answer_must_cover_the_question_set_exactly() {
+        let error = validate_answers(
+            &[question("one"), question("two")],
+            &[AskAnswer {
+                tool_call_id: "one".into(),
+                text: "answer".into(),
+            }],
+        )
+        .expect_err("partial answers must be refused");
+        assert!(matches!(error, AnswerError::Incomplete { .. }));
     }
 }

@@ -158,75 +158,70 @@ impl Transcript {
     }
 }
 
-/// Questions answered from state, which wake nothing.
-pub(crate) struct QueryHandler;
-
-impl QueryHandler {
-    pub(crate) async fn handle(
-        cmd: QueryCommand,
-        cx: &mut CommandContext<'_>,
-    ) -> CommandEffect<AgentDomainEvent> {
-        let state = cx.state;
-        match cmd {
-            QueryCommand::ReadLog { after, reply } => {
-                let transcript = state.transcript();
-                let _ = reply.send(transcript.read_from(after, &cx.step_run.streamed_text));
-                CommandEffect::none()
-            }
-            QueryCommand::PageLog {
+/// Answer a read from in-memory state without waking the agent.
+pub(crate) async fn query(
+    cmd: QueryCommand,
+    cx: &mut CommandContext<'_>,
+) -> CommandEffect<AgentDomainEvent> {
+    let state = cx.state;
+    match cmd {
+        QueryCommand::ReadLog { after, reply } => {
+            let transcript = state.transcript();
+            let _ = reply.send(transcript.read_from(after, &cx.step_run.streamed_text));
+            CommandEffect::none()
+        }
+        QueryCommand::PageLog {
+            anchor,
+            max,
+            filter,
+            reply,
+        } => {
+            let _ = reply.send(crate::agent_loop::shared::agent_log::page(
+                state.transcript().entries(),
                 anchor,
                 max,
-                filter,
-                reply,
-            } => {
-                let _ = reply.send(crate::agent_loop::shared::agent_log::page(
-                    state.transcript().entries(),
-                    anchor,
-                    max,
-                    &filter,
-                ));
-                CommandEffect::none()
-            }
-            QueryCommand::SearchLog {
-                needle,
+                &filter,
+            ));
+            CommandEffect::none()
+        }
+        QueryCommand::SearchLog {
+            needle,
+            max,
+            filter,
+            reply,
+        } => {
+            let _ = reply.send(crate::agent_loop::shared::agent_log::search(
+                state.transcript().entries(),
+                &needle,
+                &filter,
                 max,
-                filter,
-                reply,
-            } => {
-                let _ = reply.send(crate::agent_loop::shared::agent_log::search(
-                    state.transcript().entries(),
-                    &needle,
-                    &filter,
-                    max,
-                ));
-                CommandEffect::none()
-            }
-            QueryCommand::SeqOfId { id, reply } => {
-                let _ = reply.send(crate::agent_loop::shared::agent_log::seq_of_id(
-                    state.transcript().entries(),
-                    &id,
-                ));
-                CommandEffect::none()
-            }
-            QueryCommand::CanOffload { reply } => {
-                let safe = !cx.step_run.is_running()
-                    && !state.turn_in_flight()
-                    && state.open_step().is_none();
-                let _ = reply.send(safe);
-                CommandEffect::none()
-            }
-            QueryCommand::GetUsage { reply } => {
-                let _ = reply.send(state.usage_snapshot());
-                CommandEffect::none()
-            }
-            QueryCommand::GetState { reply } => {
-                let _ = reply.send(state.state_view());
-                CommandEffect::none()
-            }
-            QueryCommand::LogHead { reply } => {
-                let _ = reply.send(state.next_seq());
-                CommandEffect::none()
-            }
+            ));
+            CommandEffect::none()
+        }
+        QueryCommand::SeqOfId { id, reply } => {
+            let _ = reply.send(crate::agent_loop::shared::agent_log::seq_of_id(
+                state.transcript().entries(),
+                &id,
+            ));
+            CommandEffect::none()
+        }
+        QueryCommand::CanOffload { reply } => {
+            let safe =
+                !cx.step_run.is_running() && !state.turn_in_flight() && state.open_step().is_none();
+            let _ = reply.send(safe);
+            CommandEffect::none()
+        }
+        QueryCommand::GetUsage { reply } => {
+            let _ = reply.send(state.usage_snapshot());
+            CommandEffect::none()
+        }
+        QueryCommand::GetState { reply } => {
+            let _ = reply.send(state.state_view());
+            CommandEffect::none()
+        }
+        QueryCommand::LogHead { reply } => {
+            let _ = reply.send(state.next_seq());
+            CommandEffect::none()
         }
     }
 }

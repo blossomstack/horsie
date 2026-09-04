@@ -24,6 +24,8 @@ pub enum StepKind {
     Initialize,
     /// Rebuild live clients from the initialization manifest.
     Connect,
+    /// Run pre-turn hooks while accepted input remains pending.
+    PrepareInput,
     /// One provider request and its resulting assistant message.
     Provider,
     /// Decide whether a settled provider result may end the run.
@@ -257,9 +259,10 @@ pub enum AgentDomainEvent {
     /// window replays to the same place.
     TurnBegan {
         consumed: Vec<String>,
-        /// Every question this turn *answered*. Empty when the turn abandoned
-        /// them instead, which is what a plain message does.
-        answered: Vec<String>,
+        /// Questions replaced by a new user message rather than answered.
+        abandoned: Vec<String>,
+        /// A hook rewrite of the consumed user text.
+        rewritten: Option<String>,
         at_ms: u64,
     },
     /// The agent parked on these questions. One event for the whole park rather

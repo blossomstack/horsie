@@ -232,11 +232,15 @@ impl ProviderStep {
         let Some(execution) = cx.step_run.execution.clone() else {
             return;
         };
+        let Some((marker_seq, StepKind::Provider)) = folded.open_step() else {
+            tracing::warn!("refusing a provider call without an open provider marker");
+            return;
+        };
         let tool_choice = provider_tool_choice(folded, cx.params.requires_result);
         // The wire-shape guard: every `tool_use` must have a `tool_result`.
         // Repairs are journaled at the moments a call becomes unanswerable, so
         // this should find nothing; it stays as the last line of defence.
-        let history = repair_unanswered_tool_calls(folded.prompt_messages());
+        let history = repair_unanswered_tool_calls(folded.prompt_messages_through(marker_seq));
         let req = StepRequest {
             provider: execution.provider.clone(),
             conversation_id: execution.conversation_id.clone(),
@@ -246,10 +250,6 @@ impl ProviderStep {
             max_tokens: None,
             thinking_effort: execution.thinking_effort,
             artifact_source: cx.runtime.artifacts.clone(),
-        };
-        let Some((marker_seq, StepKind::Provider)) = folded.open_step() else {
-            tracing::warn!("refusing a provider call without an open Agent marker");
-            return;
         };
         let cancel = cx.step_run.begin_provider(marker_seq, attempt);
         let self_ref = cx.actor.self_ref();
@@ -536,7 +536,8 @@ mod tests {
         let state = fold([
             AgentDomainEvent::TurnBegan {
                 consumed: Vec::new(),
-                answered: Vec::new(),
+                abandoned: Vec::new(),
+                rewritten: None,
                 at_ms: 0,
             },
             assistant_call("a1", "tc1"),
