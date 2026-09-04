@@ -1138,6 +1138,16 @@ impl SessionState {
             .fold(UsageTotal::default(), |acc, u| acc.combine(u))
     }
 
+    /// Efficiency banked across every agent ever recorded by this session.
+    /// The map, rather than the current roster, keeps completed historical
+    /// executions in the lifetime total and counts every agent exactly once.
+    pub fn session_efficiency_total(&self) -> crate::agent_loop::AgentEfficiencyStats {
+        self.agent_efficiency.values().copied().fold(
+            Default::default(),
+            crate::agent_loop::AgentEfficiencyStats::combine,
+        )
+    }
+
     /// One agent's banked numbers, its subtree's included.
     ///
     /// `agent` is `None` for the main agent, whose usage is keyed by name
@@ -1266,6 +1276,8 @@ pub struct SessionSnapshot {
     /// Tokens summed across every agent this session hosts. The per-agent
     /// breakdown is [`SessionUsageStats`], which only the run graph needs.
     pub usage_total: UsageTotal,
+    /// Efficiency summed once across every agent this session has banked.
+    pub efficiency_total: crate::agent_loop::AgentEfficiencyStats,
     /// Every agent this session hosts, in the vocabulary of
     /// `/sessions/:id/agents/:agent_id`.
     pub agents: Vec<AgentEntry>,
@@ -1512,6 +1524,35 @@ pub enum AgentKey {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_efficiency_total_counts_every_banked_agent_once_and_keeps_maxima() {
+        let mut state = SessionState::default();
+        state.agent_efficiency.insert(
+            "current".into(),
+            crate::agent_loop::AgentEfficiencyStats {
+                provider_calls: 2,
+                provider_generation_ms: 30,
+                max_provider_generation_ms: 20,
+                ..Default::default()
+            },
+        );
+        // Not present in the current forest: lifetime diagnostics must still
+        // include work an old workflow execution already completed.
+        state.agent_efficiency.insert(
+            "historical".into(),
+            crate::agent_loop::AgentEfficiencyStats {
+                provider_calls: 3,
+                provider_generation_ms: 70,
+                max_provider_generation_ms: 40,
+                ..Default::default()
+            },
+        );
+        let total = state.session_efficiency_total();
+        assert_eq!(total.provider_calls, 5);
+        assert_eq!(total.provider_generation_ms, 100);
+        assert_eq!(total.max_provider_generation_ms, 40);
+    }
 
     /// Every state has a spelling, and one spelling: a `_ =>` arm is how the
     /// documents that carry a status came to disagree about what a failed

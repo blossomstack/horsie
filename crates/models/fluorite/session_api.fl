@@ -87,6 +87,42 @@ struct LogSearchPage {
     hits: Vec<LogSearchHit>,
 }
 
+/// Derived, compact diagnostics from durable counters. Durations are provider
+/// generation and completed tool execution spans, not end-to-end turn latency.
+struct EfficiencyDiagnostic {
+    average_input_tokens_per_provider_call: u64,
+    average_output_tokens_per_provider_call: u64,
+    average_provider_generation_ms: u64,
+    average_tool_execution_ms: u64,
+    cache_read_percent: Option<u32>,
+    tool_failure_percent: Option<u32>,
+    output_retention_percent: Option<u32>,
+    findings: Vec<String>,
+}
+
+struct SessionEfficiencyAgent {
+    id: String,
+    parent: Option<String>,
+    title: Option<String>,
+    /// "main" | "subagent" | "step" | "sub_session"
+    kind: String,
+    status: String,
+    model: Option<String>,
+    usage: UsageView,
+    context_tokens: u32,
+    context_window: Option<u32>,
+    efficiency: EfficiencyStats,
+    diagnostic: EfficiencyDiagnostic,
+}
+
+struct SessionEfficiencyReport {
+    session_id: String,
+    usage_total: UsageView,
+    efficiency_total: EfficiencyStats,
+    diagnostic: EfficiencyDiagnostic,
+    agents: Vec<SessionEfficiencyAgent>,
+}
+
 /// One agent's current values: what it is, what became of it, what it runs
 /// under, and its live numbers. The subagent-only fields (`parent`, `title`,
 /// `task`, `output`, `error`) are absent for a session's main agent.

@@ -105,6 +105,7 @@ function selectRun(
         providerGenerationMs: 0,
         maxProviderGenerationMs: 0,
         toolCalls: 0,
+        resultToolCalls: 0,
         toolExecutionMs: 0,
         maxToolExecutionMs: 0,
         failedToolCalls: 0,

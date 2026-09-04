@@ -7,6 +7,7 @@ export interface EfficiencyStats {
   providerGenerationMs: number;
   maxProviderGenerationMs: number;
   toolCalls: number;
+  resultToolCalls: number;
   toolExecutionMs: number;
   maxToolExecutionMs: number;
   failedToolCalls: number;

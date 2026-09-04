@@ -152,6 +152,7 @@ impl Reads {
                     // live context size is per-agent and never summed, and it
                     // is on the agent document rather than here.
                     usage_total: state.session_usage_total(),
+                    efficiency_total: state.session_efficiency_total(),
                     agents: actor.agent_roster(state),
                     sub_sessions: actor.sub_session_roster(state),
                 });
