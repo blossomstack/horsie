@@ -275,6 +275,19 @@ impl SessionAgentKind {
     }
 }
 
+impl SessionContextProvider {
+    /// Whether this exact agent is offered `ask_user`. One decision feeds both
+    /// the toolbox and its static narration guidance, so they cannot drift.
+    fn offers_ask_user(&self) -> bool {
+        match self.kind {
+            SessionAgentKind::Main => !self.unattended,
+            SessionAgentKind::Step(_) => self.step_result.interactive && !self.unattended,
+            SessionAgentKind::SubSession(_) => true,
+            SessionAgentKind::Sub(_) => false,
+        }
+    }
+}
+
 /// The runtime client an agent runs with. Subagents share the session's
 /// sandbox but never its cwd/env bucket: the runtime keys that state by
 /// agent id, so each subagent acts under its own identity.
@@ -315,6 +328,16 @@ pub(super) fn scoped_client(
         | SessionAgentKind::SubSession(id) => client.with_agent_id(id.to_string()),
     }
 }
+
+/// Appended only when the final toolbox offers `ask_user` — the capability
+/// that means a person may be watching this agent work. Static for the agent's
+/// lifetime, so it never changes the system-prompt cache key between turns.
+const PROGRESS_NARRATION_PROMPT_SUFFIX: &str = "\n\n## Progress narration\n\n\
+This is an interactive session: a person may be watching while you work. Before the first \
+substantial tool batch, and after several tool batches or a meaningful phase change, include one \
+brief user-visible sentence saying what you are doing and why. Text may accompany tool calls, so \
+do not add a separate round trip. Do not narrate every command, repeat obvious tool names, expose \
+private chain-of-thought, or delay necessary work.";
 
 /// Appended to a session's main agent, and to nothing else.
 ///
@@ -1231,6 +1254,7 @@ impl ContextProvider for SessionContextProvider {
             // only ever fail would be worse than not offering it.
             None => with_spawn,
         };
+        let offers_ask_user = self.offers_ask_user();
         let toolbox: Arc<dyn Toolbox> = match self.kind {
             // An unattended session skips the ask layer entirely rather than
             // offering a tool whose answer would never come.
@@ -1251,7 +1275,7 @@ impl ContextProvider for SessionContextProvider {
                     self.step_result.outcomes.clone(),
                     self.step_result.fields.clone(),
                 );
-                if self.step_result.interactive && !self.unattended {
+                if offers_ask_user {
                     Arc::new(AskUserToolbox::new(result))
                 } else {
                     result
@@ -1308,6 +1332,14 @@ impl ContextProvider for SessionContextProvider {
                 Some(p) => format!("{p}{suffix}"),
                 None => suffix.trim_start().to_string(),
             }),
+        };
+        let system_prompt = if offers_ask_user {
+            Some(match system_prompt {
+                Some(prompt) => format!("{prompt}{PROGRESS_NARRATION_PROMPT_SUFFIX}"),
+                None => PROGRESS_NARRATION_PROMPT_SUFFIX.trim_start().to_string(),
+            })
+        } else {
+            system_prompt
         };
         let sections: Vec<String> = [memory_index, control_index]
             .into_iter()
@@ -1455,6 +1487,11 @@ mod tests {
         };
 
         let main = build(SessionAgentKind::Main).provide().await.unwrap();
+        assert!(
+            main.system_prompt
+                .as_deref()
+                .is_some_and(|prompt| prompt.contains("## Progress narration"))
+        );
         let main_tools: Vec<String> = main.toolbox.specs().into_iter().map(|s| s.name).collect();
         for t in [
             "spawn_agent",
@@ -1484,6 +1521,10 @@ mod tests {
         );
         assert!(prompt.contains("automatically delivered"), "{prompt}");
         assert!(prompt.contains("delegation guidance"), "{prompt}");
+        assert!(
+            !prompt.contains("## Progress narration"),
+            "a quiet subagent must not be told to narrate"
+        );
     }
 
     #[tokio::test]
@@ -1581,17 +1622,18 @@ mod tests {
         // Everything else the main agent has is untouched.
         assert!(tools.contains(&"set_session_title".to_string()));
         assert!(tools.contains(&"spawn_agent".to_string()));
+        let unattended_prompt = unattended.system_prompt.unwrap();
         assert!(
-            unattended
-                .system_prompt
-                .unwrap()
-                .contains("# Unattended run"),
+            unattended_prompt.contains("# Unattended run"),
             "an unattended run must be told there is no user"
         );
+        assert!(!unattended_prompt.contains("## Progress narration"));
 
         let attended = build(false).provide().await.unwrap();
         assert!(names(&attended).contains(&crate::sessions::ask_tool::ASK_USER_TOOL.to_string()));
-        assert!(!attended.system_prompt.unwrap().contains("# Unattended run"));
+        let attended_prompt = attended.system_prompt.unwrap();
+        assert!(!attended_prompt.contains("# Unattended run"));
+        assert!(attended_prompt.contains("## Progress narration"));
     }
 
     /// Every agent acts under its own identity inside the sandbox — including
