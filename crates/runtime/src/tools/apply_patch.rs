@@ -7,6 +7,8 @@ const END_PATCH: &str = "*** End Patch";
 const UPDATE_FILE: &str = "*** Update File: ";
 const ADD_FILE: &str = "*** Add File: ";
 const DELETE_FILE: &str = "*** Delete File: ";
+const MOVE_FILE: &str = "*** Move File: ";
+const MOVE_SEPARATOR: &str = " -> ";
 const MAX_PATCH_BYTES: usize = 1_000_000;
 const MAX_FILES: usize = 100;
 const MAX_HUNKS: usize = 500;
@@ -50,12 +52,14 @@ enum FilePatch {
     Update { path: String, hunks: Vec<Hunk> },
     Add { path: String, lines: Vec<String> },
     Delete { path: String },
+    Move { from: String, to: String },
 }
 
 impl FilePatch {
     fn path(&self) -> &str {
         match self {
             Self::Update { path, .. } | Self::Add { path, .. } | Self::Delete { path } => path,
+            Self::Move { from, .. } => from,
         }
     }
 }
@@ -144,9 +148,26 @@ fn parse_patch(input: &str) -> Result<Vec<FilePatch>, String> {
                 ));
             }
             patches.push(FilePatch::Delete { path });
+        } else if let Some(raw_move) = header.strip_prefix(MOVE_FILE) {
+            let Some((raw_from, raw_to)) = raw_move.split_once(MOVE_SEPARATOR) else {
+                return Err(format!(
+                    "line {}: move header must be '<source> -> <destination>'",
+                    index + 1
+                ));
+            };
+            let from = parse_path(raw_from, index + 1, &mut paths)?;
+            let to = parse_path(raw_to, index + 1, &mut paths)?;
+            index += 1;
+            if index + 1 < lines.len() && !is_file_header(lines[index]) {
+                return Err(format!(
+                    "line {}: a move section cannot contain body lines",
+                    index + 1
+                ));
+            }
+            patches.push(FilePatch::Move { from, to });
         } else {
             return Err(format!(
-                "line {}: expected an Update File, Add File, or Delete File header, found {:?}",
+                "line {}: expected an Update File, Add File, Delete File, or Move File header, found {:?}",
                 index + 1,
                 header
             ));
@@ -186,7 +207,6 @@ fn is_hunk_header(line: &str) -> bool {
 
 fn parse_hunk(lines: &[&str], start: usize) -> Result<(Hunk, usize), String> {
     let mut parsed = Vec::new();
-    let mut has_change = false;
     let mut has_match = false;
     let mut index = start;
     while index + 1 < lines.len() && !is_hunk_header(lines[index]) && !is_file_header(lines[index])
@@ -196,11 +216,9 @@ fn parse_hunk(lines: &[&str], start: usize) -> Result<(Hunk, usize), String> {
             has_match = true;
             HunkLine::Context(value.to_string())
         } else if let Some(value) = line.strip_prefix('-') {
-            has_change = true;
             has_match = true;
             HunkLine::Remove(value.to_string())
         } else if let Some(value) = line.strip_prefix('+') {
-            has_change = true;
             HunkLine::Add(value.to_string())
         } else {
             return Err(format!(
@@ -213,9 +231,6 @@ fn parse_hunk(lines: &[&str], start: usize) -> Result<(Hunk, usize), String> {
     }
     if parsed.is_empty() {
         return Err(format!("line {}: update hunk is empty", start + 1));
-    }
-    if !has_change {
-        return Err(format!("line {}: update hunk changes nothing", start + 1));
     }
     if !has_match {
         return Err(format!(
@@ -262,7 +277,7 @@ impl TextFile {
         hunk: &Hunk,
         path: &str,
         number: usize,
-    ) -> Result<(usize, usize), String> {
+    ) -> Result<(usize, usize, bool), String> {
         let old: Vec<&str> = hunk
             .lines
             .iter()
@@ -288,7 +303,26 @@ impl TextFile {
             .map(|(index, _)| index)
             .collect();
         let start = match matches.as_slice() {
-            [] => return Err(format!("{path}: hunk {number} did not match")),
+            [] if new.is_empty() => {
+                return Err(format!("{path}: hunk {number} did not match"));
+            }
+            [] => {
+                let applied: Vec<usize> = self
+                    .lines
+                    .windows(new.len())
+                    .enumerate()
+                    .filter(|(_, window)| window == &new.as_slice())
+                    .map(|(index, _)| index)
+                    .collect();
+                return match applied.as_slice() {
+                    [start] => Ok((*start + 1, *start + new.len().max(1), true)),
+                    [] => Err(format!("{path}: hunk {number} did not match")),
+                    many => Err(format!(
+                        "{path}: hunk {number} already-applied form matched {} locations; include more context",
+                        many.len()
+                    )),
+                };
+            }
             [start] => *start,
             many => {
                 return Err(format!(
@@ -300,7 +334,7 @@ impl TextFile {
         let old_end = start + old.len();
         let new_len = new.len();
         self.lines.splice(start..old_end, new);
-        Ok((start + 1, start + new_len.max(1)))
+        Ok((start + 1, start + new_len.max(1), false))
     }
 }
 
@@ -308,6 +342,8 @@ impl TextFile {
 enum PlannedContent {
     Write(String),
     Delete,
+    Move(PathBuf),
+    None,
 }
 
 #[derive(Debug)]
@@ -317,6 +353,7 @@ struct PlannedFile {
     kind: char,
     content: PlannedContent,
     ranges: Vec<(usize, usize)>,
+    note: Option<String>,
 }
 
 /// Validate every file precondition and hunk against in-memory content before
@@ -334,43 +371,110 @@ fn apply(root: &Path, patch: Vec<FilePatch>) -> Result<String, String> {
                 }
                 let mut file = TextFile::read(&path)?;
                 let mut ranges = Vec::with_capacity(hunks.len());
+                let mut already = 0;
                 for (index, hunk) in hunks.iter().enumerate() {
-                    ranges.push(file.apply_hunk(hunk, &shown_path, index + 1)?);
+                    if hunk
+                        .lines
+                        .iter()
+                        .all(|line| matches!(line, HunkLine::Context(_)))
+                    {
+                        already += 1;
+                        continue;
+                    }
+                    let (start, end, was_applied) =
+                        file.apply_hunk(hunk, &shown_path, index + 1)?;
+                    if was_applied {
+                        already += 1;
+                    } else {
+                        ranges.push((start, end));
+                    }
                 }
+                let unchanged = ranges.is_empty();
                 planned.push(PlannedFile {
                     path,
                     shown_path,
-                    kind: 'M',
-                    content: PlannedContent::Write(file.render()),
+                    kind: if unchanged { '=' } else { 'M' },
+                    content: if unchanged {
+                        PlannedContent::None
+                    } else {
+                        PlannedContent::Write(file.render())
+                    },
                     ranges,
+                    note: (already > 0).then(|| format!("{already} hunk(s) already applied")),
                 });
             }
             FilePatch::Add { lines, .. } => {
-                if path.exists() {
-                    return Err(format!("cannot add '{shown_path}': path already exists"));
-                }
                 let line_count = lines.len();
                 let mut content = lines.join("\n");
                 content.push('\n');
-                planned.push(PlannedFile {
-                    path,
-                    shown_path,
-                    kind: 'A',
-                    content: PlannedContent::Write(content),
-                    ranges: vec![(1, line_count)],
-                });
-            }
-            FilePatch::Delete { .. } => {
-                if !path.is_file() {
-                    return Err(format!("cannot delete '{shown_path}': file does not exist"));
+                let already = path.is_file()
+                    && std::fs::read_to_string(&path).is_ok_and(|existing| existing == content);
+                if path.exists() && !already {
+                    return Err(format!("cannot add '{shown_path}': path already exists"));
                 }
                 planned.push(PlannedFile {
                     path,
                     shown_path,
-                    kind: 'D',
-                    content: PlannedContent::Delete,
-                    ranges: Vec::new(),
+                    kind: if already { '=' } else { 'A' },
+                    content: if already {
+                        PlannedContent::None
+                    } else {
+                        PlannedContent::Write(content)
+                    },
+                    ranges: if already {
+                        Vec::new()
+                    } else {
+                        vec![(1, line_count)]
+                    },
+                    note: already.then(|| "already applied".to_string()),
                 });
+            }
+            FilePatch::Delete { .. } => {
+                let already = !path.exists();
+                if path.exists() && !path.is_file() {
+                    return Err(format!("cannot delete '{shown_path}': not a file"));
+                }
+                planned.push(PlannedFile {
+                    path,
+                    shown_path,
+                    kind: if already { '=' } else { 'D' },
+                    content: if already {
+                        PlannedContent::None
+                    } else {
+                        PlannedContent::Delete
+                    },
+                    ranges: Vec::new(),
+                    note: already.then(|| "already applied".to_string()),
+                });
+            }
+            FilePatch::Move { from, to } => {
+                let destination = root.join(&to);
+                let already = !path.exists() && destination.is_file();
+                if already {
+                    planned.push(PlannedFile {
+                        path,
+                        shown_path: format!("{from} -> {to}"),
+                        kind: '=',
+                        content: PlannedContent::None,
+                        ranges: Vec::new(),
+                        note: Some("already applied".to_string()),
+                    });
+                } else {
+                    if !path.is_file() {
+                        return Err(format!("cannot move '{from}': source file does not exist"));
+                    }
+                    if destination.exists() {
+                        return Err(format!("cannot move to '{to}': destination already exists"));
+                    }
+                    planned.push(PlannedFile {
+                        path,
+                        shown_path: format!("{from} -> {to}"),
+                        kind: 'R',
+                        content: PlannedContent::Move(destination),
+                        ranges: Vec::new(),
+                        note: None,
+                    });
+                }
             }
         }
     }
@@ -390,6 +494,21 @@ fn apply(root: &Path, patch: Vec<FilePatch>) -> Result<String, String> {
             }
             PlannedContent::Delete => std::fs::remove_file(&file.path)
                 .map_err(|e| format!("failed to delete '{}': {e}", file.path.display()))?,
+            PlannedContent::Move(destination) => {
+                if let Some(parent) = destination.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        format!("failed to create directory '{}': {e}", parent.display())
+                    })?;
+                }
+                std::fs::rename(&file.path, destination).map_err(|e| {
+                    format!(
+                        "failed to move '{}' to '{}': {e}",
+                        file.path.display(),
+                        destination.display()
+                    )
+                })?;
+            }
+            PlannedContent::None => {}
         }
     }
 
@@ -415,6 +534,10 @@ fn apply(root: &Path, patch: Vec<FilePatch>) -> Result<String, String> {
             output.push_str(" (lines ");
             output.push_str(&ranges);
             output.push(')');
+        }
+        if let Some(note) = &file.note {
+            output.push_str(" — ");
+            output.push_str(note);
         }
     }
     Ok(output)
@@ -539,6 +662,38 @@ mod tests {
         )
         .await;
         assert!(error.contains("matched 2 locations"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn already_applied_and_context_only_hunks_do_not_reject_the_patch() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("one.txt"), "alpha\nNEW\nomega\n").unwrap();
+        let result = output(
+            &dir,
+            "*** Begin Patch\n*** Update File: one.txt\n@@\n alpha\n-old\n+NEW\n omega\n@@\n alpha\n*** End Patch",
+        )
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("one.txt")).unwrap(),
+            "alpha\nNEW\nomega\n"
+        );
+        assert!(result.contains("2 hunk(s) already applied"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn moves_a_file_and_accepts_reapplying_the_move() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("old.txt"), "content\n").unwrap();
+        let patch = "*** Begin Patch\n*** Move File: old.txt -> nested/new.txt\n*** End Patch";
+        let first = output(&dir, patch).await;
+        assert!(first.contains("R old.txt -> nested/new.txt"), "{first}");
+        assert!(!dir.path().join("old.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("nested/new.txt")).unwrap(),
+            "content\n"
+        );
+        let second = output(&dir, patch).await;
+        assert!(second.contains("already applied"), "{second}");
     }
 
     #[tokio::test]
