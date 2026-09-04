@@ -31,6 +31,11 @@ struct ListFilesInput { path: String }
 struct GlobInput { pattern: String, path: Option<String>, max_results: Option<u64> }
 struct GrepInput { pattern: String, path: Option<String>, file_pattern: Option<String>, max_results: Option<u64> }
 
+/// A pull request number in the current repository, or a GitHub pull URL.
+struct InspectPullRequestInput { reference: String }
+/// A bounded changed-file summary, or one file's patch when `path` is present.
+struct InspectPullRequestDiffInput { reference: String, path: Option<String> }
+
 // Set the caller's working directory for all future tool calls. `path` may be
 // absolute or relative to the current effective cwd; omit it to reset to the
 // default working directory (the first workspace).
@@ -54,6 +59,8 @@ union ToolCall {
     ListFiles(ListFilesInput),
     Glob(GlobInput),
     Grep(GrepInput),
+    InspectPullRequest(InspectPullRequestInput),
+    InspectPullRequestDiff(InspectPullRequestDiffInput),
     SetWorkingDir(SetWorkingDirInput),
     SetEnv(SetEnvInput),
 }

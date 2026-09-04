@@ -4,6 +4,8 @@ import { BashInput } from './bashInput';
 import { FindAndReplaceInput } from './findAndReplaceInput';
 import { GlobInput } from './globInput';
 import { GrepInput } from './grepInput';
+import { InspectPullRequestDiffInput } from './inspectPullRequestDiffInput';
+import { InspectPullRequestInput } from './inspectPullRequestInput';
 import { ListFilesInput } from './listFilesInput';
 import { ReadFileInput } from './readFileInput';
 import { ReadImageInput } from './readImageInput';
@@ -25,5 +27,7 @@ export type ToolCall =
   | { tool: "ListFiles"; value: ListFilesInput }
   | { tool: "Glob"; value: GlobInput }
   | { tool: "Grep"; value: GrepInput }
+  | { tool: "InspectPullRequest"; value: InspectPullRequestInput }
+  | { tool: "InspectPullRequestDiff"; value: InspectPullRequestDiffInput }
   | { tool: "SetWorkingDir"; value: SetWorkingDirInput }
   | { tool: "SetEnv"; value: SetEnvInput };

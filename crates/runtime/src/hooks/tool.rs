@@ -36,6 +36,8 @@ fn tool_name(call: &ToolCall) -> &'static str {
         ToolCall::ListFiles(_) => "list_files",
         ToolCall::Glob(_) => "glob",
         ToolCall::Grep(_) => "grep",
+        ToolCall::InspectPullRequest(_) => "inspect_pull_request",
+        ToolCall::InspectPullRequestDiff(_) => "inspect_pull_request_diff",
         ToolCall::SetWorkingDir(_) => "set_working_dir",
         ToolCall::SetEnv(_) => "set_env",
     }
