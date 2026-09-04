@@ -337,11 +337,9 @@ successful call wins.";
 /// result travels. Deliberately short — the tools carry their own docs.
 const SUBAGENT_PROMPT_SUFFIX: &str = "\n\n# Subagent role\n\
 You are a subagent, spawned to work on one task. Your final message is your report: \
-it is automatically delivered to the agent that spawned you — make it self-contained. You \
-may spawn your own subagents with spawn_agent. Continue with independent work, or wait if \
-none remains; do not poll subagent_status or call it repeatedly. Use subagent_status only \
-when the user requests a progress update or to diagnose a suspected runtime or \
-result-delivery problem. You cannot ask the user or rename the session; if you are blocked, \
+it is automatically delivered to the agent that spawned you — make it self-contained. Do the \
+assigned work yourself. The delegation guidance in your system prompt applies to you too. You \
+cannot ask the user or rename the session; if you are blocked, \
 report that instead.";
 
 /// Appended to a workflow step's system prompt: what a step is, how it ends,
@@ -1146,7 +1144,7 @@ impl ContextProvider for SessionContextProvider {
             | SessionAgentKind::SubSession(id)
             | SessionAgentKind::Sub(id) => id.to_string(),
         };
-        // A zero cap disables subagents outright: no tools advertised, so the
+        // A zero cap disables delegation outright: no tools advertised, so the
         // model never meets a tool that only ever rejects.
         let with_spawn: Arc<dyn Toolbox> = if settings.max_subagents() == 0 {
             with_memory
@@ -1485,11 +1483,7 @@ mod tests {
             "the subagent prompt must explain its role"
         );
         assert!(prompt.contains("automatically delivered"), "{prompt}");
-        assert!(prompt.contains("do not poll"), "{prompt}");
-        assert!(
-            prompt.contains("user requests a progress update"),
-            "{prompt}"
-        );
+        assert!(prompt.contains("delegation guidance"), "{prompt}");
     }
 
     #[tokio::test]
