@@ -68,7 +68,7 @@ impl ReadOutcome {
     }
 }
 
-impl AgentState {
+impl Transcript {
     /// Answer a forward read from `after`, against the deltas now in flight.
     ///
     /// Three cases, and the third is the whole reason the cursor has two parts:
@@ -95,7 +95,7 @@ impl AgentState {
             // session must not resend its whole history on every open, and the
             // caller is told when the cap bit so it can page back for the rest.
             let (entries, truncated) =
-                crate::agent_loop::shared::agent_log::replay_window(self.log());
+                crate::agent_loop::shared::agent_log::replay_window(self.entries());
             return ReadOutcome {
                 window: Some(ReplayWindow {
                     has_more_before: truncated,
@@ -112,7 +112,7 @@ impl AgentState {
         };
 
         let entries =
-            crate::agent_loop::shared::agent_log::since(self.log(), cursor.entry_seq).to_vec();
+            crate::agent_loop::shared::agent_log::since(self.entries(), cursor.entry_seq).to_vec();
         if !entries.is_empty() {
             // Behind the tail. The deltas belong after the entries this reader
             // is only now receiving, so they wait for the next step.
@@ -169,7 +169,8 @@ impl QueryHandler {
         let state = cx.state;
         match cmd {
             QueryCommand::ReadLog { after, reply } => {
-                let _ = reply.send(state.read_from(after, &cx.step_run.streamed_text));
+                let transcript = state.transcript();
+                let _ = reply.send(transcript.read_from(after, &cx.step_run.streamed_text));
                 CommandEffect::none()
             }
             QueryCommand::PageLog {
@@ -179,7 +180,7 @@ impl QueryHandler {
                 reply,
             } => {
                 let _ = reply.send(crate::agent_loop::shared::agent_log::page(
-                    state.log(),
+                    state.transcript().entries(),
                     anchor,
                     max,
                     &filter,
@@ -193,7 +194,7 @@ impl QueryHandler {
                 reply,
             } => {
                 let _ = reply.send(crate::agent_loop::shared::agent_log::search(
-                    state.log(),
+                    state.transcript().entries(),
                     &needle,
                     &filter,
                     max,
@@ -202,7 +203,7 @@ impl QueryHandler {
             }
             QueryCommand::SeqOfId { id, reply } => {
                 let _ = reply.send(crate::agent_loop::shared::agent_log::seq_of_id(
-                    state.log(),
+                    state.transcript().entries(),
                     &id,
                 ));
                 CommandEffect::none()

@@ -853,8 +853,9 @@ mod tests {
         let step = crate::sessions::events::fold_agent_state(&journal, run.steps[0].agent).await;
         // The timer really was armed — otherwise this test passes by testing
         // nothing, which is exactly what it did the first time it was written.
+        let transcript = step.transcript();
         assert!(
-            step.log().iter().any(|e| matches!(
+            transcript.entries().iter().any(|e| matches!(
                 &e.body,
                 horsie_agentcore::AgentLogBody::Llm(m)
                     if m.parts.iter().any(|p| matches!(

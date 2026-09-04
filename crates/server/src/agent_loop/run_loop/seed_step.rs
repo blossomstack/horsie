@@ -13,7 +13,6 @@
 
 use crate::agent_loop::prelude::*;
 use horsie_actor::{CommandEffect, ReplyTo};
-use horsie_agentcore::AgentLogBody;
 use horsie_models::now_ms;
 
 /// Being a sub session, and being branched from.
@@ -46,7 +45,8 @@ impl SeedStep {
                 // message: the other two modes leave the queued brief as the
                 // whole of this write's trace, and a brief that is not a
                 // person's message would not even log a `MessageQueued`.
-                if !state.log().is_empty() || !state.pending_incoming().is_empty() {
+                if !state.transcript().entries().is_empty() || !state.pending_incoming().is_empty()
+                {
                     let _ = reply.send(Ok(()));
                     return CommandEffect::none();
                 }
@@ -60,10 +60,10 @@ impl SeedStep {
                     let _ = reply.send(answer);
                 });
                 let repairs = missing_tool_results(&seeded.prompt_messages(), &[]);
-                let mut events = vec![AgentDomainEvent::Seeded {
-                    state: seeded,
-                    seed,
-                }];
+                let mut events = vec![AgentDomainEvent::Seeded { state: seeded }];
+                if let Some(seed) = seed {
+                    events.push(AgentDomainEvent::InputMessage { message: *seed });
+                }
                 events.extend(
                     repairs
                         .into_iter()
@@ -176,18 +176,10 @@ impl SeedStep {
             }
             return;
         }
-        if let AgentDomainEvent::Seeded {
-            state: seeded,
-            seed,
-        } = event
-        {
+        if let AgentDomainEvent::Seeded { state: seeded } = event {
             // Wholesale, because this is the agent's first event: anything
-            // already here would be a bug rather than a history to merge.
+            // already here would be a bug rather than history to merge.
             *state = *seeded;
-            if let Some(seed) = seed {
-                let at_ms = seed.created_at_ms;
-                state.push(at_ms, AgentLogBody::Llm(*seed));
-            }
         }
     }
 }

@@ -1,21 +1,12 @@
-//! Things written into this agent's log by somebody else.
+//! Session lifecycle and plugin-hook facts written into agent history.
 //!
-//! A session lifecycle record, a plugin hook's audit trail, a chunk of the
-//! message being streamed. None of them is the agent's own decision, and all
-//! three are journaled — or, for a delta, ordered — *here* because the agent is
-//! the sole writer of its own log. That is what makes the order deterministic
-//! with no merge anywhere, and it is why a client reads one ordered thing
-//! instead of reconciling two streams.
-//!
-//! One of these records does change what the agent may *do*: the runtime
-//! arriving. It is read off the record by [`runtime_readiness`] rather than
-//! announced separately, so a record that says nothing about the runtime cannot
-//! start a turn — which is what keeps recovery quiet.
+//! The agent remains the sole writer, so transcript projection later preserves
+//! their exact order without merging another stream. Runtime lifecycle records
+//! also update the process-local readiness gate.
 
 use crate::agent_loop::prelude::*;
-use crate::agent_loop::state::hook_entry;
 use horsie_actor::CommandEffect;
-use horsie_agentcore::{AgentLogBody, LifecycleEvent};
+use horsie_agentcore::LifecycleEvent;
 use horsie_models::now_ms;
 
 /// What a lifecycle record says about this agent's runtime, if anything.
@@ -94,23 +85,6 @@ impl HistoryHandler {
                     .collect();
                 CommandEffect::persist(events)
             }
-        }
-    }
-
-    /// What the session did, and what a plugin did to a tool call.
-    // The fallthrough is unreachable by construction: `RunLoop::apply` routes
-    // every variant to exactly one component, so an event added later fails to
-    // compile *there* rather than silently reaching the wrong fold here.
-    #[allow(clippy::wildcard_enum_match_arm)]
-    pub(crate) fn apply(state: &mut AgentState, event: AgentDomainEvent) {
-        match event {
-            AgentDomainEvent::LifecycleRecorded { event, at_ms } => {
-                state.push(at_ms, AgentLogBody::Lifecycle(event));
-            }
-            AgentDomainEvent::HookRan { record, seq, at_ms } => {
-                state.push(at_ms, AgentLogBody::Hook(hook_entry(record, seq, at_ms)));
-            }
-            _ => {}
         }
     }
 }

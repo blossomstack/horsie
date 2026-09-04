@@ -1,32 +1,24 @@
-//! Durable state derived from one chronological agent history.
+//! Durable state with one chronological agent history.
 //!
-//! [`AgentState`] keeps the append-only domain records plus deterministic read
-//! projections: the user-facing transcript, cumulative usage, and context size.
-//! Pending input, asks, open steps, run identity, and unresolved tool calls are
-//! computed from the same history rather than stored again.
+//! [`AgentState`] stores domain history, usage/context projections, and the two
+//! genuine component states. Pending input, asks, open steps, run identity, and
+//! unresolved tool calls are computed from history.
 //!
-//! Timers and task lists are the only independent durable components. Their
-//! tagged states live in [`ComponentState`] so either component can evolve its
-//! own state machine without widening the run loop.
+//! The user-facing transcript is not stored here. [`project_transcript`] builds
+//! it deterministically from history whenever a read or provider step needs it.
 
 use crate::agent_loop::prelude::*;
-use horsie_agentcore::{AgentLogBody, AgentLogEntry, Usage};
+use horsie_agentcore::Usage;
 use serde::{Deserialize, Serialize};
 
 /// The result of folding an agent's durable history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentState {
-    /// The sole chronological durable account. The transcript below is a
-    /// deterministic person-facing projection of these records.
+    /// The sole chronological durable account.
     history: Vec<crate::agent_loop::events::AgentHistoryEntry>,
-    next_history_seq: u64,
     usage_total: UsageTotal,
     last_step_usage: Option<Usage>,
     context_tokens: u32,
-    /// Everything the user sees, whether or not the model saw it. Shared: a
-    /// timer, a hook, a tool result and a task-list change all land here, in
-    /// one order.
-    pub(crate) transcript: Transcript,
     /// One entry per component that has any durable state of its own.
     #[serde(deserialize_with = "known_parts")]
     parts: Vec<ComponentState>,
@@ -36,11 +28,9 @@ impl Default for AgentState {
     fn default() -> Self {
         Self {
             history: Vec::new(),
-            next_history_seq: 0,
             usage_total: UsageTotal::default(),
             last_step_usage: None,
             context_tokens: 0,
-            transcript: Transcript::default(),
             parts: crate::agent_loop::components::default_parts(),
         }
     }
@@ -69,71 +59,6 @@ where
         .collect())
 }
 
-/// The ordered user-facing projection of history and its next sequence.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Transcript {
-    /// Renamed twice in its life — from `messages: Vec<Message>` when the
-    /// element type became a union, and from `history: Vec<HistoryEntry>` when
-    /// entries gained a sequence number — because serde ignores a now-unknown
-    /// key, so a rename degrades to an empty transcript rather than failing
-    /// `recover()` for every session.
-    log: Vec<AgentLogEntry>,
-    /// Deterministic across replay for the same reason `hook:{n}` is: the fold
-    /// is deterministic, so re-running it produces the same numbers. Held here
-    /// rather than derived from `log.len()` so front-trimming stays possible
-    /// without renumbering.
-    next_seq: u64,
-}
-
-impl Transcript {
-    /// Every entry, oldest first.
-    #[must_use]
-    pub fn entries(&self) -> &[AgentLogEntry] {
-        &self.log
-    }
-
-    /// The next sequence number this transcript will hand out.
-    #[must_use]
-    pub fn next_seq(&self) -> u64 {
-        self.next_seq
-    }
-
-    /// The seq of the newest entry, or `None` for an empty transcript. The
-    /// tail a cursor is compared against.
-    #[must_use]
-    pub fn tail_seq(&self) -> Option<u64> {
-        self.log.last().map(|e| e.seq)
-    }
-
-    /// Append `body` at the next sequence number.
-    ///
-    /// The single place a `seq` is handed out, so the fold cannot produce a gap
-    /// or a duplicate by accident.
-    pub(crate) fn push(&mut self, at_ms: u64, body: AgentLogBody) {
-        self.log.push(AgentLogEntry {
-            seq: self.next_seq,
-            at_ms,
-            body,
-        });
-        self.next_seq += 1;
-    }
-
-    /// Everything below `at_seq`, renumbering nothing — a sub session's
-    /// starting point. See [`AgentState::snapshot_at`].
-    fn cut(&self, at_seq: u64) -> Self {
-        Self {
-            log: self
-                .log
-                .iter()
-                .filter(|e| e.seq < at_seq)
-                .cloned()
-                .collect(),
-            next_seq: at_seq,
-        }
-    }
-}
-
 impl AgentState {
     /// This component's own state, or `None` if it has never had any.
     ///
@@ -152,28 +77,25 @@ impl AgentState {
         T::get_mut(&mut self.parts)
     }
 
-    /// This session as a sub session's starting point.
-    ///
-    /// Everything that is *about the session* carries; everything that is in
-    /// flight, or is a bill, does not — and each part says which it is, so a
-    /// component added later cannot be forgotten here.
-    ///
-    /// Cut at `at_seq` — the branch point, read when the sub session was asked
-    /// for. Not at the log's current end: journaling the sub session writes a
-    /// `Branched` entry onto this very log, and a source that is mid-turn goes
-    /// on appending while the seed is being built.
+    /// This session as a sub session's conversation starting point.
     #[must_use]
     pub fn snapshot_at(&self, at_seq: u64) -> Self {
+        let transcript = project_transcript(&self.history).cut(at_seq);
+        let history: Vec<_> = carry_transcript(&transcript)
+            .into_iter()
+            .enumerate()
+            .map(|(seq, record)| crate::agent_loop::AgentHistoryEntry {
+                seq: seq as u64,
+                record,
+            })
+            .collect();
         Self {
-            // A branch is a new agent. It carries conversation context, not
-            // the source agent's initialization identity or immutable prompt.
-            // Its first step initializes and records its own prompt once.
-            history: Vec::new(),
-            next_history_seq: 0,
+            // A branch carries conversation context, not the source agent's
+            // run, pending input, initialization, or prompt identity.
+            history,
             usage_total: UsageTotal::default(),
             last_step_usage: None,
             context_tokens: self.context_tokens,
-            transcript: self.transcript.cut(at_seq),
             parts: self
                 .parts
                 .iter()
@@ -183,9 +105,8 @@ impl AgentState {
     }
 }
 
-/// Running token totals held in [`AgentState`]. Distinct from the per-turn
-/// wire [`Usage`] (`u32`): this accumulates across all turns, so it is `u64`
-/// and owns a `Default`, which the fluorite-generated `Usage` does not.
+/// Running token totals held in [`AgentState`]. Distinct from the per-step
+/// wire [`Usage`] (`u32`): this accumulates across the agent, so it is `u64`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsageTotal {
     pub input_tokens: u64,
@@ -207,9 +128,6 @@ impl UsageTotal {
         self.cache_read_tokens = add_optional(self.cache_read_tokens, usage.cache_read_tokens);
     }
 
-    /// Combines two agents' cumulative totals into a session-level aggregate.
-    /// Only ever sums usage — never a context-size figure, which stays
-    /// meaningfully per-agent (see `AgentUsageSnapshot::context_tokens`).
     pub fn combine(&self, other: &UsageTotal) -> UsageTotal {
         UsageTotal {
             input_tokens: self.input_tokens.saturating_add(other.input_tokens),
@@ -245,51 +163,29 @@ pub(crate) fn combine_optional(a: Option<u64>, b: Option<u64>) -> Option<u64> {
     }
 }
 
-/// Build the transcript entry for one hook record.
-///
-/// The id is derived, never generated: `hook:{n}` where `n` counts the hook
-/// entries already in this transcript. Journal replay therefore reproduces the
-/// ids it produced live, which a uuid could not — and a recovered transcript
-/// must page with the same cursors as the one it replaced.
-pub fn hook_entry(
-    record: horsie_models::hooks::HookRecord,
-    seq: usize,
-    at_ms: u64,
-) -> horsie_agentcore::HookEntry {
-    horsie_agentcore::HookEntry {
-        id: hook_entry_id(seq),
-        created_at_ms: at_ms,
-        record,
-    }
-}
-
-/// The cursor id of the `seq`-th hook entry in a transcript.
-///
-/// Counts entries rather than records-per-call, because not every record has a
-/// call: `hook:{tool_call_id}:{n}` cannot name a `SessionStart`. The tool join
-/// is unaffected — it goes through the record's own `ToolScope`, which is where
-/// it belongs.
-///
-/// One function, two callers — the fold and the live broadcast — because the
-/// stream and `/history` must name the same entry the same way.
-#[must_use]
-pub fn hook_entry_id(seq: usize) -> String {
-    format!("hook:{seq}")
-}
-
 pub(crate) fn new_message_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+fn event_message(event: &AgentDomainEvent) -> Option<&horsie_agentcore::Message> {
+    if let AgentDomainEvent::InputMessage { message }
+    | AgentDomainEvent::MessageComplete { message, .. }
+    | AgentDomainEvent::MessageAborted { message } = event
+    {
+        Some(message)
+    } else {
+        None
+    }
+}
+
 impl AgentState {
-    /// How many hook entries this transcript already holds. The next one's
-    /// `seq`.
+    /// How many hook records history already contains. The next hook's id uses
+    /// this sequence.
     #[must_use]
     pub fn hook_entry_count(&self) -> usize {
-        self.transcript
-            .entries()
+        self.history
             .iter()
-            .filter(|e| matches!(e.body, AgentLogBody::Hook(_)))
+            .filter(|entry| matches!(&entry.record, AgentDomainEvent::HookRan { .. }))
             .count()
     }
 
@@ -302,16 +198,17 @@ impl AgentState {
 
     #[must_use]
     pub fn next_history_seq(&self) -> u64 {
-        self.next_history_seq
+        self.history
+            .last()
+            .map_or(0, |entry| entry.seq.saturating_add(1))
     }
 
     pub(crate) fn record_history(&mut self, record: AgentDomainEvent) {
         self.history
             .push(crate::agent_loop::events::AgentHistoryEntry {
-                seq: self.next_history_seq,
+                seq: self.next_history_seq(),
                 record,
             });
-        self.next_history_seq = self.next_history_seq.saturating_add(1);
     }
 
     #[must_use]
@@ -496,10 +393,8 @@ impl AgentState {
 
     #[must_use]
     pub fn stop_candidate(&self) -> serde_json::Value {
-        let Some(message) = self.transcript.entries().iter().rev().find_map(|entry| {
-            let AgentLogBody::Llm(message) = &entry.body else {
-                return None;
-            };
+        let Some(message) = self.history.iter().rev().find_map(|entry| {
+            let message = event_message(&entry.record)?;
             (message.role == horsie_agentcore::Role::Assistant).then_some(message)
         }) else {
             return serde_json::Value::Null;
@@ -523,35 +418,26 @@ impl AgentState {
 
     #[must_use]
     pub fn last_assistant_text(&self) -> Option<String> {
-        self.transcript.entries().iter().rev().find_map(|entry| {
-            let AgentLogBody::Llm(message) = &entry.body else {
-                return None;
-            };
+        self.history.iter().rev().find_map(|entry| {
+            let message = event_message(&entry.record)?;
             (message.role == horsie_agentcore::Role::Assistant)
                 .then(|| horsie_agentcore::extract_text(&message.parts))
         })
     }
-
-    /// Every entry, oldest first.
+    /// Build the user-facing transcript from durable history.
     #[must_use]
-    pub fn log(&self) -> &[AgentLogEntry] {
-        self.transcript.entries()
+    pub fn transcript(&self) -> Transcript {
+        project_transcript(&self.history)
     }
 
-    /// The next sequence number this agent will hand out.
     #[must_use]
     pub fn next_seq(&self) -> u64 {
-        self.transcript.next_seq()
+        self.transcript().next_seq()
     }
 
-    /// The seq of the newest entry, or `None` for an empty log.
     #[must_use]
     pub fn tail_seq(&self) -> Option<u64> {
-        self.transcript.tail_seq()
-    }
-
-    pub(crate) fn push(&mut self, at_ms: u64, body: AgentLogBody) {
-        self.transcript.push(at_ms, body);
+        self.transcript().tail_seq()
     }
 
     /// Whether this agent has ever spoken to a provider.
@@ -562,17 +448,19 @@ impl AgentState {
     /// `startup` rather than `resume`.
     #[must_use]
     pub fn has_run(&self) -> bool {
-        self.transcript
-            .entries()
-            .iter()
-            .any(|e| matches!(e.body, AgentLogBody::Llm(_)))
+        self.history.iter().any(|entry| {
+            matches!(
+                &entry.record,
+                AgentDomainEvent::MessageComplete { .. } | AgentDomainEvent::MessageAborted { .. }
+            )
+        })
     }
 
     /// Tool calls the model has made that have no result yet, and that this
     /// agent is not parked on.
     ///
-    /// Derived, never stored: the log already holds both halves of every call,
-    /// so a second index could only ever disagree with it. Empty means the
+    /// Derived, never stored: history holds both halves of every call, so a
+    /// second index could only disagree with it. Empty means the
     /// agent owes the provider nothing but its next call.
     ///
     /// A parked call is exempt. The agent is *waiting* on that one, on purpose,
@@ -584,29 +472,32 @@ impl AgentState {
     /// are all answered, so nothing before it can still be open.
     #[must_use]
     pub fn open_tool_calls(&self) -> Vec<String> {
-        let entries = self.transcript.entries();
-        let from = entries
+        let from = self
+            .history
             .iter()
-            .rposition(|e| match &e.body {
-                AgentLogBody::Llm(m) => m
-                    .parts
-                    .iter()
-                    .any(|p| matches!(p, horsie_agentcore::ContentPart::ToolCall(_))),
-                AgentLogBody::Hook(_)
-                | AgentLogBody::Lifecycle(_)
-                | AgentLogBody::Compaction(_) => false,
+            .rposition(|entry| {
+                event_message(&entry.record).is_some_and(|message| {
+                    message
+                        .parts
+                        .iter()
+                        .any(|part| matches!(part, horsie_agentcore::ContentPart::ToolCall(_)))
+                })
             })
-            .unwrap_or(entries.len());
-        let mut open: Vec<String> = Vec::new();
-        for entry in entries.iter().skip(from) {
-            let AgentLogBody::Llm(message) = &entry.body else {
+            .unwrap_or(self.history.len());
+        let mut open = Vec::new();
+        for entry in self.history.iter().skip(from) {
+            if let AgentDomainEvent::ToolComplete { tool_call_id, .. } = &entry.record {
+                open.retain(|id| id != tool_call_id);
+                continue;
+            }
+            let Some(message) = event_message(&entry.record) else {
                 continue;
             };
             for part in &message.parts {
                 match part {
-                    horsie_agentcore::ContentPart::ToolCall(c) => open.push(c.id.clone()),
-                    horsie_agentcore::ContentPart::ToolResult(r) => {
-                        open.retain(|id| *id != r.tool_call_id);
+                    horsie_agentcore::ContentPart::ToolCall(call) => open.push(call.id.clone()),
+                    horsie_agentcore::ContentPart::ToolResult(result) => {
+                        open.retain(|id| *id != result.tool_call_id);
                     }
                     horsie_agentcore::ContentPart::Text(_)
                     | horsie_agentcore::ContentPart::Thinking(_)
@@ -619,23 +510,18 @@ impl AgentState {
         open.retain(|id| {
             !parked
                 .iter()
-                .any(|a| a.tool_call_id.as_deref() == Some(id.as_str()))
+                .any(|ask| ask.tool_call_id.as_deref() == Some(id.as_str()))
         });
         open
     }
-
-    /// The name and input of the tool call `id`, read off the transcript —
-    /// what the actor needs to *run* an open call, scanned the same way
-    /// [`Self::open_tool_calls`] found it.
+    /// The name and input of one tool call, read directly from history.
     #[must_use]
     pub fn tool_call_named(&self, id: &str) -> Option<(String, serde_json::Value)> {
-        self.transcript.entries().iter().rev().find_map(|e| {
-            let AgentLogBody::Llm(message) = &e.body else {
-                return None;
-            };
+        self.history.iter().rev().find_map(|entry| {
+            let message = event_message(&entry.record)?;
             message.parts.iter().find_map(|part| match part {
-                horsie_agentcore::ContentPart::ToolCall(c) if c.id == id => {
-                    Some((c.name.clone(), c.input.clone()))
+                horsie_agentcore::ContentPart::ToolCall(call) if call.id == id => {
+                    Some((call.name.clone(), call.input.clone()))
                 }
                 horsie_agentcore::ContentPart::ToolCall(_)
                 | horsie_agentcore::ContentPart::Text(_)
@@ -942,7 +828,8 @@ mod history_tests {
                 at_ms: 1,
             },
         );
-        let AgentLogBody::Llm(message) = &state.log()[0].body else {
+        let transcript = state.transcript();
+        let AgentLogBody::Llm(message) = &transcript.entries()[0].body else {
             panic!("expected tool result message")
         };
         let ContentPart::ToolResult(result) = &message.parts[0] else {
@@ -992,7 +879,6 @@ mod history_tests {
             AgentActor::initial_state(),
             AgentDomainEvent::Seeded {
                 state: Box::new(source.clone()),
-                seed: None,
             },
         );
         assert_eq!(seeded.history().len(), source.history().len());

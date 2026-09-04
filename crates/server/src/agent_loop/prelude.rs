@@ -27,5 +27,6 @@ pub(crate) use crate::agent_loop::shared::repair::{
 };
 pub(crate) use crate::agent_loop::state::{AgentState, new_message_id};
 pub(crate) use crate::agent_loop::step_run::{ExecutionContext, StepRun};
+pub(crate) use crate::agent_loop::transcript::{Transcript, carry_transcript, project_transcript};
 #[cfg(test)]
 pub(crate) use horsie_actor::EventSourcedActor;

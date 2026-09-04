@@ -10,7 +10,8 @@
 //! - [`actor`] — persistence, recovery, and observation.
 //! - [`run_loop`] — command routing and the one ordered next-step decision.
 //! - [`step_run`] — all process-local foreground execution.
-//! - [`state`] — chronological durable history.
+//! - [`state`] — chronological durable history and compact projections.
+//! - [`transcript`] — the pure user-facing projection of history.
 //! - [`commands`] and [`events`] — the exhaustive vocabulary.
 //! - [`context`] — initialization and reconnection contracts.
 //! - [`components`] — only timers and task lists, the two stateful tools.
@@ -34,6 +35,7 @@ mod state;
 mod step_run;
 #[cfg(test)]
 pub(crate) mod testing;
+mod transcript;
 pub use actor::{AgentActor, AgentObserver};
 pub use commands::{
     AgentCommand, CompactJob, CompactOutcome, CompactedData, CompactionCommand, ContextCommand,
@@ -76,7 +78,6 @@ pub use shared::workspace::{
     AgentCatalog, CatalogAgent, SharedContext, SharedScan, Skill, SkillSet, WorkspaceContext,
     compose_system_prompt, scan as scan_workspace,
 };
-pub use state::{
-    AgentState, AgentStateView, AgentUsageSnapshot, UsageTotal, hook_entry, hook_entry_id,
-};
+pub use state::{AgentState, AgentStateView, AgentUsageSnapshot, UsageTotal};
 pub use step_run::ExecutionContext;
+pub use transcript::{Transcript, hook_entry, hook_entry_id, project_transcript};

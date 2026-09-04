@@ -30,10 +30,11 @@ This design makes the append-only agent history the source of truth. The actor h
 | D16 | The sequence number of `StepStarted` is the step identity and callback fence. A callback not naming the open top marker is stale and is ignored. No separate generation counter is needed. |
 | D17 | Exactly one durable `RunEnded` may exist for a run. Parent outcomes are delivered only after it is durable and are idempotent by run identity. |
 | D18 | No backward compatibility is required for the old agent journal or snapshot shape. |
+| D19 | `Transcript` is a pure read projection of history, not a field persisted in `AgentState`. Branches convert their visible prefix back into conversation-history records rather than carrying a second log. |
 
 ## History model
 
-The history mixes records that render to a person, records offered to the model, and control records that make execution recoverable. Those are different projections of one order; they are not separate stores.
+The history mixes records that render to a person, records offered to the model, and control records that make execution recoverable. Those are different projections of one order; they are not separate stores. `project_transcript(history)` selects visible records and assigns the dense cursor sequence used by the messages API. The projection is deterministic, non-serializable, and rebuilt when needed.
 
 A minimal vocabulary is:
 
@@ -267,7 +268,8 @@ The module tree mirrors ownership rather than execution mechanics:
 - `run_loop/context_step.rs`, `compaction_step.rs`, and `seed_step.rs`: fenced special steps.
 - `run_loop/incoming/`: pure pending-input projections and their stateless command handler.
 - `step_run.rs`: all process-local foreground state.
-- `state.rs` and `events.rs`: durable history and its projections.
+- `state.rs` and `events.rs`: durable history, usage projections, and component state.
+- `transcript.rs`: the pure history-to-transcript projection and branch-context conversion.
 - `components/`: only stateful tools.
 
 ## Components
@@ -295,6 +297,9 @@ Reads are actor queries. Usage is a history fold. Normal steps, initialization, 
 12. Compaction and seed summary buffer incoming messages and bank usage independently.
 13. Exactly one `RunEnded` is durable under Stop-hook, cancellation, and late-callback races.
 14. Reads and warm actor load perform no runtime, MCP, or workspace operation.
+15. Serializing `AgentState` stores each message once in history and contains no transcript field.
+16. Repeated transcript projection produces identical entries and cursor sequences.
+17. A branch carries the visible transcript prefix as inert history without inheriting pending input, run state, initialization, or prompt identity.
 
 ## Out of scope
 

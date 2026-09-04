@@ -19,12 +19,10 @@ use std::sync::Arc;
 /// trades a bounded replay on recovery for a bounded write amplification.
 const SNAPSHOT_EVERY_EVENTS: u64 = 200;
 
-/// Whether folding this event appends a log entry — i.e. consumes a `seq`.
-///
-/// Kept beside the fold deliberately: the two must agree, and a variant added
-/// to one without the other would either strand deltas under an entry that
-/// superseded them or clear them for an event that appended nothing.
-fn coarse_appends_an_entry(e: &AgentDomainEvent) -> bool {
+/// Whether this durable event replaces the streamed text accumulated for the
+/// current provider response. Incoming-message lifecycle entries deliberately
+/// do not: they can arrive while that response is still streaming.
+fn supersedes_streamed_text(e: &AgentDomainEvent) -> bool {
     matches!(
         e,
         AgentDomainEvent::InputMessage { .. }
@@ -297,10 +295,9 @@ impl EventSourcedActor for AgentActor {
         self.events_since_snapshot = self
             .events_since_snapshot
             .saturating_add(events.len() as u64);
-        // An entry supersedes every chunk that preceded it — the finished
-        // message says everything they were building towards — so the deltas
-        // are dropped the moment one lands.
-        if events.iter().any(coarse_appends_an_entry) {
+        // A completed or aborted provider message supersedes its streamed
+        // chunks. Tool-side records arrive only after that response.
+        if events.iter().any(supersedes_streamed_text) {
             self.step_run.streamed_text.clear();
         }
         self.revision.send_modify(|r| *r += 1);

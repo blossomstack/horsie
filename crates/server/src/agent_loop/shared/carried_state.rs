@@ -100,7 +100,8 @@ pub fn has_outstanding_children(state: &AgentState) -> bool {
 /// is where the fact lives: the newest entry for an id is its current status.
 fn running_children(state: &AgentState) -> Vec<(String, String)> {
     let mut latest: BTreeMap<String, (String, String)> = BTreeMap::new();
-    for entry in state.log() {
+    let transcript = state.transcript();
+    for entry in transcript.entries() {
         if let AgentLogBody::Lifecycle(LifecycleEvent::SubAgent(s)) = &entry.body {
             latest.insert(s.id.clone(), (s.title.clone(), s.status.clone()));
         }

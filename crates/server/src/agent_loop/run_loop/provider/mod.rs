@@ -20,8 +20,8 @@ use crate::sessions::workflow::SUBMIT_RESULT_TOOL;
 use async_trait::async_trait;
 use horsie_actor::{ActorRef, CommandEffect};
 use horsie_agentcore::{
-    AgentEvent, AgentLogBody, EventSink, EventSinkError, LlmError, Message, StepError, StepRequest,
-    StoppedCall, extract_text, extract_tool_calls, tool_fingerprint,
+    AgentEvent, EventSink, EventSinkError, LlmError, Message, StepError, StepRequest, StoppedCall,
+    extract_text, extract_tool_calls, tool_fingerprint,
 };
 use horsie_models::now_ms;
 use serde_json::Value;
@@ -483,44 +483,10 @@ impl ProviderStep {
         }
     }
 
-    /// Fold provider and tool results into transcript and usage projections.
-    // The exhaustive owner map in `RunLoop::apply` prevents unrelated events
-    // from reaching this function.
-    #[allow(clippy::wildcard_enum_match_arm)]
+    /// Fold the usage banked by a completed provider step.
     pub(crate) fn apply(state: &mut AgentState, event: AgentDomainEvent) {
-        match event {
-            AgentDomainEvent::MessageComplete { message, usage } => {
-                let at_ms = message.created_at_ms;
-                state.push(at_ms, AgentLogBody::Llm(message));
-                state.bank_step_usage(usage);
-            }
-            AgentDomainEvent::MessageAborted { message } => {
-                let at_ms = message.created_at_ms;
-                state.push(at_ms, AgentLogBody::Llm(message));
-            }
-            AgentDomainEvent::ToolComplete {
-                tool_call_id,
-                output,
-                is_error,
-                artifacts,
-                at_ms,
-            } => {
-                state.push(
-                    at_ms,
-                    AgentLogBody::Llm(Message::tool_result(
-                        tool_call_id,
-                        output,
-                        is_error,
-                        artifacts,
-                        at_ms,
-                    )),
-                );
-            }
-            AgentDomainEvent::TurnCompleted { .. }
-            | AgentDomainEvent::TurnAborted { .. }
-            | AgentDomainEvent::TurnCancelled { .. }
-            | AgentDomainEvent::Nudged { .. } => {}
-            _ => {}
+        if let AgentDomainEvent::MessageComplete { usage, .. } = event {
+            state.bank_step_usage(usage);
         }
     }
 }

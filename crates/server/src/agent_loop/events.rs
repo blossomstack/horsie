@@ -100,24 +100,12 @@ pub enum AgentDomainEvent {
         reason: RunEnd,
         at_ms: u64,
     },
-    /// This agent was seeded from another session: `state` is the history it
-    /// adopts, `seed` a synthetic message appended after it.
-    ///
-    /// One event rather than a snapshot written behind the actor's back, so a
-    /// sub session's own journal explains where its history came from. Only
-    /// ever the *first* event an agent has — replacing state wholesale is safe
-    /// precisely because nothing has run.
-    ///
-    /// `seed` is `None` for every mode but a summary. A copy's history *is* the
-    /// context and a fresh sub session's brief is queued behind this event, so
-    /// only a summary has something to say that is nowhere else.
-    ///
-    /// Boxed: a whole session is far larger than any other variant here,
-    /// and an enum is as big as its widest arm.
+    /// This agent adopted another session's carried conversation history.
+    /// Only ever the first event on the target agent. A summary seed follows as
+    /// an ordinary `InputMessage`, so every transcript-visible message exists
+    /// directly in history.
     Seeded {
         state: Box<AgentState>,
-        #[serde(default)]
-        seed: Option<Box<Message>>,
     },
     InputMessage {
         message: Message,
@@ -237,15 +225,10 @@ pub enum AgentDomainEvent {
     },
     /// Older history stopped being shown to the model.
     ///
-    /// Journaled like any other append: the log keeps everything it held, and
-    /// this only records where the prompt now starts. Folding it is therefore
-    /// deterministic under replay, and a recovered agent prompts from exactly
-    /// the boundary the live one did.
-    ///
-    /// Carries the *message id* the retained window starts at, not a seq. The
-    /// run that produced it was holding a `Vec<Message>` in prompt order,
-    /// which is not log order; resolving the two is the fold's job because the
-    /// fold is the only thing holding the log.
+    /// Journaled like any other append: history keeps everything, and this
+    /// records only where the provider prompt now starts. Transcript projection
+    /// resolves the retained message id to its dense visible sequence, so replay
+    /// reproduces the same boundary.
     Compacted {
         summary: String,
         carried_state: String,

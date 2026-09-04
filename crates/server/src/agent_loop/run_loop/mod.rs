@@ -116,22 +116,7 @@ impl RunLoop {
             e @ (AgentDomainEvent::Seeded { .. } | AgentDomainEvent::SeedSummaryTaken { .. }) => {
                 SeedStep::apply(&mut state, e)
             }
-            e @ (AgentDomainEvent::InputMessage { .. }
-            | AgentDomainEvent::Received { .. }
-            | AgentDomainEvent::Consumed { .. }
-            | AgentDomainEvent::TurnBegan { .. }
-            | AgentDomainEvent::AskRecorded { .. }
-            | AgentDomainEvent::Parked { .. }) => IncomingHandler::apply(&mut state, e),
-            e @ (AgentDomainEvent::MessageComplete { .. }
-            | AgentDomainEvent::MessageAborted { .. }
-            | AgentDomainEvent::ToolComplete { .. }
-            | AgentDomainEvent::TurnCompleted { .. }
-            | AgentDomainEvent::TurnAborted { .. }
-            | AgentDomainEvent::TurnCancelled { .. }
-            | AgentDomainEvent::Nudged { .. }) => ProviderStep::apply(&mut state, e),
-            e @ (AgentDomainEvent::HookRan { .. } | AgentDomainEvent::LifecycleRecorded { .. }) => {
-                HistoryHandler::apply(&mut state, e)
-            }
+            e @ AgentDomainEvent::MessageComplete { .. } => ProviderStep::apply(&mut state, e),
             e @ AgentDomainEvent::Compacted { .. } => CompactionStep::apply(&mut state, e),
             e @ (AgentDomainEvent::TimerArmed { .. }
             | AgentDomainEvent::TimerCancelled { .. }
@@ -143,7 +128,21 @@ impl RunLoop {
             | AgentDomainEvent::StepStarted { .. }
             | AgentDomainEvent::StepFailed { .. }
             | AgentDomainEvent::StopHookCompleted { .. }
-            | AgentDomainEvent::RunEnded { .. } => {}
+            | AgentDomainEvent::RunEnded { .. }
+            | AgentDomainEvent::InputMessage { .. }
+            | AgentDomainEvent::Consumed { .. }
+            | AgentDomainEvent::MessageAborted { .. }
+            | AgentDomainEvent::ToolComplete { .. }
+            | AgentDomainEvent::HookRan { .. }
+            | AgentDomainEvent::TurnCompleted { .. }
+            | AgentDomainEvent::TurnAborted { .. }
+            | AgentDomainEvent::TurnCancelled { .. }
+            | AgentDomainEvent::Parked { .. }
+            | AgentDomainEvent::Nudged { .. }
+            | AgentDomainEvent::LifecycleRecorded { .. }
+            | AgentDomainEvent::Received { .. }
+            | AgentDomainEvent::TurnBegan { .. }
+            | AgentDomainEvent::AskRecorded { .. } => {}
         }
         if let Some(history_record) = history_record {
             state.record_history(history_record);

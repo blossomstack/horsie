@@ -16,9 +16,7 @@ pub use pending::{
 
 use crate::agent_loop::prelude::*;
 use horsie_actor::CommandEffect;
-use horsie_agentcore::{
-    AgentInput, AgentLogBody, AskLifecycle, LifecycleEvent, QueuedLifecycle, TurnBeganLifecycle,
-};
+use horsie_agentcore::AgentInput;
 use horsie_models::now_ms;
 /// Accepts incoming records and prepares the next normal agent step.
 /// Pending input and asks are derived from history; this handler owns no state
@@ -258,70 +256,6 @@ impl IncomingHandler {
                 let state = cx.state.clone();
                 CommandEffect::persist(Self::start_prepared(*prepared, &state, cx).await)
             }
-        }
-    }
-
-    /// Fold accepted input, consumption, and parked questions into read
-    /// projections. `RunLoop::apply` already restricts which events arrive.
-    #[allow(clippy::wildcard_enum_match_arm)]
-    pub(crate) fn apply(state: &mut AgentState, event: AgentDomainEvent) {
-        match event {
-            AgentDomainEvent::Received {
-                item: crate::agent_loop::Incoming::User { id, text, .. },
-                at_ms,
-            } => {
-                // Only a person's message becomes visible as queued. Reports
-                // and wakes are already narrated by their own history records.
-                state.push(
-                    at_ms,
-                    AgentLogBody::Lifecycle(LifecycleEvent::MessageQueued(QueuedLifecycle {
-                        id,
-                        text,
-                    })),
-                );
-            }
-            AgentDomainEvent::Received { .. } => {}
-            AgentDomainEvent::Consumed { .. } => {}
-            AgentDomainEvent::TurnBegan {
-                consumed,
-                answered,
-                at_ms,
-            } => {
-                // The entry names only what a client is tracking — the queued
-                // messages it is showing as unread. Reports and wakes were
-                // never shown as queued, so crossing them off would name ids
-                // nothing holds.
-                let visible = state
-                    .pending_incoming()
-                    .iter()
-                    .filter(|i| i.is_user() && consumed.iter().any(|id| id == i.id()))
-                    .map(|i| i.id().to_string())
-                    .collect();
-                state.push(
-                    at_ms,
-                    AgentLogBody::Lifecycle(LifecycleEvent::TurnBegan(TurnBeganLifecycle {
-                        consumed: visible,
-                        answered: answered.clone(),
-                    })),
-                );
-            }
-            AgentDomainEvent::AskRecorded { asks, at_ms } => {
-                for ask in &asks {
-                    state.push(
-                        at_ms,
-                        AgentLogBody::Lifecycle(LifecycleEvent::AskRecorded(AskLifecycle {
-                            tool_call_id: ask.tool_call_id.clone(),
-                            question: ask.question.clone(),
-                        })),
-                    );
-                }
-            }
-            AgentDomainEvent::InputMessage { message } => {
-                let at_ms = message.created_at_ms;
-                state.push(at_ms, AgentLogBody::Llm(message));
-            }
-            AgentDomainEvent::Parked { .. } => {}
-            _ => {}
         }
     }
 }

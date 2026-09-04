@@ -12,7 +12,6 @@ pub mod domain;
 use crate::agent_loop::prelude::*;
 use async_trait::async_trait;
 use horsie_actor::{ActorRef, CommandEffect};
-use horsie_agentcore::{AgentLogBody, LifecycleEvent, TaskListLifecycle};
 use horsie_models::now_ms;
 use serde_json::Value;
 
@@ -104,27 +103,11 @@ impl Component for TaskLists {
 }
 
 impl TaskLists {
-    /// The list as the mutation left it — folded into the agent's state, and
-    /// appended to its log.
-    ///
-    /// The log entry is not a duplicate of the state: the log is the only thing
-    /// a client watches live, so without it a plan changing mid-turn reached
-    /// nobody until the next turn boundary let the agent document be re-read.
-    // `if let` rather than a `match`, because this module owns exactly one
-    // variant. Which one is decided in `RunLoop::apply`, so an event added
-    // later fails to compile *there* rather than silently reaching the wrong
-    // fold here.
     pub(crate) fn apply(state: &mut AgentState, event: AgentDomainEvent) {
-        if let AgentDomainEvent::TaskListChanged { snapshot, at_ms } = event {
-            state.push(
-                at_ms,
-                AgentLogBody::Lifecycle(LifecycleEvent::TaskList(TaskListLifecycle {
-                    tasks: snapshot.wire_tasks(),
-                })),
-            );
-            if let Some(part) = state.component_state_mut::<TaskListPart>() {
-                part.0 = snapshot;
-            }
+        if let AgentDomainEvent::TaskListChanged { snapshot, .. } = event
+            && let Some(part) = state.component_state_mut::<TaskListPart>()
+        {
+            part.0 = snapshot;
         }
     }
 }
