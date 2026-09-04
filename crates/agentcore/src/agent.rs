@@ -1,4 +1,4 @@
-use crate::tool::ToolOutcome;
+use crate::tool::{ToolOutcome, bound_tool_output};
 use crate::{
     error::{AgentBuildError, AgentError},
     events::EventSink,
@@ -672,6 +672,7 @@ impl Agent {
                     // An error produced no artifacts by definition.
                     Err(e) => (e.to_string(), true, Vec::new()),
                 };
+            let output = bound_tool_output(output).output;
 
             // One reading of the clock for both the event and the message it
             // becomes, so the journal and the in-memory history agree.
@@ -744,7 +745,7 @@ mod tests {
         events::EventSink,
         provider::{CompletionResponse, StopReason, ToolChoice},
         testkit::{CollectingEventSink, MockProvider, MockToolbox},
-        tool::{EmptyToolbox, ToolSpec, ToolValue, Toolbox},
+        tool::{EmptyToolbox, MAX_TOOL_RESULT_BYTES, ToolSpec, ToolValue, Toolbox},
     };
     use async_trait::async_trait;
     use horsie_models::agent::{
@@ -1998,6 +1999,41 @@ mod tests {
             "output was JSON-escaped: {}",
             tc.output
         );
+    }
+
+    #[tokio::test]
+    async fn every_toolbox_result_passes_through_the_final_output_guard() {
+        let provider = MockProvider::tool_then_text("t1", "dump", json!({}), "done");
+        let toolbox = MockToolbox::new(
+            vec![ToolSpec {
+                name: "dump".to_string(),
+                description: "dump".to_string(),
+                input_schema: json!({ "type": "object" }),
+            }],
+            Arc::new(|_, _| Ok(ToolOutcome::result("x".repeat(MAX_TOOL_RESULT_BYTES * 2)))),
+        );
+        let mut agent = Agent::builder(provider, toolbox, "test-conversation")
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+        agent
+            .run(
+                AgentInput::user_message("m", "go"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let output = sink
+            .events()
+            .into_iter()
+            .find_map(|event| match event {
+                AgentEvent::ToolComplete(complete) => Some(complete.output),
+                _ => None,
+            })
+            .unwrap();
+        assert!(output.len() <= MAX_TOOL_RESULT_BYTES);
+        assert!(output.contains("final tool-output guard"));
     }
 
     #[tokio::test]
