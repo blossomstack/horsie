@@ -20,10 +20,12 @@ impl Tool for ApplyPatchTool {
         ToolSpec {
             name: "apply_patch".to_string(),
             description: "Apply one validated patch containing ordered changes to one or more \
-                files. Use the *** Begin Patch format with *** Update File, *** Add File, or \
-                *** Delete File sections. An update may contain several @@ hunks. Every hunk \
-                must include enough unchanged or removed lines to match exactly one location. \
-                The complete syntax and every hunk are validated before any file is changed. \
+                files. Use the *** Begin Patch format with *** Update File, *** Add File, \
+                *** Delete File, or *** Move File: <source> -> <destination> sections. An \
+                update may contain several @@ hunks. Already-applied and context-only hunks \
+                are reported and skipped. Every changing hunk must include enough unchanged \
+                or removed lines to match exactly one location. The complete syntax and every \
+                hunk are validated before any file is changed. \
                 Prefer this over repeated edit calls when related changes touch several \
                 locations. Do not issue other file mutations in parallel with apply_patch."
                 .to_string(),
@@ -33,7 +35,7 @@ impl Tool for ApplyPatchTool {
                 "properties": {
                     "patch": {
                         "type": "string",
-                        "description": "A patch delimited by *** Begin Patch and *** End Patch. Each file section starts with *** Update File: <path>, *** Add File: <path>, or *** Delete File: <path>. Each update hunk starts with @@; its following lines start with a space for context, - for removal, or + for addition. Added-file content uses + on every line."
+                        "description": "A patch delimited by *** Begin Patch and *** End Patch. Each file section starts with *** Update File: <path>, *** Add File: <path>, *** Delete File: <path>, or *** Move File: <source> -> <destination>. Each update hunk starts with @@; its following lines start with a space for context, - for removal, or + for addition. Added-file content uses + on every line."
                     }
                 },
                 "required": ["patch"]
