@@ -18,6 +18,10 @@ use horsie_models::agent::{
 use horsie_models::events::{AgentEvent, CompactedEvent, CompactionSkippedEvent};
 use horsie_models::now_ms;
 
+const MAX_AUTOMATIC_TRIGGER_TOKENS: u32 = 100_000;
+const MAX_AUTOMATIC_RETAIN_TOKENS: u32 = 25_000;
+const MAX_TOOL_RESULT_TOKENS: u32 = 40_000;
+
 /// How much room a compaction is working with.
 ///
 /// Absent from an [`crate::AgentConfig`] means this agent never compacts on its
@@ -41,6 +45,7 @@ impl CompactionBudget {
         self.context_window
             .saturating_mul(self.trigger_at_percent)
             .saturating_div(100)
+            .min(MAX_AUTOMATIC_TRIGGER_TOKENS)
     }
 
     /// Roughly how many tokens of raw recent history to keep.
@@ -49,6 +54,10 @@ impl CompactionBudget {
         self.context_window
             .saturating_mul(self.retain_percent)
             .saturating_div(100)
+    }
+
+    fn automatic_retain_tokens(&self) -> u32 {
+        self.retain_tokens().min(MAX_AUTOMATIC_RETAIN_TOKENS)
     }
 }
 
@@ -160,6 +169,41 @@ fn artifact_chars(artifact: &horsie_models::agent::ArtifactRef) -> usize {
         horsie_models::agent::ArtifactKind::Document(_) => DOCUMENT_TOKENS,
     };
     tokens * 4
+}
+
+fn tool_result_tokens(history: &[Message]) -> u32 {
+    history
+        .iter()
+        .flat_map(|message| &message.parts)
+        .filter_map(|part| match part {
+            ContentPart::ToolResult(result) => {
+                Some(u32::try_from(result.output.len() / 4).unwrap_or(u32::MAX))
+            }
+            ContentPart::Text(_)
+            | ContentPart::ToolCall(_)
+            | ContentPart::Thinking(_)
+            | ContentPart::SubAgentResult(_)
+            | ContentPart::Artifact(_) => None,
+        })
+        .fold(0, u32::saturating_add)
+}
+
+fn automatic_compaction_due(
+    history: &[Message],
+    current_tokens: u32,
+    budget: CompactionBudget,
+) -> bool {
+    let cut = choose_cut(history, budget.automatic_retain_tokens());
+    let already_minimal = cut == 0
+        || (cut == 1
+            && history
+                .first()
+                .is_some_and(|message| message.id.starts_with("compaction:")));
+    if already_minimal {
+        return false;
+    }
+    current_tokens >= budget.trigger_tokens()
+        || tool_result_tokens(&history[..cut]) >= MAX_TOOL_RESULT_TOKENS
 }
 
 /// Whether a message may begin the retained window.
@@ -274,7 +318,9 @@ impl Agent {
         let Some(budget) = self.config.compaction else {
             return;
         };
-        if self.compaction.is_none() || current_tokens < budget.trigger_tokens() {
+        if self.compaction.is_none()
+            || !automatic_compaction_due(&self.history, current_tokens, budget)
+        {
             return;
         }
         // A failure here is not a failure of the turn. The run continues on the
@@ -345,7 +391,13 @@ impl Agent {
             self.report_nothing_to_fold(trigger, events).await?;
             return Ok(());
         };
-        let retain = self.config.compaction.map_or(0, |b| b.retain_tokens());
+        let retain = self.config.compaction.map_or(0, |budget| {
+            if matches!(&trigger, CompactionTrigger::Auto(_)) {
+                budget.automatic_retain_tokens()
+            } else {
+                budget.retain_tokens()
+            }
+        });
         let cut = choose_cut(&self.history, retain);
         if cut == 0 {
             // Nothing would be folded away. Compacting here would spend a
@@ -643,6 +695,37 @@ mod tests {
             trigger_at_percent: 80,
             retain_percent: 20,
         }
+    }
+
+    #[test]
+    fn large_model_windows_still_compact_at_a_practical_ceiling() {
+        let large = budget(1_000_000);
+        assert_eq!(large.trigger_tokens(), MAX_AUTOMATIC_TRIGGER_TOKENS);
+        assert_eq!(large.automatic_retain_tokens(), MAX_AUTOMATIC_RETAIN_TOKENS);
+        assert_eq!(large.retain_tokens(), 200_000);
+        assert_eq!(budget(50_000).trigger_tokens(), 40_000);
+    }
+
+    #[test]
+    fn tool_result_pressure_is_measured_separately() {
+        let history = vec![tool_result("call", &"x".repeat(160_000))];
+        assert_eq!(tool_result_tokens(&history), MAX_TOOL_RESULT_TOKENS);
+    }
+
+    #[test]
+    fn an_oversized_retained_turn_does_not_recompact_the_same_boundary() {
+        let history = vec![
+            user("compaction:4", "summary"),
+            user("u1", "run it"),
+            assistant_calling("a1", "call"),
+            tool_result("call", &"x".repeat(200_000)),
+        ];
+        assert_eq!(choose_cut(&history, MAX_AUTOMATIC_RETAIN_TOKENS), 1);
+        assert!(!automatic_compaction_due(
+            &history,
+            MAX_AUTOMATIC_TRIGGER_TOKENS,
+            budget(1_000_000),
+        ));
     }
 
     /// A provider that reports a large prompt on its first answer — enough to

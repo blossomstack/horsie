@@ -518,25 +518,38 @@ impl AnthropicProvider {
         MessageContentList(items)
     }
 
-    fn mark_last_message_cacheable(messages: &mut [async_llm::types::Message]) {
-        let Some(last) = messages.last_mut() else {
-            return;
-        };
-        let Some(block) = last.content.last_mut() else {
-            return;
-        };
-        let cc = Some(CacheControl::ephemeral());
-        match block {
-            MessageContent::Text(t) => t.cache_control = cc,
-            MessageContent::ToolUse(tu) => tu.cache_control = cc,
-            MessageContent::ToolResult(tr) => tr.cache_control = cc,
-            MessageContent::Thinking(th) => th.cache_control = cc,
-            // Caching an image or document block is exactly what you want when
-            // one is the last thing in the prompt: it is the most expensive
-            // block in the request and the least likely to change between
-            // turns.
-            MessageContent::Image(i) => i.cache_control = cc,
-            MessageContent::Document(d) => d.cache_control = cc,
+    fn mark_message_cache_breakpoints(messages: &mut [async_llm::types::Message]) {
+        const MAX_BREAKPOINTS: usize = 3;
+        const BLOCK_STRIDE: usize = 16;
+
+        let positions: Vec<(usize, usize)> = messages
+            .iter()
+            .enumerate()
+            .rev()
+            .flat_map(|(message, value)| {
+                (0..value.content.len())
+                    .rev()
+                    .map(move |block| (message, block))
+            })
+            .step_by(BLOCK_STRIDE)
+            .take(MAX_BREAKPOINTS)
+            .collect();
+        for (message, block) in positions {
+            let Some(block) = messages
+                .get_mut(message)
+                .and_then(|value| value.content.get_mut(block))
+            else {
+                continue;
+            };
+            let cc = Some(CacheControl::ephemeral());
+            match block {
+                MessageContent::Text(value) => value.cache_control = cc,
+                MessageContent::ToolUse(value) => value.cache_control = cc,
+                MessageContent::ToolResult(value) => value.cache_control = cc,
+                MessageContent::Thinking(value) => value.cache_control = cc,
+                MessageContent::Image(value) => value.cache_control = cc,
+                MessageContent::Document(value) => value.cache_control = cc,
+            }
         }
     }
 
@@ -575,7 +588,7 @@ impl LlmProvider for AnthropicProvider {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        Self::mark_last_message_cacheable(&mut api_messages);
+        Self::mark_message_cache_breakpoints(&mut api_messages);
 
         // 2. Convert tools
         let mut tool_defs: Vec<serde_json::Map<String, serde_json::Value>> = request
@@ -921,6 +934,40 @@ impl LlmProvider for AnthropicProvider {
 mod tests {
 
     use async_llm::errors::{AnthropicError, StreamError};
+
+    #[test]
+    fn long_tool_batches_receive_spaced_cache_breakpoints() {
+        let content = async_llm::types::MessageContentList(
+            (0..40)
+                .map(|index| {
+                    MessageContent::Text(Text {
+                        text: index.to_string(),
+                        ..Default::default()
+                    })
+                })
+                .collect(),
+        );
+        let message = MessageBuilder::default()
+            .role(MessageRole::User)
+            .content(content)
+            .build()
+            .unwrap();
+        let mut messages = vec![message];
+        AnthropicProvider::mark_message_cache_breakpoints(&mut messages);
+        let marked = messages[0]
+            .content
+            .iter()
+            .filter(|block| match block {
+                MessageContent::Text(value) => value.cache_control.is_some(),
+                MessageContent::ToolUse(value) => value.cache_control.is_some(),
+                MessageContent::ToolResult(value) => value.cache_control.is_some(),
+                MessageContent::Thinking(value) => value.cache_control.is_some(),
+                MessageContent::Image(value) => value.cache_control.is_some(),
+                MessageContent::Document(value) => value.cache_control.is_some(),
+            })
+            .count();
+        assert_eq!(marked, 3);
+    }
 
     #[test]
     fn bad_request_keeps_its_status_instead_of_becoming_a_network_error() {
