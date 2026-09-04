@@ -21,7 +21,7 @@ use horsie_models::runtime::{ToolCall, ToolError, ToolResult};
 /// log, or test run would otherwise blow the context window and token budget. The
 /// cap is enforced here, in the one place every tool result flows through, so it
 /// holds regardless of which tool produced the output.
-const MAX_STREAM_BYTES: usize = 50_000;
+const MAX_OUTPUT_BYTES: usize = 50_000;
 
 /// Run a tool call, then clamp its output.
 ///
@@ -46,69 +46,133 @@ pub async fn dispatch(
     let dir = registry
         .default_root()
         .map(|root| state.effective_dir(agent, &root));
-    let result = match call {
+    match call {
         ToolCall::SetWorkingDir(i) => set_working_dir::exec(registry, state, agent, i),
         ToolCall::SetEnv(i) => set_env::exec(state, agent, i),
         ToolCall::Bash(i) => match dir {
             Ok(d) => bash::exec(&d, &state.env_overlay(agent), i).await,
-            Err(reason) => return ToolResult::Err(ToolError { reason }),
+            Err(reason) => ToolResult::Err(ToolError { reason }),
         },
         ToolCall::ReadFile(i) => match dir {
             Ok(d) => read_file::exec(&d, i).await,
-            Err(reason) => return ToolResult::Err(ToolError { reason }),
+            Err(reason) => ToolResult::Err(ToolError { reason }),
         },
         ToolCall::ReadImage(i) => match dir {
             Ok(d) => read_image::exec(&d, i).await,
-            Err(reason) => return ToolResult::Err(ToolError { reason }),
+            Err(reason) => ToolResult::Err(ToolError { reason }),
         },
         ToolCall::WriteFile(i) => match dir {
             Ok(d) => write_file::exec(&d, i).await,
-            Err(reason) => return ToolResult::Err(ToolError { reason }),
+            Err(reason) => ToolResult::Err(ToolError { reason }),
         },
         ToolCall::ApplyPatch(i) => match dir {
             Ok(d) => apply_patch::exec(&d, i).await,
-            Err(reason) => return ToolResult::Err(ToolError { reason }),
+            Err(reason) => ToolResult::Err(ToolError { reason }),
         },
         ToolCall::FindAndReplace(i) => match dir {
             Ok(d) => find_and_replace::exec(&d, i).await,
-            Err(reason) => return ToolResult::Err(ToolError { reason }),
+            Err(reason) => ToolResult::Err(ToolError { reason }),
         },
         ToolCall::ReplaceLines(i) => match dir {
             Ok(d) => replace_lines::exec(&d, i).await,
-            Err(reason) => return ToolResult::Err(ToolError { reason }),
+            Err(reason) => ToolResult::Err(ToolError { reason }),
         },
         ToolCall::ListFiles(i) => match dir {
             Ok(d) => list_files::exec(&d, i).await,
-            Err(reason) => return ToolResult::Err(ToolError { reason }),
+            Err(reason) => ToolResult::Err(ToolError { reason }),
         },
         ToolCall::Glob(i) => match dir {
             Ok(d) => glob::exec(&d, i).await,
-            Err(reason) => return ToolResult::Err(ToolError { reason }),
+            Err(reason) => ToolResult::Err(ToolError { reason }),
         },
         ToolCall::Grep(i) => match dir {
             Ok(d) => grep::exec(&d, i).await,
-            Err(reason) => return ToolResult::Err(ToolError { reason }),
+            Err(reason) => ToolResult::Err(ToolError { reason }),
         },
-    };
+    }
+}
 
+/// Bound the final result after hooks have had a chance to rewrite it.
+pub(crate) async fn clamp_result(agent: &str, call_id: &str, result: ToolResult) -> ToolResult {
     match result {
-        ToolResult::Ok(mut output) => {
-            output.stdout = truncate_stream(output.stdout);
-            output.stderr = truncate_stream(output.stderr);
-            ToolResult::Ok(output)
-        }
-        ToolResult::Err(e) => ToolResult::Err(e),
+        ToolResult::Ok(output) => ToolResult::Ok(clamp_output(agent, call_id, output).await),
+        ToolResult::Err(error) => ToolResult::Err(error),
     }
 }
 
 /// Clamp a single output stream to [`MAX_STREAM_BYTES`], keeping the head and tail
 /// (where the signal usually lives) and replacing the middle with a marker noting
 /// how much was dropped. Slices are nudged to UTF-8 char boundaries.
-fn truncate_stream(s: String) -> String {
-    if s.len() <= MAX_STREAM_BYTES {
+async fn clamp_output(
+    agent: &str,
+    call_id: &str,
+    mut output: horsie_models::runtime::ToolOutput,
+) -> horsie_models::runtime::ToolOutput {
+    let oversized = output.stdout.len().saturating_add(output.stderr.len()) > MAX_OUTPUT_BYTES;
+    if !oversized {
+        return output;
+    }
+    let spill = {
+        let absolute = std::env::temp_dir()
+            .join("horsie-tool-output")
+            .join(format!("{}-{}.txt", safe_name(agent), safe_name(call_id)));
+        let body = format!(
+            "--- stdout ---\n{}\n--- stderr ---\n{}",
+            output.stdout, output.stderr
+        );
+        match absolute.parent() {
+            Some(parent)
+                if tokio::fs::create_dir_all(parent).await.is_ok()
+                    && tokio::fs::write(&absolute, body).await.is_ok() =>
+            {
+                Some(absolute.to_string_lossy().into_owned())
+            }
+            _ => None,
+        }
+    };
+    let (stdout_budget, stderr_budget) = stream_budgets(output.stdout.len(), output.stderr.len());
+    output.stdout = truncate_stream(output.stdout, stdout_budget, spill.as_deref());
+    output.stderr = truncate_stream(output.stderr, stderr_budget, spill.as_deref());
+    output
+}
+
+fn safe_name(raw: &str) -> String {
+    let value: String = raw
+        .chars()
+        .take(80)
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if value.is_empty() {
+        "output".to_string()
+    } else {
+        value
+    }
+}
+
+fn stream_budgets(stdout: usize, stderr: usize) -> (usize, usize) {
+    let mut stdout_budget = stdout.min(MAX_OUTPUT_BYTES / 2);
+    let mut stderr_budget = stderr.min(MAX_OUTPUT_BYTES / 2);
+    let remaining = MAX_OUTPUT_BYTES.saturating_sub(stdout_budget + stderr_budget);
+    let stdout_extra = stdout.saturating_sub(stdout_budget).min(remaining);
+    stdout_budget += stdout_extra;
+    stderr_budget += stderr
+        .saturating_sub(stderr_budget)
+        .min(remaining.saturating_sub(stdout_extra));
+    (stdout_budget, stderr_budget)
+}
+
+/// Clamp one stream, preserving the full command output in a temporary file.
+fn truncate_stream(s: String, budget: usize, spill: Option<&str>) -> String {
+    if s.len() <= budget {
         return s;
     }
-    let keep = MAX_STREAM_BYTES / 2;
+    let keep = budget / 2;
 
     let mut head_end = keep.min(s.len());
     while head_end > 0 && !s.is_char_boundary(head_end) {
@@ -119,9 +183,12 @@ fn truncate_stream(s: String) -> String {
         tail_start += 1;
     }
     let omitted = tail_start.saturating_sub(head_end);
+    let location = spill
+        .map(|path| format!("; full output: {path}"))
+        .unwrap_or_else(|| "; full output could not be saved".to_string());
 
     format!(
-        "{}\n[... {omitted} bytes truncated ...]\n{}",
+        "{}\n[... {omitted} bytes truncated{location} ...]\n{}",
         &s[..head_end],
         &s[tail_start..]
     )
@@ -143,14 +210,21 @@ mod tests {
     #[test]
     fn short_output_is_unchanged() {
         let s = "hello world".to_string();
-        assert_eq!(truncate_stream(s.clone()), s);
+        assert_eq!(truncate_stream(s.clone(), MAX_OUTPUT_BYTES, None), s);
+    }
+
+    #[test]
+    fn two_busy_streams_share_one_output_budget() {
+        let (stdout, stderr) = stream_budgets(MAX_OUTPUT_BYTES, MAX_OUTPUT_BYTES);
+        assert_eq!(stdout + stderr, MAX_OUTPUT_BYTES);
+        assert_eq!(stdout, stderr);
     }
 
     #[test]
     fn long_output_is_truncated_with_marker() {
-        let s = "x".repeat(MAX_STREAM_BYTES * 2);
-        let out = truncate_stream(s);
-        assert!(out.len() < MAX_STREAM_BYTES + 100, "len was {}", out.len());
+        let s = "x".repeat(MAX_OUTPUT_BYTES * 2);
+        let out = truncate_stream(s, MAX_OUTPUT_BYTES, None);
+        assert!(out.len() < MAX_OUTPUT_BYTES + 100, "len was {}", out.len());
         assert!(out.contains("bytes truncated"));
         assert!(out.starts_with('x'));
         assert!(out.ends_with('x'));
@@ -174,10 +248,18 @@ mod tests {
             }),
         )
         .await;
+        let result = clamp_result("a", "call-1", result).await;
         match result {
             ToolResult::Ok(o) => {
-                assert!(o.stdout.len() < MAX_STREAM_BYTES + 100, "not truncated");
+                assert!(o.stdout.len() < MAX_OUTPUT_BYTES + 200, "not truncated");
                 assert!(o.stdout.contains("bytes truncated"));
+                assert!(o.stdout.contains("horsie-tool-output/a-call-1.txt"));
+                let saved = std::fs::read_to_string(
+                    std::env::temp_dir().join("horsie-tool-output/a-call-1.txt"),
+                )
+                .unwrap();
+                assert!(saved.len() > 80_000);
+                assert!(saved.contains("--- stdout ---"));
             }
             ToolResult::Err(e) => panic!("{}", e.reason),
         }

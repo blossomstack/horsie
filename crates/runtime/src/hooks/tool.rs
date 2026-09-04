@@ -55,8 +55,9 @@ pub async fn dispatch_with_hooks(
     call: ToolCall,
 ) -> (ToolResult, Vec<HookRecord>) {
     let Some(plugins_dir) = registry.plugins_dir_for(agent) else {
+        let result = crate::tools::dispatch(registry, state, agent, call).await;
         return (
-            crate::tools::dispatch(registry, state, agent, call).await,
+            crate::tools::clamp_result(agent, call_id, result).await,
             Vec::new(),
         );
     };
@@ -127,7 +128,10 @@ pub async fn dispatch_with_hooks(
         records.push(record);
     }
 
-    (result, records)
+    (
+        crate::tools::clamp_result(agent, call_id, result).await,
+        records,
+    )
 }
 
 /// Whether a `PreToolUse` outcome stops the call.

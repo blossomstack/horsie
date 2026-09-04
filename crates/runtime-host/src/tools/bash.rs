@@ -25,7 +25,8 @@ impl Tool for BashTool {
                 Optionally set 'timeout_secs' to bound how long the command may run. \
                 Pipelines run with pipefail: the command fails if any stage fails, \
                 except when a consumer closes early (`| head`), which is not a failure. \
-                On timeout, output captured so far is returned with the error."
+                Oversized output is head/tail truncated and saved to a temporary file for follow-up reads. On timeout, output \
+                captured so far is returned with the error."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
