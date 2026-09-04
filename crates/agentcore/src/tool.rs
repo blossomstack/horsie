@@ -2,6 +2,57 @@ use crate::error::ToolCallError;
 use async_trait::async_trait;
 use serde_json::Value;
 
+/// Absolute ceiling for text returned by one tool call to the model.
+///
+/// Individual toolboxes may enforce a smaller, richer limit (for example by
+/// preserving complete command output in a spill file). This final guard exists
+/// for every toolbox, including server-native and remotely configured MCP tools.
+pub const MAX_TOOL_RESULT_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BoundedToolOutput {
+    pub output: String,
+    pub original_bytes: usize,
+    pub retained_bytes: usize,
+}
+
+pub(crate) fn bound_tool_output(output: String) -> BoundedToolOutput {
+    let original_bytes = output.len();
+    if original_bytes <= MAX_TOOL_RESULT_BYTES {
+        return BoundedToolOutput {
+            retained_bytes: original_bytes,
+            original_bytes,
+            output,
+        };
+    }
+
+    let mut marker = String::new();
+    let mut retained = MAX_TOOL_RESULT_BYTES;
+    for _ in 0..2 {
+        let dropped = original_bytes.saturating_sub(retained);
+        marker = format!(
+            "\n\n… {dropped} byte(s) omitted by the final tool-output guard. \
+             Narrow the request to inspect the missing content.\n\n"
+        );
+        retained = MAX_TOOL_RESULT_BYTES.saturating_sub(marker.len());
+    }
+
+    let mut head_end = retained / 2;
+    while head_end > 0 && !output.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let mut tail_start = original_bytes.saturating_sub(retained.saturating_sub(head_end));
+    while tail_start < original_bytes && !output.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    let bounded = format!("{}{}{}", &output[..head_end], marker, &output[tail_start..]);
+    BoundedToolOutput {
+        retained_bytes: bounded.len(),
+        original_bytes,
+        output: bounded,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolSpec {
     pub name: String,
@@ -69,6 +120,23 @@ impl ToolOutcome {
     #[must_use]
     pub fn result(value: impl Into<Value>) -> Self {
         Self::Result(ToolValue::new(value.into()))
+    }
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+
+    #[test]
+    fn final_tool_output_guard_keeps_head_tail_and_utf8() {
+        let output = format!("HEAD{}TAIL", "界".repeat(MAX_TOOL_RESULT_BYTES));
+        let bounded = bound_tool_output(output.clone());
+        assert_eq!(bounded.original_bytes, output.len());
+        assert_eq!(bounded.retained_bytes, bounded.output.len());
+        assert!(bounded.output.len() <= MAX_TOOL_RESULT_BYTES);
+        assert!(bounded.output.starts_with("HEAD"));
+        assert!(bounded.output.ends_with("TAIL"));
+        assert!(bounded.output.contains("final tool-output guard"));
     }
 }
 
