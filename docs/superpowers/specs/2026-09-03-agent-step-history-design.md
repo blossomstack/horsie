@@ -266,6 +266,8 @@ Seed summary is keyed by a durable request ID. It reads a stable history prefix,
 
 ## Code organization
 
+Editable sequence flow: [Excalidraw](https://excalidraw.com/#json=3FZvANOJOWkKLop7SscWF,Nz11qb4KnVRXKwTrfouzuA). The checked-in source is `docs/diagrams/agent-actor-sequence.excalidraw`.
+
 Read the actor flow in this order:
 
 1. `AgentActor::handle_command` passes one mailbox command to `RunLoop::handle`.
