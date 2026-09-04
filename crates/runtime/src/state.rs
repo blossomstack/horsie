@@ -50,12 +50,22 @@ struct AgentEnv {
     env: HashMap<String, Option<String>>,
 }
 
-#[derive(Default)]
 pub struct RuntimeState {
     agents: Mutex<HashMap<String, AgentEnv>>,
     /// Where the map is mirrored, if anywhere. `None` keeps it in memory only,
     /// which is correct for a runtime nobody can respawn.
     file: Option<PathBuf>,
+    pub(crate) spills: Option<crate::tools::spill::SpillStore>,
+}
+
+impl Default for RuntimeState {
+    fn default() -> Self {
+        Self {
+            agents: Mutex::new(HashMap::new()),
+            file: None,
+            spills: crate::tools::spill::SpillStore::temporary(),
+        }
+    }
 }
 
 impl RuntimeState {
@@ -77,6 +87,7 @@ impl RuntimeState {
         Self {
             agents: Mutex::new(agents),
             file: Some(path),
+            spills: crate::tools::spill::SpillStore::temporary(),
         }
     }
 
@@ -167,6 +178,18 @@ impl RuntimeState {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropping_runtime_state_removes_its_output_spills() {
+        let root = {
+            let state = RuntimeState::new();
+            let root = state.spills.as_ref().unwrap().root.clone();
+            std::fs::write(root.join("probe"), "x").unwrap();
+            assert!(root.exists());
+            root
+        };
+        assert!(!root.exists());
+    }
 
     #[test]
     fn no_override_returns_the_fallback() {

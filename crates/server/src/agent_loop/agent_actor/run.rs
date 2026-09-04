@@ -408,6 +408,7 @@ impl Component for Run {
                 is_error,
                 artifacts,
                 at_ms,
+                ..
             } => state.push(
                 at_ms,
                 AgentLogBody::Llm(Message::tool_result(

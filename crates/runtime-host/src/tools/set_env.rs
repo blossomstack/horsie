@@ -1,6 +1,6 @@
 use crate::client::{RuntimeCallError, RuntimeClient};
 use async_trait::async_trait;
-use horsie_agentcore::{Tool, ToolCallError, ToolSpec};
+use horsie_agentcore::{Tool, ToolCallError, ToolSpec, ToolValue};
 use horsie_models::runtime::{SetEnvInput, ToolCall};
 use serde_json::{Value, json};
 
@@ -34,7 +34,7 @@ impl Tool for SetEnvTool {
         }
     }
 
-    async fn execute(&self, input: Value, tool_call_id: &str) -> Result<Value, ToolCallError> {
+    async fn execute(&self, input: Value, tool_call_id: &str) -> Result<ToolValue, ToolCallError> {
         let name = input["name"]
             .as_str()
             .ok_or_else(|| ToolCallError::InvalidInput("missing 'name'".into()))?
@@ -70,7 +70,7 @@ mod tests {
             .execute(json!({"name": "FOO", "value": "1"}), "tc1")
             .await
             .unwrap();
-        assert_eq!(v.as_str().unwrap(), "set FOO");
+        assert_eq!(v.value.as_str().unwrap(), "set FOO");
         match &probe.invocations()[0] {
             ToolCall::SetEnv(i) => {
                 assert_eq!(i.name, "FOO");

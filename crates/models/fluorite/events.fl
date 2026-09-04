@@ -46,6 +46,19 @@ struct ToolCompleteEvent  {
     /// cross a process boundary and an older sender has no such field.
     #[default = "[]"]
     artifacts: Vec<ArtifactRef>,
+    /// Text bytes produced before the final context guard. Zero in events
+    /// written before this measurement existed.
+    #[default = "0"]
+    original_output_bytes: u64,
+    /// Bytes omitted from the model-visible result by output guards.
+    #[default = "0"]
+    truncated_output_bytes: u64,
+    /// Complete bytes retained in a runtime spill file for follow-up reads.
+    #[default = "0"]
+    spilled_output_bytes: u64,
+    /// When execution began. Zero in events written before this measurement.
+    #[default = "0"]
+    started_at_ms: u64,
     at_ms: u64,
 }
 

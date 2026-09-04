@@ -100,6 +100,8 @@ pub async fn exec(working_dir: &Path, env: &EnvOverlay, input: BashInput) -> Too
                     None => -1,
                 },
                 artifacts: Vec::new(),
+                original_output_bytes: 0,
+                spilled_output_bytes: 0,
             })
         }
         Ok(Err(e)) => {

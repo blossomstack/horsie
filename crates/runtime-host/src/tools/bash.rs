@@ -1,6 +1,6 @@
 use crate::client::{RuntimeCallError, RuntimeClient};
 use async_trait::async_trait;
-use horsie_agentcore::{Tool, ToolCallError, ToolSpec};
+use horsie_agentcore::{Tool, ToolCallError, ToolSpec, ToolValue};
 use horsie_models::runtime::{BashInput, ToolCall};
 use serde_json::{Value, json};
 
@@ -39,7 +39,7 @@ impl Tool for BashTool {
         }
     }
 
-    async fn execute(&self, input: Value, tool_call_id: &str) -> Result<Value, ToolCallError> {
+    async fn execute(&self, input: Value, tool_call_id: &str) -> Result<ToolValue, ToolCallError> {
         let command = input["command"]
             .as_str()
             .ok_or_else(|| ToolCallError::InvalidInput("missing 'command'".into()))?
@@ -87,11 +87,13 @@ mod tests {
                 stderr: "a warning".into(),
                 exit_code: 0,
                 artifacts: Vec::new(),
+                original_output_bytes: 0,
+                spilled_output_bytes: 0,
             }),
             "test-agent",
         ));
         let v = tool.execute(json!({"command": "x"}), "tc1").await.unwrap();
-        let text = v.as_str().unwrap();
+        let text = v.value.as_str().unwrap();
         assert!(text.contains("out"));
         assert!(text.contains("a warning"));
     }
@@ -104,6 +106,8 @@ mod tests {
                 stderr: "boom".into(),
                 exit_code: 1,
                 artifacts: Vec::new(),
+                original_output_bytes: 0,
+                spilled_output_bytes: 0,
             }),
             "test-agent",
         ));
@@ -129,6 +133,8 @@ mod tests {
                     .into(),
                 exit_code: 101,
                 artifacts: Vec::new(),
+                original_output_bytes: 0,
+                spilled_output_bytes: 0,
             }),
             "test-agent",
         ));

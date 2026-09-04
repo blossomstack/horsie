@@ -648,7 +648,8 @@ impl Agent {
                 }))
                 .await?;
 
-            let (output, is_error, artifacts) =
+            let tool_started_ms = now_ms();
+            let (output, is_error, artifacts, reported_original_bytes, spilled_output_bytes) =
                 match toolbox.execute(name, input.clone(), tool_call_id).await {
                     // A string result is forwarded verbatim; re-encoding it as
                     // JSON would wrap it in quotes and escape every newline,
@@ -661,6 +662,8 @@ impl Agent {
                             .unwrap_or_else(|| v.value.to_string()),
                         false,
                         v.artifacts,
+                        v.original_output_bytes,
+                        v.spilled_output_bytes,
                     ),
                     Ok(ToolOutcome::StopRun) => {
                         return Ok(Dispatched::Stopped(StoppedCall {
@@ -670,9 +673,15 @@ impl Agent {
                         }));
                     }
                     // An error produced no artifacts by definition.
-                    Err(e) => (e.to_string(), true, Vec::new()),
+                    Err(e) => (e.to_string(), true, Vec::new(), 0, 0),
                 };
-            let output = bound_tool_output(output).output;
+            let bounded = bound_tool_output(output);
+            let original_output_bytes = reported_original_bytes
+                .max(u64::try_from(bounded.original_bytes).unwrap_or(u64::MAX));
+            let retained_output_bytes = u64::try_from(bounded.retained_bytes).unwrap_or(u64::MAX);
+            let truncated_output_bytes =
+                original_output_bytes.saturating_sub(retained_output_bytes);
+            let output = bounded.output;
 
             // One reading of the clock for both the event and the message it
             // becomes, so the journal and the in-memory history agree.
@@ -684,6 +693,10 @@ impl Agent {
                     output: output.clone(),
                     is_error,
                     artifacts: artifacts.clone(),
+                    original_output_bytes,
+                    truncated_output_bytes,
+                    spilled_output_bytes,
+                    started_at_ms: tool_started_ms,
                     at_ms: finished_ms,
                 }))
                 .await?;
@@ -2024,16 +2037,27 @@ mod tests {
             )
             .await
             .unwrap();
-        let output = sink
+        let complete = sink
             .events()
             .into_iter()
             .find_map(|event| match event {
-                AgentEvent::ToolComplete(complete) => Some(complete.output),
+                AgentEvent::ToolComplete(complete) => Some(complete),
                 _ => None,
             })
             .unwrap();
-        assert!(output.len() <= MAX_TOOL_RESULT_BYTES);
-        assert!(output.contains("final tool-output guard"));
+        assert!(complete.output.len() <= MAX_TOOL_RESULT_BYTES);
+        assert!(complete.output.contains("final tool-output guard"));
+        assert_eq!(
+            complete.original_output_bytes,
+            (MAX_TOOL_RESULT_BYTES * 2) as u64
+        );
+        assert_eq!(
+            complete.truncated_output_bytes,
+            complete
+                .original_output_bytes
+                .saturating_sub(complete.output.len() as u64)
+        );
+        assert_eq!(complete.spilled_output_bytes, 0);
     }
 
     #[tokio::test]

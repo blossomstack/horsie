@@ -473,6 +473,10 @@ impl AgentActor {
                 output: reason.clone(),
                 is_error: true,
                 artifacts: Vec::new(),
+                original_output_bytes: u64::try_from(reason.len()).unwrap_or(u64::MAX),
+                truncated_output_bytes: 0,
+                spilled_output_bytes: 0,
+                started_at_ms: at_ms,
                 at_ms,
             })
             .collect();

@@ -275,10 +275,12 @@ impl Toolbox for PluginMcpToolbox {
             }
             _ => Vec::new(),
         };
-        Ok(ToolOutcome::Result(ToolValue::with_artifacts(
-            Value::String(output.stdout),
-            refs,
-        )))
+        let original_output_bytes = output.original_output_bytes;
+        let spilled_output_bytes = output.spilled_output_bytes;
+        Ok(ToolOutcome::Result(
+            ToolValue::with_artifacts(Value::String(output.stdout), refs)
+                .with_output_metrics(original_output_bytes, spilled_output_bytes),
+        ))
     }
 }
 
@@ -919,6 +921,8 @@ mod tests {
                     stderr: String::new(),
                     exit_code: 0,
                     artifacts: vec![fluorite::Bytes(png())],
+                    original_output_bytes: 0,
+                    spilled_output_bytes: 0,
                 },
             ),
             "agent",

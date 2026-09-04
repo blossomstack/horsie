@@ -381,6 +381,15 @@ pub enum AgentDomainEvent {
         /// before artifact-bearing tools existed.
         #[serde(default)]
         artifacts: Vec<ArtifactRef>,
+        #[serde(default)]
+        original_output_bytes: u64,
+        #[serde(default)]
+        truncated_output_bytes: u64,
+        #[serde(default)]
+        spilled_output_bytes: u64,
+        /// When execution began. Missing from older journals.
+        #[serde(default)]
+        started_at_ms: u64,
         /// When the tool finished. Journaled rather than re-read at fold time:
         /// this variant rebuilds its `Message` in `apply_event`, so a recovered
         /// transcript would otherwise stamp every past tool result with the

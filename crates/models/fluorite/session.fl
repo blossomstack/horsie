@@ -166,9 +166,20 @@ struct AgentStats {
 /// Cumulative counters that explain where an agent run spent work and context.
 struct EfficiencyStats {
     provider_calls: u64,
+    provider_generation_ms: u64,
+    max_provider_generation_ms: u64,
     tool_calls: u64,
+    tool_execution_ms: u64,
+    max_tool_execution_ms: u64,
     failed_tool_calls: u64,
+    /// Bytes retained in the transcript after output guards.
     tool_result_bytes: u64,
+    /// Bytes produced before output guards.
+    original_tool_result_bytes: u64,
+    /// Bytes omitted from model context by output guards.
+    truncated_tool_result_bytes: u64,
+    /// Complete bytes retained in runtime spill files.
+    spilled_tool_result_bytes: u64,
     completed_runs: u64,
     aborted_runs: u64,
     compactions: u64,
