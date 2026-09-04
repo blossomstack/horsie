@@ -148,7 +148,10 @@ test("Z4: deleting an open question warns that it declines it, and the agent car
   await expectStatus(page, "AwaitingInput");
 
   await openInbox(page);
-  const row = page.getByTestId("inbox-row").first();
+  const row = page
+    .getByTestId("inbox-row")
+    .filter({ hasText: "Which database?" });
+  await expect(row).toBeVisible();
   const id = await row.getAttribute("data-message-id");
   await page.getByTestId(`inbox-select-${id}`).click();
   await page.getByTestId("inbox-delete-selected").click();
