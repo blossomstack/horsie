@@ -16,5 +16,22 @@ export interface ToolCompleteEvent {
    * cross a process boundary and an older sender has no such field.
    */
   artifacts: ArtifactRef[];
+  /**
+   * Text bytes produced before the final context guard. Zero in events
+   * written before this measurement existed.
+   */
+  originalOutputBytes: number;
+  /**
+   * Bytes omitted from the model-visible result by output guards.
+   */
+  truncatedOutputBytes: number;
+  /**
+   * Complete bytes retained in a runtime spill file for follow-up reads.
+   */
+  spilledOutputBytes: number;
+  /**
+   * When execution began. Zero in events written before this measurement.
+   */
+  startedAtMs: number;
   atMs: number;
 }

@@ -116,9 +116,16 @@ pub struct AgentState {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentEfficiencyStats {
     pub provider_calls: u64,
+    pub provider_generation_ms: u64,
+    pub max_provider_generation_ms: u64,
     pub tool_calls: u64,
+    pub tool_execution_ms: u64,
+    pub max_tool_execution_ms: u64,
     pub failed_tool_calls: u64,
     pub tool_result_bytes: u64,
+    pub original_tool_result_bytes: u64,
+    pub truncated_tool_result_bytes: u64,
+    pub spilled_tool_result_bytes: u64,
     pub completed_runs: u64,
     pub aborted_runs: u64,
     pub compactions: u64,
@@ -130,6 +137,13 @@ impl AgentEfficiencyStats {
             AgentDomainEvent::MessageComplete { message }
             | AgentDomainEvent::MessageAborted { message } => {
                 self.provider_calls = self.provider_calls.saturating_add(1);
+                let generation_ms = message
+                    .started_at_ms
+                    .map_or(0, |started| message.created_at_ms.saturating_sub(started));
+                self.provider_generation_ms =
+                    self.provider_generation_ms.saturating_add(generation_ms);
+                self.max_provider_generation_ms =
+                    self.max_provider_generation_ms.max(generation_ms);
                 let calls = message
                     .parts
                     .iter()
@@ -138,9 +152,33 @@ impl AgentEfficiencyStats {
                 self.tool_calls = self.tool_calls.saturating_add(calls);
             }
             AgentDomainEvent::ToolComplete {
-                output, is_error, ..
+                output,
+                is_error,
+                original_output_bytes,
+                truncated_output_bytes,
+                spilled_output_bytes,
+                started_at_ms,
+                at_ms,
+                ..
             } => {
-                self.tool_result_bytes = self.tool_result_bytes.saturating_add(output.len() as u64);
+                let execution_ms = at_ms.saturating_sub(*started_at_ms);
+                self.tool_execution_ms = self.tool_execution_ms.saturating_add(execution_ms);
+                self.max_tool_execution_ms = self.max_tool_execution_ms.max(execution_ms);
+                let retained = u64::try_from(output.len()).unwrap_or(u64::MAX);
+                self.tool_result_bytes = self.tool_result_bytes.saturating_add(retained);
+                self.original_tool_result_bytes = self.original_tool_result_bytes.saturating_add(
+                    if *original_output_bytes == 0 {
+                        retained
+                    } else {
+                        *original_output_bytes
+                    },
+                );
+                self.truncated_tool_result_bytes = self
+                    .truncated_tool_result_bytes
+                    .saturating_add(*truncated_output_bytes);
+                self.spilled_tool_result_bytes = self
+                    .spilled_tool_result_bytes
+                    .saturating_add(*spilled_output_bytes);
                 if *is_error {
                     self.failed_tool_calls = self.failed_tool_calls.saturating_add(1);
                 }
@@ -370,6 +408,10 @@ mod tests {
                     output: "Image loaded.".into(),
                     is_error: false,
                     artifacts: vec![artifact.clone()],
+                    original_output_bytes: 0,
+                    truncated_output_bytes: 0,
+                    spilled_output_bytes: 0,
+                    started_at_ms: 0,
                 },
             )
         };
@@ -550,6 +592,10 @@ mod tests {
                 output: "denied".into(),
                 is_error: true,
                 artifacts: Vec::new(),
+                original_output_bytes: 0,
+                truncated_output_bytes: 0,
+                spilled_output_bytes: 0,
+                started_at_ms: 0,
                 at_ms: 9,
             },
         );
@@ -612,6 +658,10 @@ mod tests {
                     output: "ok".into(),
                     is_error: false,
                     artifacts: Vec::new(),
+                    original_output_bytes: 0,
+                    truncated_output_bytes: 0,
+                    spilled_output_bytes: 0,
+                    started_at_ms: 0,
                     at_ms: 3,
                 },
                 // Not an entry: it must not consume a number, or two replays
@@ -684,6 +734,10 @@ mod tests {
                 output: "result".into(),
                 is_error: false,
                 artifacts: Vec::new(),
+                original_output_bytes: 0,
+                truncated_output_bytes: 0,
+                spilled_output_bytes: 0,
+                started_at_ms: 0,
             },
         );
         state = AgentActor::apply_event(
@@ -875,8 +929,8 @@ mod tests {
                         name: "bash".into(),
                         input: serde_json::json!({}),
                     })],
-                    created_at_ms: 1,
-                    started_at_ms: None,
+                    created_at_ms: 11,
+                    started_at_ms: Some(1),
                 },
             },
         );
@@ -887,6 +941,10 @@ mod tests {
                 output: "failed".into(),
                 is_error: true,
                 artifacts: Vec::new(),
+                original_output_bytes: 20,
+                truncated_output_bytes: 14,
+                spilled_output_bytes: 20,
+                started_at_ms: 1,
                 at_ms: 2,
             },
         );
@@ -901,9 +959,16 @@ mod tests {
         );
 
         assert_eq!(state.efficiency.provider_calls, 1);
+        assert_eq!(state.efficiency.provider_generation_ms, 10);
+        assert_eq!(state.efficiency.max_provider_generation_ms, 10);
         assert_eq!(state.efficiency.tool_calls, 1);
+        assert_eq!(state.efficiency.tool_execution_ms, 1);
+        assert_eq!(state.efficiency.max_tool_execution_ms, 1);
         assert_eq!(state.efficiency.failed_tool_calls, 1);
         assert_eq!(state.efficiency.tool_result_bytes, 6);
+        assert_eq!(state.efficiency.original_tool_result_bytes, 20);
+        assert_eq!(state.efficiency.truncated_tool_result_bytes, 14);
+        assert_eq!(state.efficiency.spilled_tool_result_bytes, 20);
         assert_eq!(state.efficiency.completed_runs, 1);
     }
 

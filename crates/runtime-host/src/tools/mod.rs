@@ -25,7 +25,7 @@ pub use set_working_dir::SetWorkingDirTool;
 pub use write_file::WriteFileTool;
 
 use crate::client::RuntimeClient;
-use horsie_agentcore::{ToolCallError, ToolboxImpl};
+use horsie_agentcore::{ToolCallError, ToolValue, ToolboxImpl};
 use horsie_models::runtime::ToolOutput;
 use serde_json::Value;
 
@@ -38,7 +38,9 @@ use serde_json::Value;
 /// as a tool error so the agent loop marks the result `is_error` and the model
 /// reliably notices the failure. File tools always exit 0 with empty stderr, so
 /// for them this is a transparent passthrough of `stdout`.
-pub(crate) fn render_output(o: ToolOutput) -> Result<Value, ToolCallError> {
+pub(crate) fn render_output(o: ToolOutput) -> Result<ToolValue, ToolCallError> {
+    let original_output_bytes = o.original_output_bytes;
+    let spilled_output_bytes = o.spilled_output_bytes;
     let mut text = o.stdout;
     if !o.stderr.is_empty() {
         if !text.is_empty() {
@@ -52,10 +54,11 @@ pub(crate) fn render_output(o: ToolOutput) -> Result<Value, ToolCallError> {
             o.exit_code
         )));
     }
-    Ok(Value::String(text))
+    Ok(ToolValue::new(Value::String(text))
+        .with_output_metrics(original_output_bytes, spilled_output_bytes))
 }
 
-pub(crate) fn render_command_output(o: ToolOutput) -> Result<Value, ToolCallError> {
+pub(crate) fn render_command_output(o: ToolOutput) -> Result<ToolValue, ToolCallError> {
     if o.exit_code == 0 {
         return render_output(o);
     }
@@ -154,6 +157,22 @@ mod tests {
     use super::*;
     use crate::testkit::MockTransport;
     use horsie_agentcore::Toolbox;
+
+    #[test]
+    fn rendering_preserves_runtime_output_measurements() {
+        let rendered = render_output(ToolOutput {
+            stdout: "kept".into(),
+            stderr: String::new(),
+            exit_code: 0,
+            artifacts: Vec::new(),
+            original_output_bytes: 100_000,
+            spilled_output_bytes: 100_030,
+        })
+        .unwrap();
+        assert_eq!(rendered.value, Value::String("kept".into()));
+        assert_eq!(rendered.original_output_bytes, 100_000);
+        assert_eq!(rendered.spilled_output_bytes, 100_030);
+    }
 
     /// The runtime resolves a tool's base directory itself — the caller's sticky
     /// working directory, else the first workspace — and an absolute path reaches

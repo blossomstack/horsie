@@ -29,6 +29,8 @@ pub fn exec(state: &RuntimeState, agent: &str, input: SetEnvInput) -> ToolResult
         stderr: String::new(),
         exit_code: 0,
         artifacts: Vec::new(),
+        original_output_bytes: 0,
+        spilled_output_bytes: 0,
     })
 }
 

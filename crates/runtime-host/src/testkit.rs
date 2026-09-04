@@ -223,6 +223,8 @@ impl MockTransport {
             stderr: String::new(),
             exit_code: 0,
             artifacts: Vec::new(),
+            original_output_bytes: 0,
+            spilled_output_bytes: 0,
         }))
     }
 
@@ -254,6 +256,8 @@ impl MockTransport {
                 stderr: String::new(),
                 exit_code: 0,
                 artifacts: Vec::new(),
+                original_output_bytes: 0,
+                spilled_output_bytes: 0,
             }))
         });
         Self::scripted(
@@ -624,6 +628,8 @@ mod tests {
                 stderr: String::new(),
                 exit_code: 0,
                 artifacts: Vec::new(),
+                original_output_bytes: 0,
+                spilled_output_bytes: 0,
             },
         ))]));
         assert!(t.invoke("c1", "test-agent", bash("a")).await.is_ok());

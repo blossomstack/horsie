@@ -277,6 +277,7 @@ impl McpRegistry {
         if outcome.is_error {
             return Err(clamp(outcome.text));
         }
+        let original_text_bytes = u64::try_from(outcome.text.len()).unwrap_or(u64::MAX);
         let (artifacts, dropped) = within_caps(outcome.images);
         let mut stdout = clamp(outcome.text);
         if dropped > 0 {
@@ -285,11 +286,15 @@ impl McpRegistry {
                  {MAX_ARTIFACTS} artifacts and {MAX_ARTIFACT_BYTES} bytes"
             ));
         }
+        let original_output_bytes =
+            original_text_bytes.max(u64::try_from(stdout.len()).unwrap_or(u64::MAX));
         Ok(ToolOutput {
             stdout,
             stderr: String::new(),
             exit_code: 0,
             artifacts: artifacts.into_iter().map(fluorite::Bytes).collect(),
+            original_output_bytes,
+            spilled_output_bytes: 0,
         })
     }
 

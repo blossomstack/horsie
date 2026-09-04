@@ -440,6 +440,13 @@ struct ToolOutput {
     /// binary built before it existed.
     #[default = "[]"]
     artifacts: Vec<Bytes>,
+    /// Text bytes before runtime truncation. Zero means an older runtime did
+    /// not report the measurement.
+    #[default = "0"]
+    original_output_bytes: u64,
+    /// Complete text bytes preserved in a temporary spill file.
+    #[default = "0"]
+    spilled_output_bytes: u64,
 }
 
 struct ToolError  { reason: String }

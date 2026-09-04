@@ -140,6 +140,10 @@ pub(super) fn coarse_event(e: &AgentEvent) -> Option<AgentDomainEvent> {
             output: ev.output.clone(),
             is_error: ev.is_error,
             artifacts: ev.artifacts.clone(),
+            original_output_bytes: ev.original_output_bytes,
+            truncated_output_bytes: ev.truncated_output_bytes,
+            spilled_output_bytes: ev.spilled_output_bytes,
+            started_at_ms: ev.started_at_ms,
             // Carried on the streaming event, not re-read here: the in-memory
             // history already holds a message stamped with it.
             at_ms: ev.at_ms,
@@ -219,6 +223,10 @@ mod tests {
                 output: "ok".into(),
                 is_error: false,
                 artifacts: vec![artifact.clone()],
+                original_output_bytes: 0,
+                truncated_output_bytes: 0,
+                spilled_output_bytes: 0,
+                started_at_ms: 0,
                 at_ms: 42,
             },
         ))

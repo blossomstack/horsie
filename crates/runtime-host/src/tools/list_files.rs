@@ -1,6 +1,6 @@
 use crate::client::{RuntimeCallError, RuntimeClient};
 use async_trait::async_trait;
-use horsie_agentcore::{Tool, ToolCallError, ToolSpec};
+use horsie_agentcore::{Tool, ToolCallError, ToolSpec, ToolValue};
 use horsie_models::runtime::{ListFilesInput, ToolCall};
 use serde_json::{Value, json};
 
@@ -26,7 +26,7 @@ impl Tool for ListFilesTool {
             }),
         }
     }
-    async fn execute(&self, input: Value, tool_call_id: &str) -> Result<Value, ToolCallError> {
+    async fn execute(&self, input: Value, tool_call_id: &str) -> Result<ToolValue, ToolCallError> {
         let path = input["path"]
             .as_str()
             .ok_or_else(|| ToolCallError::InvalidInput("missing 'path'".into()))?

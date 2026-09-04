@@ -9,6 +9,8 @@ pub async fn exec(working_dir: &Path, input: ReadImageInput) -> ToolResult {
             stderr: String::new(),
             exit_code: 0,
             artifacts: vec![fluorite::Bytes(bytes)],
+            original_output_bytes: 0,
+            spilled_output_bytes: 0,
         }),
         Ok(Err(error)) => ToolResult::Err(ToolError {
             reason: error.to_string(),

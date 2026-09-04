@@ -820,6 +820,8 @@ async fn run_agent<S>(
                                 stderr: String::new(),
                                 exit_code: 0,
                                 artifacts: Vec::new(),
+                                original_output_bytes: 0,
+                                spilled_output_bytes: 0,
                             }),
                             // This fake serves sessions with no plugin library,
                             // so no hook ever runs.

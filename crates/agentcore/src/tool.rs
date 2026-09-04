@@ -91,6 +91,11 @@ pub enum ToolOutcome {
 pub struct ToolValue {
     pub value: Value,
     pub artifacts: Vec<horsie_models::agent::ArtifactRef>,
+    /// Text bytes before a toolbox-specific output guard. Zero means the
+    /// toolbox did not report a measurement.
+    pub original_output_bytes: u64,
+    /// Complete bytes preserved outside model context for follow-up reads.
+    pub spilled_output_bytes: u64,
 }
 
 impl ToolValue {
@@ -99,12 +104,30 @@ impl ToolValue {
         Self {
             value,
             artifacts: Vec::new(),
+            original_output_bytes: 0,
+            spilled_output_bytes: 0,
         }
     }
 
     #[must_use]
     pub fn with_artifacts(value: Value, artifacts: Vec<horsie_models::agent::ArtifactRef>) -> Self {
-        Self { value, artifacts }
+        Self {
+            value,
+            artifacts,
+            original_output_bytes: 0,
+            spilled_output_bytes: 0,
+        }
+    }
+
+    #[must_use]
+    pub fn with_output_metrics(
+        mut self,
+        original_output_bytes: u64,
+        spilled_output_bytes: u64,
+    ) -> Self {
+        self.original_output_bytes = original_output_bytes;
+        self.spilled_output_bytes = spilled_output_bytes;
+        self
     }
 }
 
@@ -186,7 +209,7 @@ pub trait Tool: Send + Sync {
     /// `tool_call_id` is the model's id for this call, forwarded from
     /// [`Toolbox::execute`]. A tool that reaches a remote runtime passes it on;
     /// the rest ignore it.
-    async fn execute(&self, input: Value, tool_call_id: &str) -> Result<Value, ToolCallError>;
+    async fn execute(&self, input: Value, tool_call_id: &str) -> Result<ToolValue, ToolCallError>;
 }
 
 /// Generic Toolbox impl — register individual Tool implementations into it.
@@ -228,7 +251,7 @@ impl Toolbox for ToolboxImpl {
             Some(tool) => tool
                 .execute(input, tool_call_id)
                 .await
-                .map(ToolOutcome::from),
+                .map(ToolOutcome::Result),
             None => Err(ToolCallError::InvalidInput(format!(
                 "no tool named '{name}'"
             ))),
@@ -278,8 +301,12 @@ mod tests {
                 input_schema: json!({"type": "object"}),
             }
         }
-        async fn execute(&self, input: Value, _tool_call_id: &str) -> Result<Value, ToolCallError> {
-            Ok(input)
+        async fn execute(
+            &self,
+            input: Value,
+            _tool_call_id: &str,
+        ) -> Result<ToolValue, ToolCallError> {
+            Ok(ToolValue::new(input))
         }
     }
 

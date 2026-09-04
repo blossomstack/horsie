@@ -382,9 +382,16 @@ fn to_wire_efficiency(
 ) -> horsie_models::session::EfficiencyStats {
     horsie_models::session::EfficiencyStats {
         provider_calls: stats.provider_calls,
+        provider_generation_ms: stats.provider_generation_ms,
+        max_provider_generation_ms: stats.max_provider_generation_ms,
         tool_calls: stats.tool_calls,
+        tool_execution_ms: stats.tool_execution_ms,
+        max_tool_execution_ms: stats.max_tool_execution_ms,
         failed_tool_calls: stats.failed_tool_calls,
         tool_result_bytes: stats.tool_result_bytes,
+        original_tool_result_bytes: stats.original_tool_result_bytes,
+        truncated_tool_result_bytes: stats.truncated_tool_result_bytes,
+        spilled_tool_result_bytes: stats.spilled_tool_result_bytes,
         completed_runs: stats.completed_runs,
         aborted_runs: stats.aborted_runs,
         compactions: stats.compactions,

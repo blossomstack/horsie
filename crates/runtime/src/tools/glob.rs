@@ -64,6 +64,8 @@ pub async fn exec(working_dir: &Path, input: GlobInput) -> ToolResult {
             stderr: String::new(),
             exit_code: 0,
             artifacts: Vec::new(),
+            original_output_bytes: 0,
+            spilled_output_bytes: 0,
         }),
         Ok(Err(reason)) => ToolResult::Err(ToolError { reason }),
         Err(e) => ToolResult::Err(ToolError {

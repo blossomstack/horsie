@@ -16,4 +16,13 @@ export interface ToolOutput {
    * binary built before it existed.
    */
   artifacts: string[];
+  /**
+   * Text bytes before runtime truncation. Zero means an older runtime did
+   * not report the measurement.
+   */
+  originalOutputBytes: number;
+  /**
+   * Complete text bytes preserved in a temporary spill file.
+   */
+  spilledOutputBytes: number;
 }

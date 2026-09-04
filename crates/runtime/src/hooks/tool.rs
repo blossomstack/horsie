@@ -59,7 +59,7 @@ pub async fn dispatch_with_hooks(
     let Some(plugins_dir) = registry.plugins_dir_for(agent) else {
         let result = crate::tools::dispatch(registry, state, agent, call).await;
         return (
-            crate::tools::clamp_result(agent, call_id, result).await,
+            crate::tools::clamp_result(state, agent, call_id, result).await,
             Vec::new(),
         );
     };
@@ -131,7 +131,7 @@ pub async fn dispatch_with_hooks(
     }
 
     (
-        crate::tools::clamp_result(agent, call_id, result).await,
+        crate::tools::clamp_result(state, agent, call_id, result).await,
         records,
     )
 }

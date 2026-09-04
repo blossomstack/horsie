@@ -78,10 +78,12 @@ impl Toolbox for ReadImageToolbox {
             ));
         }
 
-        Ok(ToolOutcome::Result(ToolValue::with_artifacts(
-            Value::String(output.stdout),
-            vec![artifact],
-        )))
+        let original_output_bytes = output.original_output_bytes;
+        let spilled_output_bytes = output.spilled_output_bytes;
+        Ok(ToolOutcome::Result(
+            ToolValue::with_artifacts(Value::String(output.stdout), vec![artifact])
+                .with_output_metrics(original_output_bytes, spilled_output_bytes),
+        ))
     }
 }
 
@@ -119,6 +121,8 @@ mod tests {
             stderr: String::new(),
             exit_code: 0,
             artifacts: vec![Bytes(png())],
+            original_output_bytes: 0,
+            spilled_output_bytes: 0,
         })
         .observed_by(&probe);
         let (toolbox, _db) = toolbox(transport).await;
@@ -149,6 +153,8 @@ mod tests {
             stderr: String::new(),
             exit_code: 0,
             artifacts: vec![Bytes(b"%PDF-1.4\n".to_vec())],
+            original_output_bytes: 0,
+            spilled_output_bytes: 0,
         });
         let (toolbox, _db) = toolbox(transport).await;
 

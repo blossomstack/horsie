@@ -1,6 +1,6 @@
 use crate::client::{RuntimeCallError, RuntimeClient};
 use async_trait::async_trait;
-use horsie_agentcore::{Tool, ToolCallError, ToolSpec};
+use horsie_agentcore::{Tool, ToolCallError, ToolSpec, ToolValue};
 use horsie_models::runtime::{InspectPullRequestDiffInput, InspectPullRequestInput, ToolCall};
 use serde_json::{Value, json};
 
@@ -31,7 +31,7 @@ impl Tool for InspectPullRequestTool {
         }
     }
 
-    async fn execute(&self, input: Value, tool_call_id: &str) -> Result<Value, ToolCallError> {
+    async fn execute(&self, input: Value, tool_call_id: &str) -> Result<ToolValue, ToolCallError> {
         let reference = reference(&input)?;
         self.client
             .invoke(
@@ -72,7 +72,7 @@ impl Tool for InspectPullRequestDiffTool {
         }
     }
 
-    async fn execute(&self, input: Value, tool_call_id: &str) -> Result<Value, ToolCallError> {
+    async fn execute(&self, input: Value, tool_call_id: &str) -> Result<ToolValue, ToolCallError> {
         let reference = reference(&input)?;
         let path = input["path"].as_str().map(str::to_string);
         self.client

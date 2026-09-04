@@ -11,6 +11,7 @@ pub mod replace_lines;
 pub mod set_env;
 pub mod set_working_dir;
 pub(crate) mod snippet;
+pub(crate) mod spill;
 pub mod write_file;
 
 use crate::state::RuntimeState;
@@ -102,9 +103,14 @@ pub async fn dispatch(
 }
 
 /// Bound the final result after hooks have had a chance to rewrite it.
-pub(crate) async fn clamp_result(agent: &str, call_id: &str, result: ToolResult) -> ToolResult {
+pub(crate) async fn clamp_result(
+    state: &RuntimeState,
+    agent: &str,
+    call_id: &str,
+    result: ToolResult,
+) -> ToolResult {
     match result {
-        ToolResult::Ok(output) => ToolResult::Ok(clamp_output(agent, call_id, output).await),
+        ToolResult::Ok(output) => ToolResult::Ok(clamp_output(state, agent, call_id, output).await),
         ToolResult::Err(error) => ToolResult::Err(error),
     }
 }
@@ -113,35 +119,29 @@ pub(crate) async fn clamp_result(agent: &str, call_id: &str, result: ToolResult)
 /// (where the signal usually lives) and replacing the middle with a marker noting
 /// how much was dropped. Slices are nudged to UTF-8 char boundaries.
 async fn clamp_output(
+    state: &RuntimeState,
     agent: &str,
     call_id: &str,
     mut output: horsie_models::runtime::ToolOutput,
 ) -> horsie_models::runtime::ToolOutput {
-    let oversized = output.stdout.len().saturating_add(output.stderr.len()) > MAX_OUTPUT_BYTES;
-    if !oversized {
+    let original_bytes = output.stdout.len().saturating_add(output.stderr.len());
+    output.original_output_bytes = u64::try_from(original_bytes).unwrap_or(u64::MAX);
+    if original_bytes <= MAX_OUTPUT_BYTES {
         return output;
     }
-    let spill = {
-        let absolute = std::env::temp_dir()
-            .join("horsie-tool-output")
-            .join(format!("{}-{}.txt", safe_name(agent), safe_name(call_id)));
-        let body = format!(
-            "--- stdout ---\n{}\n--- stderr ---\n{}",
-            output.stdout, output.stderr
-        );
-        match absolute.parent() {
-            Some(parent)
-                if tokio::fs::create_dir_all(parent).await.is_ok()
-                    && tokio::fs::write(&absolute, body).await.is_ok() =>
-            {
-                Some(absolute.to_string_lossy().into_owned())
-            }
-            _ => None,
-        }
+    let body = format!(
+        "--- stdout ---\n{}\n--- stderr ---\n{}",
+        output.stdout, output.stderr
+    );
+    let spill = match &state.spills {
+        Some(store) => store.preserve(agent, call_id, body.as_bytes()).await,
+        None => None,
     };
+    output.spilled_output_bytes = spill.as_ref().map_or(0, |(_, bytes)| *bytes);
+    let spill_path = spill.as_ref().map(|(path, _)| path.as_str());
     let (stdout_budget, stderr_budget) = stream_budgets(output.stdout.len(), output.stderr.len());
-    output.stdout = truncate_stream(output.stdout, stdout_budget, spill.as_deref());
-    output.stderr = truncate_stream(output.stderr, stderr_budget, spill.as_deref());
+    output.stdout = truncate_stream(output.stdout, stdout_budget, spill_path);
+    output.stderr = truncate_stream(output.stderr, stderr_budget, spill_path);
     output
 }
 
@@ -257,16 +257,17 @@ mod tests {
             }),
         )
         .await;
-        let result = clamp_result("a", "call-1", result).await;
+        let state = RuntimeState::new();
+        let spill_root = state.spills.as_ref().unwrap().root.clone();
+        let result = clamp_result(&state, "a", "call-1", result).await;
         match result {
             ToolResult::Ok(o) => {
                 assert!(o.stdout.len() < MAX_OUTPUT_BYTES + 200, "not truncated");
                 assert!(o.stdout.contains("bytes truncated"));
-                assert!(o.stdout.contains("horsie-tool-output/a-call-1.txt"));
-                let saved = std::fs::read_to_string(
-                    std::env::temp_dir().join("horsie-tool-output/a-call-1.txt"),
-                )
-                .unwrap();
+                assert!(o.stdout.contains("/a/call-1.txt"));
+                assert_eq!(o.original_output_bytes, 80_000);
+                assert!(o.spilled_output_bytes > 80_000);
+                let saved = std::fs::read_to_string(spill_root.join("a/call-1.txt")).unwrap();
                 assert!(saved.len() > 80_000);
                 assert!(saved.contains("--- stdout ---"));
             }
