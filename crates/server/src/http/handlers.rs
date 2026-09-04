@@ -373,6 +373,21 @@ fn to_wire_stats(
         subtree_usage: to_wire_usage(stats.subtree_usage),
         context_tokens: stats.context_tokens,
         context_window: model.and_then(|m| windows.get(m).copied()),
+        efficiency: to_wire_efficiency(stats.efficiency),
+    }
+}
+
+fn to_wire_efficiency(
+    stats: crate::agent_loop::AgentEfficiencyStats,
+) -> horsie_models::session::EfficiencyStats {
+    horsie_models::session::EfficiencyStats {
+        provider_calls: stats.provider_calls,
+        tool_calls: stats.tool_calls,
+        failed_tool_calls: stats.failed_tool_calls,
+        tool_result_bytes: stats.tool_result_bytes,
+        completed_runs: stats.completed_runs,
+        aborted_runs: stats.aborted_runs,
+        compactions: stats.compactions,
     }
 }
 
@@ -444,6 +459,7 @@ pub async fn get_agent(
         last_turn_usage: detail.state.last_turn_usage,
         context_tokens: detail.state.context_tokens,
         context_window,
+        efficiency: to_wire_efficiency(detail.state.efficiency),
         as_of_seq: detail.state.as_of_seq,
     };
     Ok(Json(GetAgentResponse { agent }))

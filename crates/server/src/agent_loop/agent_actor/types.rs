@@ -526,6 +526,7 @@ pub struct AgentUsageSnapshot {
     pub usage_total: UsageTotal,
     pub last_turn_usage: Option<Usage>,
     pub context_tokens: u32,
+    pub efficiency: AgentEfficiencyStats,
 }
 
 /// One agent's current values: the task list and its usage/context numbers.
@@ -537,6 +538,7 @@ pub struct AgentStateView {
     pub usage_total: UsageTotal,
     pub last_turn_usage: Option<Usage>,
     pub context_tokens: u32,
+    pub efficiency: AgentEfficiencyStats,
     /// The log position these values reflect, so a consumer holding a fold can
     /// tell whether this read is ahead of it or behind.
     pub as_of_seq: u64,

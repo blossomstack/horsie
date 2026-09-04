@@ -601,6 +601,7 @@ impl SessionActor {
                         usage_total: main_usage_total,
                         last_turn_usage: snapshot.last_turn_usage,
                         context_tokens: snapshot.context_tokens,
+                        efficiency: snapshot.efficiency,
                     },
                 }),
         }
@@ -631,6 +632,7 @@ mod tests {
         let s = fold(vec![SessionDomainEvent::UsageRecorded {
             at_ms: 0,
             context_tokens: 0,
+            efficiency: crate::agent_loop::AgentEfficiencyStats::default(),
             agent_id: MAIN_AGENT_ID.to_string(),
             usage_total: UsageTotal {
                 input_tokens: 10,

@@ -46,6 +46,15 @@ function agent(overrides: Partial<AgentDocument> = {}): AgentDocument {
     tasks: [],
     usage: { inputTokens: 0, outputTokens: 0 },
     contextTokens: 0,
+    efficiency: {
+            providerCalls: 0,
+            toolCalls: 0,
+            failedToolCalls: 0,
+            toolResultBytes: 0,
+            completedRuns: 0,
+            abortedRuns: 0,
+            compactions: 0,
+          },
     asOfSeq: 0,
     ...overrides,
   };

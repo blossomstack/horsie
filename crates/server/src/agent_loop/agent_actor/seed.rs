@@ -60,6 +60,7 @@ impl AgentState {
             turn_in_flight: false,
             usage_total: UsageTotal::default(),
             last_turn_usage: None,
+            efficiency: AgentEfficiencyStats::default(),
         }
     }
 }

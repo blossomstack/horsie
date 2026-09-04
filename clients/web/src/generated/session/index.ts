@@ -5,6 +5,7 @@ export * from './agentSettings';
 export * from './sessionSummary';
 export * from './subSessionView';
 export * from './agentStats';
+export * from './efficiencyStats';
 export * from './answerAsksRequest';
 export * from './askAnswerInput';
 export * from './sessionDetail';

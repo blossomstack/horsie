@@ -2,6 +2,7 @@
 import { TaskItem } from '../agent';
 import { Usage } from '../agent';
 import { McpServerSelection } from '../mcp';
+import { EfficiencyStats } from '../session';
 import { UsageView } from '../session';
 /**
  * One agent's current values: what it is, what became of it, what it runs
@@ -105,6 +106,10 @@ export interface AgentDocument {
    * layer from model config — this one field is not agent state.
    */
   contextWindow?: number;
+  /**
+   * Operational counters for diagnosing expensive runs.
+   */
+  efficiency: EfficiencyStats;
   /**
    * The log position this document reflects.
    *

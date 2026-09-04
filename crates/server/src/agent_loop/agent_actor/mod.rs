@@ -40,7 +40,7 @@ mod timers;
 mod types;
 
 pub use reads::{ReadOutcome, ReplayWindow};
-pub use state::{AgentState, UsageTotal, hook_entry, hook_entry_id};
+pub use state::{AgentEfficiencyStats, AgentState, UsageTotal, hook_entry, hook_entry_id};
 pub use types::*;
 
 use compaction::{COMPACT_AT_PERCENT, COMPACT_RETAIN_PERCENT, Compaction};
@@ -271,6 +271,7 @@ impl EventSourcedActor for AgentActor {
     /// fails to compile *here*, where it has to be classified, rather than
     /// silently reaching the wrong fold.
     fn apply_event(mut state: AgentState, event: AgentDomainEvent) -> AgentState {
+        state.efficiency.observe(&event);
         match event {
             e @ AgentDomainEvent::Seeded { .. } => Seeding::apply(&mut state, e),
             e @ (AgentDomainEvent::InputMessage { .. }
