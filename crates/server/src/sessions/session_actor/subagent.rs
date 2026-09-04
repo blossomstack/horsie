@@ -16,7 +16,7 @@ use super::{
     AgentAction, AgentKey, AgentPlan, CommandEffect, SessionActor, SessionCommand,
     SessionDomainEvent, SessionState, SubAgentCommand, TurnEnd,
 };
-use crate::agent_loop::QueueCommand as AgentQueueCommand;
+use crate::agent_loop::IncomingCommand as AgentIncomingCommand;
 use crate::agent_loop::{AgentCommand, Incoming};
 use crate::sessions::addressing::SessionInbox;
 use crate::sessions::run_forest::{INTERRUPTED_ERROR, MAX_DEPTH};
@@ -119,7 +119,7 @@ impl SubAgents {
                 // flight. Queued rather than run directly so a subagent has one
                 // way in, whatever is addressed to it.
                 let _ = agent
-                    .tell(AgentCommand::Queue(AgentQueueCommand::Enqueue {
+                    .tell(AgentCommand::Incoming(AgentIncomingCommand::Receive {
                         item: Incoming::User {
                             id: format!("task:{id}"),
                             text: task,
@@ -770,7 +770,13 @@ mod tests {
             .expect("a working subagent is stoppable");
 
         // Owed and delivered: a stopped child still owes its parent an answer.
-        wait_for_tree(&journal, id, |t| t.sub(sub).is_some_and(|r| r.notified)).await;
+        // Wait for both durable facts; the notification can be observed before
+        // the status projection catches up on a loaded journal backend.
+        wait_for_tree(&journal, id, |t| {
+            t.sub(sub)
+                .is_some_and(|r| r.status == SubAgentStatus::Failed && r.notified)
+        })
+        .await;
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
         let rec = state.forest.sub(sub).unwrap();
         assert_eq!(rec.status, SubAgentStatus::Failed);
@@ -1169,7 +1175,7 @@ mod tests {
         // forest, nothing delivered to main. Waited out via its own log (the
         // park is journaled there), so the assertion observes a real park
         // rather than a race it won.
-        wait_for_agent(&journal, parent, |s| s.parked).await;
+        wait_for_agent(&journal, parent, |s| s.parked()).await;
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
         let rec = state.forest.sub(parent).unwrap();
         assert_eq!(

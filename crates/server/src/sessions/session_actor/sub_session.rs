@@ -21,7 +21,7 @@ use super::{
 };
 use crate::agent_loop::{AgentCommand, AgentState, Incoming};
 use crate::agent_loop::{
-    QueueCommand as AgentQueueCommand, ReadCommand as AgentReadCommand,
+    IncomingCommand as AgentIncomingCommand, QueryCommand as AgentQueryCommand,
     SeedCommand as AgentSeedCommand,
 };
 use crate::sessions::addressing::SessionInbox;
@@ -445,7 +445,7 @@ impl SessionActor {
     ) -> Option<u64> {
         let agent = self.sub_session_source(state, ctx, parent)?;
         agent
-            .ask(|reply| AgentCommand::Read(AgentReadCommand::LogHead { reply }))
+            .ask(|reply| AgentCommand::Query(AgentQueryCommand::LogHead { reply }))
             .await
             .ok()
     }
@@ -506,7 +506,7 @@ impl SessionActor {
         };
         tokio::spawn(async move {
             let _ = source
-                .tell(AgentCommand::Queue(AgentQueueCommand::Enqueue {
+                .tell(AgentCommand::Incoming(AgentIncomingCommand::Receive {
                     item: Incoming::SubSession {
                         id: format!("sub_session-summarise:{id}"),
                         sub_session: id,
@@ -1141,6 +1141,10 @@ mod tests {
         // The source's turn is held open too, so nothing about this test can
         // pass by stopping the main agent instead.
         send(&session, "the original question").await;
+        wait_for_state(&journal, id, "the source is working", |s| {
+            s.status() == crate::sessions::spec::SessionStatus::Running
+        })
+        .await;
 
         let sub_session = branch_via(&session, None, "/fork try the other migration")
             .await
@@ -1290,20 +1294,26 @@ mod tests {
         );
     }
 
-    /// The summary is the source's **own turn**, not a detached read of it.
-    ///
-    /// This is the whole point of the redesign. Run out of band, the
-    /// summariser left the source `Idle` and answering, so a reply sent while
-    /// it ran landed after the `Branched` marker in the source's transcript
-    /// and inside the sub session's summary — the two described different
-    /// sessions. Queued, the source cannot append while the summary is taken,
-    /// and the proof that it is a turn is that the source's own log carries
-    /// one.
+    /// A summary is a fenced foreground step on the source, not a detached
+    /// read. Its durable marker prevents the source from changing underneath
+    /// the history prefix being summarised.
     #[tokio::test]
-    async fn summarising_for_a_sub_session_is_a_turn_on_the_session_it_branches() {
+    async fn summarising_for_a_sub_session_is_a_source_foreground_step() {
         let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
         send(&session, "the original question").await;
-        let before = main_turns_begun(&session).await;
+        let before = crate::sessions::events::fold_agent_state(&journal, id)
+            .await
+            .history()
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    &entry.record,
+                    crate::agent_loop::AgentDomainEvent::StepStarted {
+                        kind: crate::agent_loop::StepKind::SeedSummary { .. }
+                    }
+                )
+            })
+            .count();
 
         let sub_session = branch_via(&session, None, "/summary-n-fork now do the other thing")
             .await
@@ -1316,18 +1326,20 @@ mod tests {
         })
         .await;
 
-        assert!(
-            main_turns_begun(&session).await > before,
-            "the source ran a turn to produce the summary; its log holds only \
-             {before} turn(s), which is what an out-of-band summariser leaves \
-             behind:\n{}",
-            transcript(&session, None).await
-        );
-    }
-
-    /// How many turns the session's main agent has begun, from its own log.
-    async fn main_turns_begun(session: &SessionRef) -> usize {
-        turns_begun(&agent_history(session, None).await)
+        let source = crate::sessions::events::fold_agent_state(&journal, id).await;
+        let after = source
+            .history()
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    &entry.record,
+                    crate::agent_loop::AgentDomainEvent::StepStarted {
+                        kind: crate::agent_loop::StepKind::SeedSummary { .. }
+                    }
+                )
+            })
+            .count();
+        assert_eq!(after, before + 1, "one summary step must be durable");
     }
 
     /// The branch point is visible where it happened, so scrolling the source

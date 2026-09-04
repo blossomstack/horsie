@@ -14,7 +14,7 @@ use super::{
 };
 use crate::agent_loop::AgentCommand;
 use crate::agent_loop::AgentUsageSnapshot;
-use crate::agent_loop::ReadCommand as AgentReadCommand;
+use crate::agent_loop::QueryCommand as AgentQueryCommand;
 use crate::sessions::addressing::SessionInbox;
 use crate::sessions::run_forest::{RunId, SubAgentRun, SubAgentStatus, SubSessionRun, WorkflowRun};
 use crate::sessions::spec::SessionStatus;
@@ -44,7 +44,9 @@ impl Reads {
                 let agent = actor.resolve_agent(state, ctx, agent_id.as_deref());
                 let out = match agent {
                     Some((_, agent)) => agent
-                        .ask(|reply| AgentCommand::Read(AgentReadCommand::ReadLog { after, reply }))
+                        .ask(|reply| {
+                            AgentCommand::Query(AgentQueryCommand::ReadLog { after, reply })
+                        })
                         .await
                         .ok(),
                     None => None,
@@ -63,7 +65,7 @@ impl Reads {
                 let page = match agent {
                     Some((_, agent)) => agent
                         .ask(|reply| {
-                            AgentCommand::Read(AgentReadCommand::PageLog {
+                            AgentCommand::Query(AgentQueryCommand::PageLog {
                                 anchor,
                                 max,
                                 filter,
@@ -88,7 +90,7 @@ impl Reads {
                 let hits = match agent {
                     Some((_, agent)) => agent
                         .ask(|reply| {
-                            AgentCommand::Read(AgentReadCommand::SearchLog {
+                            AgentCommand::Query(AgentQueryCommand::SearchLog {
                                 needle,
                                 max,
                                 filter,
@@ -111,7 +113,7 @@ impl Reads {
                 let seq = match agent {
                     Some((_, agent)) => agent
                         .ask(|reply| {
-                            AgentCommand::Read(AgentReadCommand::SeqOfId {
+                            AgentCommand::Query(AgentQueryCommand::SeqOfId {
                                 id: entry_id,
                                 reply,
                             })
@@ -567,7 +569,7 @@ impl SessionActor {
                 (None, None) => None,
             },
             state: agent
-                .ask(|reply| AgentCommand::Read(AgentReadCommand::GetState { reply }))
+                .ask(|reply| AgentCommand::Query(AgentQueryCommand::GetState { reply }))
                 .await
                 .ok()?,
         })
@@ -578,7 +580,7 @@ impl SessionActor {
     pub(super) async fn read_usage(&self, state: &SessionState) -> SessionUsageStats {
         let snapshot = match self.agent() {
             Some(agent) => agent
-                .ask(|reply| AgentCommand::Read(AgentReadCommand::GetUsage { reply }))
+                .ask(|reply| AgentCommand::Query(AgentQueryCommand::GetUsage { reply }))
                 .await
                 .unwrap_or_default(),
             None => AgentUsageSnapshot::default(),

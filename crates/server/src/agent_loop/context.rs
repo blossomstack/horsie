@@ -1,5 +1,5 @@
-use crate::agent_loop::agent_actor::UsageTotal;
-use crate::agent_loop::mcp_toolbox::CompositeToolbox;
+use crate::agent_loop::shared::mcp_toolbox::CompositeToolbox;
+use crate::agent_loop::state::UsageTotal;
 use async_trait::async_trait;
 use horsie_agentcore::{LlmProvider, ToolCallError, ToolOutcome, ToolSpec, Toolbox, ToolboxImpl};
 use horsie_runtime_host::{RuntimeClient, add_runtime_tools};
@@ -69,48 +69,48 @@ pub struct AskedQuestion {
 /// its transcript is the session's, and the agent's own for anything else.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentOutcome {
-    /// The agent started a turn off its own queue.
+    /// The agent sealed pending history into a new run.
     ///
-    /// Not a terminal outcome, and the one report that flows *before* the work
-    /// rather than after it. It exists because the agent, not its owner,
-    /// decides when its queue becomes a turn — so the owner can no longer
-    /// learn that a turn began by being the thing that began it.
-    Started { agent: Uuid },
+    /// Not terminal. Delivered only after the first agent-step marker is
+    /// durable; `run_id` is that marker's history sequence.
+    Started { agent: Uuid, run_id: u64 },
     /// A turn the process died inside, found at recovery and reported by the
     /// only thing that can tell: the agent whose turn it was.
     ///
-    /// Delivered from `on_recovery_complete`, which the runtime runs before the
-    /// first live command — so an agent physically cannot begin a new turn
-    /// before this has been sent, and an owner reading it never has to work out
-    /// *which* turn it means. That ordering is the whole mechanism; there is no
-    /// fence and no turn number anywhere.
-    Interrupted { agent: Uuid },
+    /// Carries the first agent-step marker sequence so recovery may redeliver
+    /// the durable boundary and the owner can ignore a duplicate.
+    Interrupted { agent: Uuid, run_id: u64 },
     /// The agent produced its output (structured, or its final text).
-    Concluded { agent: Uuid, output: Value },
+    Concluded {
+        agent: Uuid,
+        run_id: u64,
+        output: Value,
+    },
     /// The agent paused to ask the user. A turn may ask more than once — each
     /// question is its own tool call, and they are answered together, since the
     /// run cannot resume while any of them is still missing a result.
     Asked {
         agent: Uuid,
+        run_id: u64,
         asks: Vec<AskedQuestion>,
     },
     /// The agent parked itself awaiting its timers.
-    Parked { agent: Uuid },
+    Parked { agent: Uuid, run_id: u64 },
     /// The agent run failed. `recoverable` is about the *run* — whether trying
     /// it again could work — while `terminal` is about the agent's owner: its
     /// sandbox is gone and no later message can bring it back. A provider `401`
     /// is neither recoverable nor terminal; fix the key and the next turn runs.
     Failed {
         agent: Uuid,
+        run_id: u64,
         error: String,
         recoverable: bool,
         terminal: bool,
     },
-    /// A run completed successfully, carrying this agent's freshly-updated
-    /// cumulative usage. Delivered alongside `Concluded`/`Asked` (never
-    /// `Failed`/`Parked`, which have no completed run's usage to report), so
-    /// a parent hosting multiple agents can maintain its own durable
-    /// session-level usage total without waking an idle agent to ask for it.
+    /// A provider-backed step completed, carrying this agent's freshly updated
+    /// cumulative usage. Delivered after that step's event is durable, so a
+    /// parent hosting several agents can update its session-level total without
+    /// waiting for the whole run loop to conclude.
     UsageRecorded {
         agent: Uuid,
         usage_total: UsageTotal,
@@ -145,6 +145,53 @@ pub trait AgentOutcomeSink: Send + Sync {
     async fn deliver(&self, outcome: AgentOutcome);
 }
 
+/// Stable discovery captured by one-time initialization and reused to rebuild
+/// live toolboxes without scanning the workspace again.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextManifest {
+    pub workspace_names: Vec<String>,
+    pub plugin_agents: Vec<FrozenPluginAgent>,
+}
+
+/// The serializable form of one plugin-declared agent. The runtime scan's
+/// parsed catalogue is process-local; these fields are the durable meaning
+/// needed to reconstruct the same catalogue after reload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrozenPluginAgent {
+    pub plugin: String,
+    pub name: String,
+    pub description: String,
+    pub model: Option<String>,
+    pub tools: Vec<String>,
+    pub prompt: String,
+}
+
+impl FrozenPluginAgent {
+    pub(crate) fn from_catalog(agent: &crate::agent_loop::CatalogAgent) -> Self {
+        Self {
+            plugin: agent.plugin.clone(),
+            name: agent.def.name.clone(),
+            description: agent.def.description.clone(),
+            model: agent.def.model.clone(),
+            tools: agent.def.tools.clone(),
+            prompt: agent.def.prompt.clone(),
+        }
+    }
+
+    pub(crate) fn into_catalog(self) -> crate::agent_loop::CatalogAgent {
+        crate::agent_loop::CatalogAgent {
+            plugin: self.plugin,
+            def: horsie_support::plugin::agents::PluginAgentDef {
+                name: self.name,
+                description: self.description,
+                model: self.model,
+                tools: self.tools,
+                prompt: self.prompt,
+            },
+        }
+    }
+}
+
 /// The per-run contexts an agent run executes within — the provider it calls,
 /// the toolbox it acts through, and the system prompt that frames it. Produced
 /// fresh by [`ContextProvider::provide`] at the top of every run. The timer /
@@ -152,6 +199,9 @@ pub trait AgentOutcomeSink: Send + Sync {
 /// [`AgentActor`](crate::agent_loop::AgentActor) itself, not here.
 pub struct Contexts {
     pub provider: Arc<dyn LlmProvider>,
+    /// Stable discovery written with `AgentInitialized` and handed back to
+    /// reconnect so rebuilding live clients never requires another scan.
+    pub manifest: ContextManifest,
     /// The agent's tools, already composed but **not** narrowed: the selection
     /// is applied once, outermost, by the actor that stacks the last layers on.
     pub toolbox: Arc<dyn Toolbox>,
@@ -189,6 +239,18 @@ pub struct Contexts {
 /// turn begins on a user message; the provider knows whether this agent is a
 /// session or a subagent, and so which event that start actually is.
 #[derive(Debug, Clone)]
+pub struct StopHookRequest {
+    pub last_assistant_message: Option<String>,
+    pub active: bool,
+}
+
+#[derive(Debug)]
+pub struct StopHookResult {
+    pub records: Vec<horsie_models::hooks::HookRecord>,
+    pub outcome: crate::agent_loop::StopHookOutcome,
+}
+
+#[derive(Debug, Clone)]
 pub struct StartTurn {
     /// `Some(source)` when this agent load has not yet fired its start hook.
     /// `Startup` for a fresh agent, `Resume` for one recovered from a journal —
@@ -210,7 +272,14 @@ pub struct StartTurn {
 /// without touching any runtime.
 #[async_trait]
 pub trait ContextProvider: Send + Sync {
+    /// One-time semantic setup. This may scan the workspace and compose the
+    /// immutable initial prompt.
     async fn provide(&self) -> Result<Contexts, ContextError>;
+
+    /// Restore disposable runtime and MCP clients for an initialized agent.
+    /// Implementations must use `manifest` rather than scanning the workspace
+    /// or regenerating prompt bytes.
+    async fn reconnect(&self, manifest: &ContextManifest) -> Result<Contexts, ContextError>;
 
     /// Whether this provider has hooks to fire before a run starts.
     ///
@@ -237,6 +306,16 @@ pub trait ContextProvider: Send + Sync {
     async fn start_hooks(&self, turn: StartTurn) -> Result<TurnPreparation, ContextError> {
         let _ = turn;
         Ok(TurnPreparation::default())
+    }
+
+    /// Run the Stop/SubagentStop hook at a settled boundary. The actor applies
+    /// a timeout around this call and journals the returned records.
+    async fn stop_hook(&self, request: StopHookRequest) -> StopHookResult {
+        let _ = request;
+        StopHookResult {
+            records: Vec::new(),
+            outcome: crate::agent_loop::StopHookOutcome::Allow,
+        }
     }
 
     /// Fire one of the compaction hooks and hand back what they did.
@@ -339,8 +418,19 @@ pub struct FixedContextProvider {
 #[async_trait]
 impl ContextProvider for FixedContextProvider {
     async fn provide(&self) -> Result<Contexts, ContextError> {
+        self.contexts(ContextManifest::default())
+    }
+
+    async fn reconnect(&self, manifest: &ContextManifest) -> Result<Contexts, ContextError> {
+        self.contexts(manifest.clone())
+    }
+}
+
+impl FixedContextProvider {
+    fn contexts(&self, manifest: ContextManifest) -> Result<Contexts, ContextError> {
         Ok(Contexts {
             provider: self.provider.clone(),
+            manifest,
             toolbox: self.toolbox.clone(),
             tool_narrowing: None,
             system_prompt: None,
@@ -483,7 +573,8 @@ impl AgentToolbox {
     fn resolve_workspace(&self, requested: Option<&str>) -> Result<String, ToolCallError> {
         match requested {
             Some(name) => {
-                if self.workspace_names.iter().any(|n| n == name) {
+                if self.workspace_names.is_empty() || self.workspace_names.iter().any(|n| n == name)
+                {
                     Ok(name.to_string())
                 } else {
                     Err(ToolCallError::InvalidInput(format!(
@@ -551,7 +642,7 @@ impl Toolbox for AgentToolbox {
             // Shared plugin library: addressed by the reserved `horsie_shared`
             // name, resolved against the shared skill set (not a job
             // workspace).
-            if requested_ws == Some(crate::agent_loop::workspace::SHARED_WORKSPACE) {
+            if requested_ws == Some(crate::agent_loop::shared::workspace::SHARED_WORKSPACE) {
                 if !self.use_plugins {
                     return Err(ToolCallError::InvalidInput(
                         "the shared plugin library 'horsie_shared' is not enabled for this agent"
@@ -559,7 +650,7 @@ impl Toolbox for AgentToolbox {
                     ));
                 }
                 let (_, shared) =
-                    crate::agent_loop::workspace::scan(&self.runtime_client, None).await;
+                    crate::agent_loop::shared::workspace::scan(&self.runtime_client, None).await;
                 return match shared.skills.get(requested) {
                     Some(skill) => Ok(ToolOutcome::result(Value::String(skill_body(skill)))),
                     None => Err(ToolCallError::InvalidInput(format!(
@@ -569,9 +660,11 @@ impl Toolbox for AgentToolbox {
                 };
             }
             let ws_name = self.resolve_workspace(requested_ws)?;
-            let (ws, _) =
-                crate::agent_loop::workspace::scan(&self.runtime_client, Some(ws_name.clone()))
-                    .await;
+            let (ws, _) = crate::agent_loop::shared::workspace::scan(
+                &self.runtime_client,
+                Some(ws_name.clone()),
+            )
+            .await;
             let Some(info) = ws.find(&ws_name) else {
                 return Err(ToolCallError::InvalidInput(format!(
                     "workspace '{ws_name}' is not available"
@@ -591,7 +684,7 @@ impl Toolbox for AgentToolbox {
                 .and_then(Value::as_str)
                 .map(str::to_string);
             // Shared-only view.
-            if filter.as_deref() == Some(crate::agent_loop::workspace::SHARED_WORKSPACE) {
+            if filter.as_deref() == Some(crate::agent_loop::shared::workspace::SHARED_WORKSPACE) {
                 if !self.use_plugins {
                     return Err(ToolCallError::InvalidInput(
                         "the shared plugin library 'horsie_shared' is not enabled for this agent"
@@ -599,22 +692,23 @@ impl Toolbox for AgentToolbox {
                     ));
                 }
                 let (_, shared) =
-                    crate::agent_loop::workspace::scan(&self.runtime_client, None).await;
+                    crate::agent_loop::shared::workspace::scan(&self.runtime_client, None).await;
                 return Ok(ToolOutcome::result(Value::String(
-                    crate::agent_loop::workspace::shared_inspect(
+                    crate::agent_loop::shared::workspace::shared_inspect(
                         &shared.skills,
                         shared.root.as_deref(),
                     ),
                 )));
             }
             let (ws, shared) =
-                crate::agent_loop::workspace::scan(&self.runtime_client, filter.clone()).await;
-            let mut out = crate::agent_loop::workspace::inspect_result(&ws);
+                crate::agent_loop::shared::workspace::scan(&self.runtime_client, filter.clone())
+                    .await;
+            let mut out = crate::agent_loop::shared::workspace::inspect_result(&ws);
             // Append the shared library when listing everything for an
             // opted-in agent.
             if self.use_plugins && filter.is_none() {
                 out.push_str("\n\n");
-                out.push_str(&crate::agent_loop::workspace::shared_inspect(
+                out.push_str(&crate::agent_loop::shared::workspace::shared_inspect(
                     &shared.skills,
                     shared.root.as_deref(),
                 ));
@@ -630,7 +724,7 @@ impl Toolbox for AgentToolbox {
 /// absolute because that is the only addressing those tools take — and because
 /// a shared skill's directory is not under any workspace, so nothing else
 /// would resolve it.
-fn skill_body(skill: &crate::agent_loop::workspace::Skill) -> String {
+fn skill_body(skill: &crate::agent_loop::shared::workspace::Skill) -> String {
     match &skill.dir {
         Some(dir) => format!(
             "{}\n\n[resources] This skill's files are in {}/. \

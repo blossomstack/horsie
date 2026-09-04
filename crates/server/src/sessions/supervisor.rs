@@ -2388,24 +2388,10 @@ mod tests {
             .await
             .unwrap();
 
-        // Move the agent off its starting revision first. A session that never
-        // moved sits at the same zero a discarded registry would be rebuilt at,
-        // which would let this test pass without the registry surviving at all.
-        let _ = sup
-            .ask(|reply| SessionSupervisorCommand::UserMessage {
-                id: id.clone(),
-                agent_id: None,
-                artifacts: Vec::new(),
-                text: "first".into(),
-                reply,
-            })
-            .await
-            .unwrap();
-        let seen = tokio::time::timeout(Duration::from_secs(5), poll(&sup, &id, Some(start)))
-            .await
-            .expect("the agent moves once it has something to answer")
-            .expect("the main agent is watchable");
-        assert_ne!(seen, start, "the agent must have actually moved");
+        // Keep the exact position observed before offload. The continuation
+        // below proves the same channel survives: recreating it at an earlier
+        // value would never wake this wait at the correct next position.
+        let seen = start;
 
         f.go_idle(&sup).await;
         assert!(

@@ -1,0 +1,285 @@
+//! What has happened to an agent: the events, and nothing else.
+//!
+//! Every durable change is one of these records, journaled before it is
+//! believed and folded through [`RunLoop::apply`](crate::agent_loop::run_loop::RunLoop::apply).
+//! This is a durability contract. A variant that fails to deserialize takes
+//! down recovery for every session that ever journaled one, so fields are
+//! added with `#[serde(default)]` and never renamed or repurposed.
+
+use crate::agent_loop::AgentState;
+use horsie_agentcore::{LifecycleEvent, Message, Usage};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SystemPromptSource {
+    Configured,
+    InitialContext,
+}
+
+/// A durable foreground-step boundary. The record's history sequence is its
+/// identity and callback fence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StepKind {
+    /// First semantic setup: provision, scan, and freeze prompt meaning.
+    Initialize,
+    /// Rebuild live clients from the initialization manifest.
+    Connect,
+    /// Run pre-turn hooks while accepted input remains pending.
+    PrepareInput,
+    /// One provider request and its resulting assistant message.
+    Provider,
+    /// Decide whether a settled provider result may end the run.
+    StopHook,
+    /// Summarise old history behind a compaction boundary.
+    Compaction,
+    /// Summarise a branch point for one or more sub sessions.
+    SeedSummary { request_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StepFailure {
+    Interrupted,
+    Provider(String),
+    TimedOut,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StopHookOutcome {
+    Allow,
+    Continue { message: String },
+    Failed { reason: String },
+    Interrupted,
+    TimedOut,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RunEnd {
+    Complete {
+        output: serde_json::Value,
+    },
+    AwaitingInput {
+        asks: Vec<crate::agent_loop::AskedQuestion>,
+    },
+    Parked,
+    Cancelled,
+    Interrupted,
+    Failed {
+        error: String,
+        recoverable: bool,
+        terminal: bool,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentHistoryEntry {
+    pub seq: u64,
+    pub record: AgentDomainEvent,
+}
+
+/// Coarse events that alter persisted agent state. Streaming observation events
+/// (text/tool-input deltas) are emitted to the event sink but never journaled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AgentDomainEvent {
+    SystemPromptRecorded {
+        source: SystemPromptSource,
+        content: String,
+    },
+    AgentInitialized {
+        manifest: crate::agent_loop::ContextManifest,
+    },
+    ConnectionCompleted,
+    /// Its assigned history sequence is both step identity and callback fence.
+    StepStarted {
+        kind: StepKind,
+    },
+    StepFailed {
+        reason: StepFailure,
+    },
+    StopHookCompleted {
+        outcome: StopHookOutcome,
+    },
+    RunEnded {
+        reason: RunEnd,
+        at_ms: u64,
+    },
+    /// This agent adopted another session's carried conversation history.
+    /// Only ever the first event on the target agent. A summary seed follows as
+    /// an ordinary `InputMessage`, so every transcript-visible message exists
+    /// directly in history.
+    Seeded {
+        state: Box<AgentState>,
+    },
+    InputMessage {
+        message: Message,
+    },
+    /// Incoming records that no longer await work. Normal provider input names
+    /// them in `TurnBegan`; special work and context failures use this record.
+    Consumed {
+        ids: Vec<String>,
+        at_ms: u64,
+    },
+    /// One provider step completed. Usage is part of the same durable fact as
+    /// the assistant message, so no later failure can lose what this call
+    /// spent.
+    MessageComplete {
+        message: Message,
+        usage: Usage,
+    },
+    /// An assistant message the run never got to finish, rebuilt from the text
+    /// it had already streamed when the turn was cancelled.
+    ///
+    /// A separate variant from `MessageComplete` because it is a different
+    /// claim: the provider never said this message was done, and one day the
+    /// history sent back may want to say so. It folds into the same log entry,
+    /// because what was generated happened.
+    MessageAborted {
+        message: Message,
+    },
+    ToolComplete {
+        tool_call_id: String,
+        output: String,
+        is_error: bool,
+        /// What the tool produced beyond text — already-stored references.
+        /// Journaled so the prompt the fold rebuilds carries them: the model's
+        /// next call within the same turn must be able to see a screenshot a
+        /// tool just took, and the fold is now the only source of history.
+        #[serde(default)]
+        artifacts: Vec<horsie_models::agent::ArtifactRef>,
+        /// When the tool finished. Journaled rather than re-read at fold time:
+        /// this variant rebuilds its `Message` in `apply_event`, so a recovered
+        /// transcript would otherwise stamp every past tool result with the
+        /// moment of recovery.
+        at_ms: u64,
+    },
+    /// A plugin hook ran against a tool call this agent made. Journaled beside
+    /// the call's own `ToolComplete` because a hook changes what the agent did,
+    /// and that must be auditable rather than invisible.
+    HookRan {
+        record: horsie_models::hooks::HookRecord,
+        /// How many records were already recorded against this same tool call.
+        /// Journaled rather than recomputed at fold time so the id is a fact of
+        /// the log: the live broadcast derives the entry from the event alone
+        /// and would otherwise have to guess, giving the stream different
+        /// cursors than `/history` for a call with more than one hook.
+        seq: usize,
+        at_ms: u64,
+    },
+    /// A run loop reached its normal boundary. Provider usage was already
+    /// banked by each `MessageComplete`; this event carries no bill.
+    TurnCompleted {
+        iterations: u32,
+        at_ms: u64,
+    },
+    /// A run loop ended badly. Completed provider steps already banked their
+    /// own usage, so cancellation or failure cannot lose or double-count it.
+    TurnAborted {
+        at_ms: u64,
+    },
+    TurnCancelled {
+        at_ms: u64,
+    },
+    /// A timer was armed.
+    TimerArmed {
+        record: crate::agent_loop::components::timers::domain::TimerRecord,
+        at_ms: u64,
+    },
+    /// One or more timers were cancelled.
+    TimerCancelled {
+        ids: Vec<crate::agent_loop::components::timers::domain::TimerId>,
+        at_ms: u64,
+    },
+    /// A timer fired. `next_fire_at_unix_ms` carries the re-armed fire time
+    /// for a recurring timer (so the fold stays pure); `None` removes a
+    /// one-shot.
+    TimerFired {
+        id: crate::agent_loop::components::timers::domain::TimerId,
+        next_fire_at_unix_ms: Option<u64>,
+        at_ms: u64,
+    },
+    /// The agent parked, awaiting a timer or a subagent still working.
+    Parked {
+        at_ms: u64,
+    },
+    /// A turn ended without the result this agent owed, and nothing would have
+    /// woken it. Journaled so the budget behind the nudge survives a restart —
+    /// otherwise a crash loop hands the model a fresh nudge for ever.
+    Nudged {
+        at_ms: u64,
+    },
+    /// The task list changed (create/insert/update_status). Carries the full
+    /// resulting state, not a delta — mirrors `MessageComplete`/`ToolComplete`,
+    /// so replay never needs to re-derive or re-validate a past mutation.
+    TaskListChanged {
+        snapshot: crate::agent_loop::components::task_list::domain::TaskListState,
+        at_ms: u64,
+    },
+    /// Something that happened to the session, recorded here so there is one
+    /// ordered record for a client to read rather than a second stream to
+    /// reconcile against this one.
+    ///
+    /// The session actor still owns every one of these and remains the only
+    /// thing that decides them; it tells the agent to record it. Journaled by
+    /// the agent because the agent is the sole writer of its own log, which is
+    /// what makes the order deterministic without any merge.
+    LifecycleRecorded {
+        event: LifecycleEvent,
+        at_ms: u64,
+    },
+    /// Older history stopped being shown to the model.
+    ///
+    /// Journaled like any other append: history keeps everything, and this
+    /// records only where the provider prompt now starts. Transcript projection
+    /// resolves the retained message id to its dense visible sequence, so replay
+    /// reproduces the same boundary.
+    Compacted {
+        summary: String,
+        carried_state: String,
+        retained_from_message_id: Option<String>,
+        trigger: horsie_agentcore::CompactionTrigger,
+        instructions: Option<String>,
+        tokens_before: u32,
+        tokens_after: u32,
+        /// What the summarising call spent, aggregated into `usage_total` by
+        /// the fold. Optional and defaulted: older boundaries carry none.
+        #[serde(default)]
+        usage: Option<Usage>,
+        at_ms: u64,
+    },
+    /// Something was durably accepted by this agent.
+    ///
+    /// Journaled before anything is done with it, which is what makes an
+    /// accepted message a promise: it survives a crash and is still owed an
+    /// answer.
+    Received {
+        item: crate::agent_loop::Incoming,
+        at_ms: u64,
+    },
+    /// A turn began, consuming these incoming records — and, if the agent was
+    /// parked, answering these questions. One event so a crash anywhere in the
+    /// window replays to the same place.
+    TurnBegan {
+        consumed: Vec<String>,
+        /// Questions replaced by a new user message rather than answered.
+        abandoned: Vec<String>,
+        /// A hook rewrite of the consumed user text.
+        rewritten: Option<String>,
+        at_ms: u64,
+    },
+    /// The agent parked on these questions. One event for the whole park rather
+    /// than one per question: they are asked together and answered together, so
+    /// there is never a moment when only some of them are pending.
+    AskRecorded {
+        asks: Vec<crate::agent_loop::AskedQuestion>,
+        at_ms: u64,
+    },
+    /// A summary was taken for sub sessions branching off this agent. Nothing
+    /// about this agent's history changed; what the summarising call spent is
+    /// aggregated into `usage_total` by the fold.
+    SeedSummaryTaken {
+        request_id: String,
+        sub_sessions: Vec<uuid::Uuid>,
+        result: Result<String, String>,
+        usage: Option<Usage>,
+        at_ms: u64,
+    },
+}

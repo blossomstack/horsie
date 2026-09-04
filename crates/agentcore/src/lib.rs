@@ -1,25 +1,28 @@
-mod agent;
 pub mod compaction;
 mod error;
 mod events;
 mod provider;
 mod secret;
+mod step;
 #[cfg(any(test, feature = "test-util"))]
 pub mod testkit;
 mod thinking;
 mod tool;
 
-pub use agent::{Agent, AgentBuilder, AgentConfig};
 pub use compaction::{
-    CompactionBudget, CompactionPlan, CompactionPolicy, CompactionResult, PreCompactDecision,
+    CompactionBudget, approx_history_tokens, boundary_text, choose_cut, summary_prompt,
 };
-pub use error::{AgentBuildError, AgentError, LlmError, ToolCallError};
+pub use error::{LlmError, ToolCallError};
 pub use events::{EventSink, EventSinkError};
 pub use provider::{
     ArtifactBytes, ArtifactSource, CompletionRequest, CompletionResponse, LlmProvider, StopReason,
     ToolChoice,
 };
 pub use secret::Secret;
+pub use step::{
+    StepError, StepRequest, StepResponse, artifact_ids, extract_text, extract_tool_calls, run_step,
+    tool_fingerprint,
+};
 pub use thinking::{ThinkingDialect, ThinkingEffort};
 pub use tool::{EmptyToolbox, Tool, ToolOutcome, ToolSpec, ToolValue, Toolbox, ToolboxImpl};
 

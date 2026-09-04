@@ -14,11 +14,15 @@
 //! broadcast for everything except a subagent, which is quiet by design.
 
 use super::CoreCommand;
-use super::{AgentKey, SessionCommand, hooks::SessionHookSink};
+use super::{
+    AgentKey, SessionCommand,
+    hooks::{SessionHookSink, halt_reason, stop_verdict},
+};
 use crate::agent_loop::{
-    AgentRunDef, CompositeToolbox, ContextError, ContextProvider, Contexts, DefaultToolboxFactory,
-    SharedContext, SharedScan, StartTurn, ToolboxFactory, TurnPreparation, WorkspaceContext,
-    compose_system_prompt, scan_workspace,
+    AgentCatalog, AgentRunDef, CompositeToolbox, ContextError, ContextManifest, ContextProvider,
+    Contexts, DefaultToolboxFactory, FrozenPluginAgent, SharedContext, SharedScan, StartTurn,
+    StopHookOutcome, StopHookRequest, StopHookResult, ToolboxFactory, TurnPreparation,
+    WorkspaceContext, compose_system_prompt, scan_workspace,
 };
 use crate::sessions::addressing::SessionRef;
 use crate::sessions::run_forest::SeedMode;
@@ -35,13 +39,27 @@ use horsie_agentcore::{EmptyToolbox, LlmProvider, Toolbox};
 use horsie_models::{
     hooks::HookRecord,
     runtime::{
-        McpServerFailure, ServerHookEvent, SessionStartInput, SubagentStartInput,
-        UserPromptExpansionInput, UserPromptSubmitInput,
+        McpServerFailure, ServerHookEvent, SessionStartInput, StopInput, SubagentStartInput,
+        SubagentStopInput, UserPromptExpansionInput, UserPromptSubmitInput,
     },
 };
 use horsie_runtime_host::RuntimeClient;
 use std::sync::{Arc, Mutex, PoisonError};
 use uuid::Uuid;
+
+tokio::task_local! {
+    /// Durable discovery used only while rebuilding disposable clients for an
+    /// initialized agent. The context builder must not scan or provision.
+    static RECONNECT_MANIFEST: ContextManifest;
+}
+
+fn reconnect_manifest() -> Option<ContextManifest> {
+    RECONNECT_MANIFEST.try_with(Clone::clone).ok()
+}
+
+fn reconnect_only() -> bool {
+    RECONNECT_MANIFEST.try_with(|_| ()).is_ok()
+}
 
 /// Report turn-preparation progress into an agent's log.
 ///
@@ -782,38 +800,15 @@ impl ContextProvider for SessionContextProvider {
             Some(cached) => Some(cached.without_hook_sink()),
             None => self.runtime_client().await?,
         };
-        // KNOWN GAP: this seam runs *before* `provide` (see the
-        // `ContextProvider` docs), so the hooks below run against an agent
-        // whose plugin tree has not been built yet — and a hook is itself a
-        // plugin file. A runtime refuses a request naming an unprovisioned
-        // agent, and `run_hooks` swallows that with `unwrap_or_default`, so
-        // the hooks simply never fire.
-        //
-        // Provisioning here is the obvious fix and is NOT applied, because the
-        // extra pre-turn round trip wedges a sub session's turn: with it,
-        // three sub session tests and one subagent test hang; without it, all
-        // 36 pass. That is a sub session-path fragility this change surfaces
-        // rather than causes, and it needs its own diagnosis before this line
-        // goes in. Before the hooks, because a hook *is* a plugin file. This
-        // seam runs ahead of `provide` — see the `ContextProvider` docs — so
-        // it is the first place an agent's tree can exist, and hooks fired
-        // against an agent the runtime has never been told about are refused.
-        // `run_hooks` swallows that with `unwrap_or_default`, so the failure
-        // would be every plugin hook silently not running.
-        //
-        // `provide` provisions too. Both is correct rather than wasteful: this
-        // method is skipped entirely when `has_start_hooks` is false, and the
-        // runtime absorbs a repeat for a set it has already built.
-        // Hooks run runtime-side, so an agent with no sandbox has none to run
-        // and nothing to provision them into. It still returns the prompt: a
-        // runtime-less turn is an ordinary turn with an empty hook set.
+        // One-time initialization has already materialized the agent before a
+        // normal step can reach this seam. Reload reconnects the same runtime;
+        // it must not provision or rediscover semantic context here.
         let Some(client) = client else {
             return Ok(TurnPreparation {
                 records: Vec::new(),
                 message: turn.prompt,
             });
         };
-        self.provision_agent(&client).await?;
         let mut records = Vec::new();
         if let Some(source) = turn.start_source {
             // A subagent's start is a `SubagentStart`. It used to be a
@@ -863,7 +858,52 @@ impl ContextProvider for SessionContextProvider {
         Ok(TurnPreparation { records, message })
     }
 
+    async fn stop_hook(&self, request: StopHookRequest) -> StopHookResult {
+        let Some(client) = self
+            .use_plugins()
+            .then(|| self.cached_client())
+            .flatten()
+            .map(|client| client.without_hook_sink())
+        else {
+            return StopHookResult {
+                records: Vec::new(),
+                outcome: StopHookOutcome::Allow,
+            };
+        };
+        let event = match self.kind {
+            SessionAgentKind::Sub(id) => ServerHookEvent::SubagentStop(SubagentStopInput {
+                agent_id: id.to_string(),
+                agent_type: self.agent_type(),
+                last_assistant_message: request.last_assistant_message,
+                stop_hook_active: request.active,
+            }),
+            SessionAgentKind::Main
+            | SessionAgentKind::Step(_)
+            | SessionAgentKind::SubSession(_) => ServerHookEvent::Stop(StopInput {
+                last_assistant_message: request.last_assistant_message,
+                stop_hook_active: request.active,
+            }),
+        };
+        let records = client.run_hooks(event).await.unwrap_or_default();
+        let outcome = if let Some(reason) = halt_reason(&records) {
+            tracing::info!(reason, "a stop hook set continue: false");
+            StopHookOutcome::Allow
+        } else if let Some(message) = stop_verdict(&records) {
+            StopHookOutcome::Continue { message }
+        } else {
+            StopHookOutcome::Allow
+        };
+        StopHookResult { records, outcome }
+    }
+
+    async fn reconnect(&self, manifest: &ContextManifest) -> Result<Contexts, ContextError> {
+        RECONNECT_MANIFEST
+            .scope(manifest.clone(), self.provide())
+            .await
+    }
+
     async fn provide(&self) -> Result<Contexts, ContextError> {
+        let reconnect = reconnect_manifest();
         let settings = &self.settings;
         let def = session_run_def(settings);
         // Set only by a typed subagent, whose plugin definition may narrow what
@@ -907,15 +947,15 @@ impl ContextProvider for SessionContextProvider {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = runtime_client.clone();
 
-        // Before anything reads this agent's plugins — the hooks its bundles
-        // declare, the skills the scan finds, the MCP servers discovery starts.
-        // Sent on every load rather than once: the runtime is the only party
-        // that knows what is already on its disk, and it absorbs the repeat.
-        if let Some(client) = &runtime_client {
+        // Materialize the agent only during semantic initialization. A later
+        // reconnect binds to the same runtime and must not provision it again.
+        if !reconnect_only()
+            && let Some(client) = &runtime_client
+        {
             self.provision_agent(client).await?;
         }
 
-        if broadcast {
+        if broadcast && !reconnect_only() {
             emit_progress(
                 &self.session,
                 self.kind.agent_key(),
@@ -926,22 +966,33 @@ impl ContextProvider for SessionContextProvider {
         }
         // Nothing to scan without a sandbox: no workspaces, and no plugin
         // skills, since those live on the runtime's disk.
-        let (ws, shared_scan) = match &runtime_client {
-            Some(client) => scan_workspace(client, None).await,
-            // Nothing to scan without a sandbox — no workspaces, and no plugin
-            // skills, since those live on the runtime's disk. The empty shape
-            // is what every reader below already handles for a scan that found
-            // nothing.
-            None => (WorkspaceContext::default(), SharedScan::default()),
+        let (ws, shared_scan) = if reconnect_only() {
+            // Prompt meaning was recorded during initialization. Recovery only
+            // restores clients; a later workspace observation must be an
+            // explicit inspect_workspace tool call and result.
+            (WorkspaceContext::default(), SharedScan::default())
+        } else {
+            match &runtime_client {
+                Some(client) => scan_workspace(client, None).await,
+                None => (WorkspaceContext::default(), SharedScan::default()),
+            }
         };
         // No `SessionStart` here any more. It used to fire on this line, once
         // per *run* — `provide` is per-run — so every turn re-ran every start
         // hook, always reporting `source: "startup"`. It now fires once per
         // agent load at `start_hooks`, early enough for its context to reach
         // the turn that triggered it.
+        let durable_agents = reconnect.as_ref().map(|manifest| {
+            manifest
+                .plugin_agents
+                .clone()
+                .into_iter()
+                .map(FrozenPluginAgent::into_catalog)
+                .collect::<AgentCatalog>()
+        });
         let shared = use_plugins.then(|| SharedContext {
             skills: Arc::new(shared_scan.skills),
-            agents: Arc::new(shared_scan.agents),
+            agents: Arc::new(durable_agents.unwrap_or(shared_scan.agents)),
             root: shared_scan.root,
         });
         // Resolved here rather than carried from the spawn: the definition is a
@@ -1109,10 +1160,14 @@ impl ContextProvider for SessionContextProvider {
         // With no runtime there are no runtime-backed tools and no `skill` or
         // `inspect_workspace` — all three reach into a sandbox. What is left is
         // the server-side MCP set, which the layers below add to.
+        let workspace_names = reconnect
+            .as_ref()
+            .map(|manifest| manifest.workspace_names.clone())
+            .unwrap_or_else(|| ws.names());
         let base: Arc<dyn Toolbox> = match &runtime_client {
             Some(client) => DefaultToolboxFactory.for_agent(
                 client.clone(),
-                ws.names(),
+                workspace_names.clone(),
                 use_plugins,
                 mcp,
                 artifact_sink,
@@ -1322,8 +1377,22 @@ impl ContextProvider for SessionContextProvider {
         if broadcast {
             emit_progress(&self.session, self.kind.agent_key(), "ready", None).await;
         }
+        let manifest = reconnect.unwrap_or_else(|| ContextManifest {
+            workspace_names,
+            plugin_agents: shared
+                .as_ref()
+                .map(|context| {
+                    context
+                        .agents
+                        .iter()
+                        .map(FrozenPluginAgent::from_catalog)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        });
         Ok(Contexts {
             provider,
+            manifest,
             toolbox,
             tool_narrowing,
             system_prompt,
@@ -1909,6 +1978,54 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn reconnect_does_not_scan_the_workspace_again() {
+        let (f, session, id) = agent_harness().await;
+        let mut provider = typed_provider(&f, &session, id, id, None);
+        provider.kind = SessionAgentKind::Main;
+        provider.agent_type = None;
+        let before = f.agent.scan_count();
+        let provisions_before = f
+            .agent
+            .relayed()
+            .iter()
+            .filter(|kind| kind.as_str() == "ProvisionAgent")
+            .count();
+        let initial = provider.provide().await.expect("initial contexts");
+        assert!(initial.system_prompt.is_some());
+        let manifest = initial.manifest.clone();
+        let after_initial = f.agent.scan_count();
+        assert_eq!(after_initial, before + 1);
+        let provisions_after_initial = f
+            .agent
+            .relayed()
+            .iter()
+            .filter(|kind| kind.as_str() == "ProvisionAgent")
+            .count();
+        assert_eq!(provisions_after_initial, provisions_before + 1);
+
+        let connected = provider
+            .reconnect(&manifest)
+            .await
+            .expect("reconnected contexts");
+        assert_eq!(connected.manifest, manifest);
+        assert_eq!(
+            f.agent.scan_count(),
+            after_initial,
+            "reconnection restores clients without semantic discovery"
+        );
+        let provisions_after_reconnect = f
+            .agent
+            .relayed()
+            .iter()
+            .filter(|kind| kind.as_str() == "ProvisionAgent")
+            .count();
+        assert_eq!(
+            provisions_after_reconnect, provisions_after_initial,
+            "reconnection must not provision the already initialized agent"
+        );
+    }
+
     /// The agent's body is added to the generic subagent role, and its `tools`
     /// allowlist reaches the toolbox through the same alias table hook matchers
     /// use.
@@ -1944,6 +2061,42 @@ mod tests {
         assert!(
             !tools.contains(&"bash".to_string()),
             "the narrowing must exclude what it did not name: {tools:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_subagent_reconnect_uses_the_durable_catalog_without_scanning() {
+        let (f, session, id) = agent_harness().await;
+        let provider = typed_provider(&f, &session, id, Uuid::new_v4(), None);
+
+        let initial = provider.provide().await.expect("initial contexts");
+        let manifest = initial.manifest.clone();
+        let initial_narrowing = initial.tool_narrowing.clone();
+        assert!(!manifest.plugin_agents.is_empty());
+        let scans = f.agent.scan_count();
+        let provisions = f
+            .agent
+            .relayed()
+            .iter()
+            .filter(|kind| kind.as_str() == "ProvisionAgent")
+            .count();
+
+        let reconnected = provider.reconnect(&manifest).await.expect("reconnect");
+        assert_eq!(reconnected.manifest, manifest);
+        assert_eq!(reconnected.tool_narrowing, initial_narrowing);
+        assert_eq!(
+            f.agent.scan_count(),
+            scans,
+            "typed reconnect must use the durable agent catalogue"
+        );
+        assert_eq!(
+            f.agent
+                .relayed()
+                .iter()
+                .filter(|kind| kind.as_str() == "ProvisionAgent")
+                .count(),
+            provisions,
+            "typed reconnect must not provision again"
         );
     }
 
@@ -2259,14 +2412,14 @@ mod tests {
     /// refusal with `unwrap_or_default`, so getting this order wrong is not an
     /// error anywhere: it is every plugin hook silently never running.
     ///
-    /// Ordering rather than mere presence, because `start_hooks` runs *ahead*
-    /// of `provide` — provisioning only in `provide` looks correct and is
-    /// exactly the bug.
+    /// Initialization is now structurally ahead of every normal step, so the
+    /// hook seam itself must not provision again.
     #[tokio::test]
-    async fn an_agent_is_provisioned_before_its_hooks_run() {
+    async fn an_agent_is_initialized_once_before_its_hooks_run() {
         let (f, session, id) = catalog_harness_with(Vec::new(), Vec::new()).await;
         let provider = catalog_provider(&f, &session, id);
 
+        provider.provide().await.expect("initialize");
         provider
             .start_hooks(StartTurn {
                 start_source: Some(horsie_models::runtime::SessionStartSource::Startup),
@@ -2288,7 +2441,15 @@ mod tests {
         );
         assert!(
             first_provision < first_hooks,
-            "provisioning must precede the hooks that read it: {relayed:?}"
+            "initialization must precede the hooks that read it: {relayed:?}"
+        );
+        assert_eq!(
+            relayed
+                .iter()
+                .filter(|kind| kind.as_str() == "ProvisionAgent")
+                .count(),
+            1,
+            "the hook seam must not provision again: {relayed:?}"
         );
     }
 

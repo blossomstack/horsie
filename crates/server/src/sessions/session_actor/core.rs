@@ -11,7 +11,7 @@ use super::{
     SessionCommand, SessionDomainEvent, SessionState, TurnCommand,
 };
 use crate::agent_loop::AgentCommand;
-use crate::agent_loop::LogCommand as AgentLogCommand;
+use crate::agent_loop::HistoryCommand as AgentHistoryCommand;
 use crate::sessions::addressing::SessionInbox;
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use crate::sessions::title_tool::normalize_session_title;
@@ -303,10 +303,12 @@ impl SessionActor {
                 };
                 let _ = agent
                     .actor
-                    .tell(AgentCommand::Log(AgentLogCommand::RecordLifecycle {
-                        event: payload,
-                        at_ms: now_ms(),
-                    }))
+                    .tell(AgentCommand::History(
+                        AgentHistoryCommand::RecordLifecycle {
+                            event: payload,
+                            at_ms: now_ms(),
+                        },
+                    ))
                     .await;
             }
         }
@@ -321,10 +323,12 @@ impl SessionActor {
         if let Some(agent) = agent {
             let _ = agent
                 .actor
-                .tell(AgentCommand::Log(AgentLogCommand::RecordLifecycle {
-                    event,
-                    at_ms: now_ms(),
-                }))
+                .tell(AgentCommand::History(
+                    AgentHistoryCommand::RecordLifecycle {
+                        event,
+                        at_ms: now_ms(),
+                    },
+                ))
                 .await;
         }
     }
@@ -345,6 +349,9 @@ impl Component for SessionCore {
     #[allow(clippy::wildcard_enum_match_arm)]
     fn apply(state: &mut SessionState, event: &SessionDomainEvent) {
         match event.clone() {
+            SessionDomainEvent::AgentRunOutcomeRecorded { agent, run_id } => {
+                state.agent_run_outcomes.insert(agent.to_string(), run_id);
+            }
             SessionDomainEvent::AgentDeleted { id, .. } => {
                 state.forest.apply_agent_deleted(id);
             }

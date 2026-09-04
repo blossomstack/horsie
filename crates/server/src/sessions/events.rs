@@ -2,7 +2,7 @@
 //!
 //! The broadcast plumbing that used to live here — an ephemeral event sink, a
 //! post-persist observer, and the frame unions both fed — is gone. Durable
-//! entries are read from the agent's own state through `AgentCommand::ReadLog`,
+//! entries are read from the agent's own state through `AgentCommand::QueryLog`,
 //! and deltas reach the agent through its mailbox, so there is no second copy
 //! of the transcript in flight to keep ordered against the first.
 

@@ -1,0 +1,1101 @@
+//! Durable state with one chronological agent history.
+//!
+//! [`AgentState`] stores domain history, usage/context projections, and the two
+//! genuine component states. Pending input, asks, open steps, run identity, and
+//! unresolved tool calls are computed from history.
+//!
+//! The user-facing transcript is not stored here. [`project_transcript`] builds
+//! it deterministically from history whenever a read or provider step needs it.
+
+use crate::agent_loop::prelude::*;
+use horsie_agentcore::Usage;
+use serde::{Deserialize, Serialize};
+
+/// The result of folding an agent's durable history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentState {
+    /// The sole chronological durable account.
+    history: Vec<crate::agent_loop::events::AgentHistoryEntry>,
+    usage_total: UsageTotal,
+    last_step_usage: Option<Usage>,
+    context_tokens: u32,
+    /// One entry per component that has any durable state of its own.
+    #[serde(deserialize_with = "known_parts")]
+    parts: Vec<ComponentState>,
+}
+
+impl Default for AgentState {
+    fn default() -> Self {
+        Self {
+            history: Vec::new(),
+            usage_total: UsageTotal::default(),
+            last_step_usage: None,
+            context_tokens: 0,
+            parts: crate::agent_loop::components::default_parts(),
+        }
+    }
+}
+
+/// Skip parts this build has no component for, rather than failing the load.
+///
+/// A snapshot outlives the code that wrote it. A removed component leaves its
+/// tag behind in every snapshot ever taken, and refusing to load them would
+/// make deleting a component a migration; skipping makes it a deletion. The
+/// warning is what stops that being silent.
+fn known_parts<'de, D>(deserializer: D) -> Result<Vec<ComponentState>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|value| match serde_json::from_value(value) {
+            Ok(part) => Some(part),
+            Err(e) => {
+                tracing::warn!(error = %e, "skipping a component state this build cannot read");
+                None
+            }
+        })
+        .collect())
+}
+
+impl AgentState {
+    /// This component's own state, or `None` if it has never had any.
+    ///
+    /// Typed by the caller: `state.component_state::<TimerState>()`. There is
+    /// no downcast and no way to name an unregistered component state.
+    #[must_use]
+    pub(crate) fn component_state<T: ComponentSlot>(&self) -> Option<&T> {
+        T::get(&self.parts)
+    }
+
+    /// This component's own state, created empty the first time it is asked
+    /// for. `None` is unreachable — the state is inserted just above — and
+    /// callers treat it as "nothing to do" rather than panicking, because a
+    /// fold must never take the process down.
+    pub(crate) fn component_state_mut<T: ComponentSlot>(&mut self) -> Option<&mut T> {
+        T::get_mut(&mut self.parts)
+    }
+
+    /// This session as a sub session's conversation starting point.
+    #[must_use]
+    pub fn snapshot_at(&self, at_seq: u64) -> Self {
+        let transcript = project_transcript(&self.history).cut(at_seq);
+        let history: Vec<_> = carry_transcript(&transcript)
+            .into_iter()
+            .enumerate()
+            .map(|(seq, record)| crate::agent_loop::AgentHistoryEntry {
+                seq: seq as u64,
+                record,
+            })
+            .collect();
+        Self {
+            // A branch carries conversation context, not the source agent's
+            // run, pending input, initialization, or prompt identity.
+            history,
+            usage_total: UsageTotal::default(),
+            last_step_usage: None,
+            context_tokens: self.context_tokens,
+            parts: self
+                .parts
+                .iter()
+                .filter_map(ComponentState::carried)
+                .collect(),
+        }
+    }
+}
+
+/// Running token totals held in [`AgentState`]. Distinct from the per-step
+/// wire [`Usage`] (`u32`): this accumulates across the agent, so it is `u64`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageTotal {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+}
+
+impl UsageTotal {
+    pub(crate) fn add(&mut self, usage: &Usage) {
+        self.input_tokens = self
+            .input_tokens
+            .saturating_add(u64::from(usage.input_tokens));
+        self.output_tokens = self
+            .output_tokens
+            .saturating_add(u64::from(usage.output_tokens));
+        self.cache_creation_tokens =
+            add_optional(self.cache_creation_tokens, usage.cache_creation_tokens);
+        self.cache_read_tokens = add_optional(self.cache_read_tokens, usage.cache_read_tokens);
+    }
+
+    pub fn combine(&self, other: &UsageTotal) -> UsageTotal {
+        UsageTotal {
+            input_tokens: self.input_tokens.saturating_add(other.input_tokens),
+            output_tokens: self.output_tokens.saturating_add(other.output_tokens),
+            cache_creation_tokens: combine_optional(
+                self.cache_creation_tokens,
+                other.cache_creation_tokens,
+            ),
+            cache_read_tokens: combine_optional(self.cache_read_tokens, other.cache_read_tokens),
+        }
+    }
+}
+
+/// Sums an accumulating `u64` cache total with a per-turn `u32` delta. Stays
+/// `None` only when neither side has ever reported cache data.
+pub(crate) fn add_optional(total: Option<u64>, delta: Option<u32>) -> Option<u64> {
+    match (total, delta) {
+        (None, None) => None,
+        (total, delta) => Some(
+            total
+                .unwrap_or(0)
+                .saturating_add(u64::from(delta.unwrap_or(0))),
+        ),
+    }
+}
+
+/// Sums two agents' `u64` cache totals. Stays `None` only when neither agent
+/// has ever reported cache data.
+pub(crate) fn combine_optional(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
+    }
+}
+
+pub(crate) fn new_message_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+fn event_message(event: &AgentDomainEvent) -> Option<&horsie_agentcore::Message> {
+    if let AgentDomainEvent::InputMessage { message }
+    | AgentDomainEvent::MessageComplete { message, .. }
+    | AgentDomainEvent::MessageAborted { message } = event
+    {
+        Some(message)
+    } else {
+        None
+    }
+}
+
+impl AgentState {
+    /// How many hook records history already contains. The next hook's id uses
+    /// this sequence.
+    #[must_use]
+    pub fn hook_entry_count(&self) -> usize {
+        self.history
+            .iter()
+            .filter(|entry| matches!(&entry.record, AgentDomainEvent::HookRan { .. }))
+            .count()
+    }
+
+    /// Every durable record, including control records hidden from the
+    /// person-facing transcript.
+    #[must_use]
+    pub fn history(&self) -> &[crate::agent_loop::events::AgentHistoryEntry] {
+        &self.history
+    }
+
+    #[must_use]
+    pub fn next_history_seq(&self) -> u64 {
+        self.history
+            .last()
+            .map_or(0, |entry| entry.seq.saturating_add(1))
+    }
+
+    pub(crate) fn record_history(&mut self, record: AgentDomainEvent) {
+        self.history
+            .push(crate::agent_loop::events::AgentHistoryEntry {
+                seq: self.next_history_seq(),
+                record,
+            });
+    }
+
+    #[must_use]
+    pub fn initialized(&self) -> bool {
+        self.history
+            .iter()
+            .any(|entry| matches!(&entry.record, AgentDomainEvent::AgentInitialized { .. }))
+    }
+
+    #[must_use]
+    pub fn context_manifest(&self) -> Option<&ContextManifest> {
+        self.history.iter().rev().find_map(|entry| {
+            if let AgentDomainEvent::AgentInitialized { manifest } = &entry.record {
+                Some(manifest)
+            } else {
+                None
+            }
+        })
+    }
+
+    #[must_use]
+    pub fn system_prompt(&self) -> String {
+        self.history
+            .iter()
+            .filter_map(|entry| {
+                if let AgentDomainEvent::SystemPromptRecorded { content, .. } = &entry.record {
+                    Some(content.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    /// The first normal step marker after the newest run boundary.
+    #[must_use]
+    pub fn current_run_id(&self) -> Option<u64> {
+        let from = self
+            .history
+            .iter()
+            .rposition(|entry| matches!(&entry.record, AgentDomainEvent::RunEnded { .. }))
+            .map_or(0, |position| position + 1);
+        self.history[from..].iter().find_map(|entry| {
+            matches!(
+                &entry.record,
+                AgentDomainEvent::StepStarted {
+                    kind: StepKind::Provider,
+                }
+            )
+            .then_some(entry.seq)
+        })
+    }
+
+    /// The run id and reason of the newest durable run boundary.
+    #[must_use]
+    pub fn latest_run_end(&self) -> Option<(u64, &RunEnd)> {
+        let end = self
+            .history
+            .iter()
+            .rposition(|entry| matches!(&entry.record, AgentDomainEvent::RunEnded { .. }))?;
+        let from = self.history[..end]
+            .iter()
+            .rposition(|entry| matches!(&entry.record, AgentDomainEvent::RunEnded { .. }))
+            .map_or(0, |position| position + 1);
+        let segment = &self.history[from..end];
+        let run_id = segment
+            .iter()
+            .find_map(|entry| {
+                matches!(
+                    &entry.record,
+                    AgentDomainEvent::StepStarted {
+                        kind: StepKind::Provider,
+                    }
+                )
+                .then_some(entry.seq)
+            })
+            .or_else(|| {
+                segment.iter().find_map(|entry| {
+                    matches!(&entry.record, AgentDomainEvent::StepStarted { .. })
+                        .then_some(entry.seq)
+                })
+            })?;
+        let AgentDomainEvent::RunEnded { reason, .. } = &self.history[end].record else {
+            return None;
+        };
+        Some((run_id, reason))
+    }
+
+    /// The open top marker after the newest run boundary.
+    #[must_use]
+    pub fn open_step(&self) -> Option<(u64, &StepKind)> {
+        let from = self
+            .history
+            .iter()
+            .rposition(|entry| matches!(&entry.record, AgentDomainEvent::RunEnded { .. }))
+            .map_or(0, |position| position + 1);
+        self.history[from..].iter().rev().find_map(|entry| {
+            if let AgentDomainEvent::StepStarted { kind } = &entry.record {
+                Some((entry.seq, kind))
+            } else {
+                None
+            }
+        })
+    }
+
+    #[must_use]
+    pub fn stop_continuations(&self) -> usize {
+        let from = self
+            .history
+            .iter()
+            .rposition(|entry| matches!(&entry.record, AgentDomainEvent::RunEnded { .. }))
+            .map_or(0, |position| position + 1);
+        self.history[from..]
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    &entry.record,
+                    AgentDomainEvent::StopHookCompleted {
+                        outcome: StopHookOutcome::Continue { .. }
+                    }
+                )
+            })
+            .count()
+    }
+
+    /// Whether the newest durable step has recorded its own terminal response.
+    #[must_use]
+    pub fn open_step_has_response(&self) -> bool {
+        let Some((marker, kind)) = self.open_step() else {
+            return false;
+        };
+        self.history.iter().any(|entry| {
+            if entry.seq <= marker {
+                return false;
+            }
+            if matches!(&entry.record, AgentDomainEvent::StepFailed { .. }) {
+                return true;
+            }
+            match (kind, &entry.record) {
+                (
+                    StepKind::Provider,
+                    AgentDomainEvent::MessageComplete { .. }
+                    | AgentDomainEvent::MessageAborted { .. },
+                )
+                | (StepKind::Initialize, AgentDomainEvent::AgentInitialized { .. })
+                | (StepKind::Connect, AgentDomainEvent::ConnectionCompleted)
+                | (StepKind::StopHook, AgentDomainEvent::StopHookCompleted { .. })
+                | (StepKind::Compaction, AgentDomainEvent::Compacted { .. }) => true,
+                (
+                    StepKind::SeedSummary {
+                        request_id: expected,
+                    },
+                    AgentDomainEvent::SeedSummaryTaken { request_id, .. },
+                ) => request_id == expected,
+                _ => false,
+            }
+        })
+    }
+
+    /// Whether prompt-visible history changed after the newest compaction.
+    #[must_use]
+    pub fn prompt_changed_since_compaction(&self) -> bool {
+        let Some(compaction) = self
+            .history
+            .iter()
+            .rposition(|entry| matches!(&entry.record, AgentDomainEvent::Compacted { .. }))
+        else {
+            return true;
+        };
+        self.history[compaction + 1..].iter().any(|entry| {
+            matches!(
+                &entry.record,
+                AgentDomainEvent::InputMessage { .. }
+                    | AgentDomainEvent::MessageComplete { .. }
+                    | AgentDomainEvent::MessageAborted { .. }
+                    | AgentDomainEvent::ToolComplete { .. }
+                    | AgentDomainEvent::HookRan { .. }
+            )
+        })
+    }
+
+    #[must_use]
+    pub fn stop_candidate(&self) -> serde_json::Value {
+        let Some(message) = self.history.iter().rev().find_map(|entry| {
+            let message = event_message(&entry.record)?;
+            (message.role == horsie_agentcore::Role::Assistant).then_some(message)
+        }) else {
+            return serde_json::Value::Null;
+        };
+        message
+            .parts
+            .iter()
+            .find_map(|part| {
+                if let horsie_agentcore::ContentPart::ToolCall(call) = part
+                    && call.name == crate::sessions::workflow::SUBMIT_RESULT_TOOL
+                {
+                    Some(call.input.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| {
+                serde_json::Value::String(horsie_agentcore::extract_text(&message.parts))
+            })
+    }
+
+    #[must_use]
+    pub fn last_assistant_text(&self) -> Option<String> {
+        self.history.iter().rev().find_map(|entry| {
+            let message = event_message(&entry.record)?;
+            (message.role == horsie_agentcore::Role::Assistant)
+                .then(|| horsie_agentcore::extract_text(&message.parts))
+        })
+    }
+    /// Build the user-facing transcript from durable history.
+    #[must_use]
+    pub fn transcript(&self) -> Transcript {
+        project_transcript(&self.history)
+    }
+
+    #[must_use]
+    pub fn next_seq(&self) -> u64 {
+        self.transcript().next_seq()
+    }
+
+    #[must_use]
+    pub fn tail_seq(&self) -> Option<u64> {
+        self.transcript().tail_seq()
+    }
+
+    /// Whether this agent has ever spoken to a provider.
+    ///
+    /// Not `log.is_empty()`: a queued message and a provisioning stage both
+    /// append entries before any run, so an agent with a full log can still be
+    /// starting up for the first time — which is what `SessionStart` reports as
+    /// `startup` rather than `resume`.
+    #[must_use]
+    pub fn has_run(&self) -> bool {
+        self.history.iter().any(|entry| {
+            matches!(
+                &entry.record,
+                AgentDomainEvent::MessageComplete { .. } | AgentDomainEvent::MessageAborted { .. }
+            )
+        })
+    }
+
+    /// Tool calls the model has made that have no result yet, and that this
+    /// agent is not parked on.
+    ///
+    /// Derived, never stored: history holds both halves of every call, so a
+    /// second index could only disagree with it. Empty means the
+    /// agent owes the provider nothing but its next call.
+    ///
+    /// A parked call is exempt. The agent is *waiting* on that one, on purpose,
+    /// and the answer arrives later as an ordinary result; treating it as
+    /// outstanding would freeze a parked agent for ever.
+    ///
+    /// The scan starts at the newest assistant message, not at the beginning:
+    /// a new assistant message only ever lands once the previous one's calls
+    /// are all answered, so nothing before it can still be open.
+    #[must_use]
+    pub fn open_tool_calls(&self) -> Vec<String> {
+        let transcript = self.transcript();
+        let messages: Vec<_> = transcript
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.body {
+                horsie_agentcore::AgentLogBody::Llm(message) => Some(message),
+                horsie_agentcore::AgentLogBody::Hook(_)
+                | horsie_agentcore::AgentLogBody::Lifecycle(_)
+                | horsie_agentcore::AgentLogBody::Compaction(_) => None,
+            })
+            .collect();
+        let from = messages
+            .iter()
+            .rposition(|message| {
+                message
+                    .parts
+                    .iter()
+                    .any(|part| matches!(part, horsie_agentcore::ContentPart::ToolCall(_)))
+            })
+            .unwrap_or(messages.len());
+        let mut open = Vec::new();
+        for message in messages.into_iter().skip(from) {
+            for part in &message.parts {
+                match part {
+                    horsie_agentcore::ContentPart::ToolCall(call) => open.push(call.id.clone()),
+                    horsie_agentcore::ContentPart::ToolResult(result) => {
+                        open.retain(|id| *id != result.tool_call_id);
+                    }
+                    horsie_agentcore::ContentPart::Text(_)
+                    | horsie_agentcore::ContentPart::Thinking(_)
+                    | horsie_agentcore::ContentPart::SubAgentResult(_)
+                    | horsie_agentcore::ContentPart::Artifact(_) => {}
+                }
+            }
+        }
+        let parked = self.pending_asks();
+        open.retain(|id| {
+            !parked
+                .iter()
+                .any(|ask| ask.tool_call_id.as_deref() == Some(id.as_str()))
+        });
+        open
+    }
+    /// The name and input of one tool call, read directly from history.
+    #[must_use]
+    pub fn tool_call_named(&self, id: &str) -> Option<(String, serde_json::Value)> {
+        self.history.iter().rev().find_map(|entry| {
+            let message = event_message(&entry.record)?;
+            message.parts.iter().find_map(|part| match part {
+                horsie_agentcore::ContentPart::ToolCall(call) if call.id == id => {
+                    Some((call.name.clone(), call.input.clone()))
+                }
+                horsie_agentcore::ContentPart::ToolCall(_)
+                | horsie_agentcore::ContentPart::Text(_)
+                | horsie_agentcore::ContentPart::Thinking(_)
+                | horsie_agentcore::ContentPart::ToolResult(_)
+                | horsie_agentcore::ContentPart::SubAgentResult(_)
+                | horsie_agentcore::ContentPart::Artifact(_) => None,
+            })
+        })
+    }
+
+    /// This agent's current values, for the agent document.
+    #[must_use]
+    pub fn state_view(&self) -> AgentStateView {
+        AgentStateView {
+            tasks: self.task_list().tasks().to_vec(),
+            usage_total: self.usage_total(),
+            last_turn_usage: self.last_turn_usage().cloned(),
+            context_tokens: self.context_tokens(),
+            as_of_seq: self.tail_seq().unwrap_or(0),
+        }
+    }
+
+    /// This agent's usage and context size, without its transcript.
+    #[must_use]
+    pub fn usage_snapshot(&self) -> AgentUsageSnapshot {
+        AgentUsageSnapshot {
+            usage_total: self.usage_total(),
+            last_turn_usage: self.last_turn_usage().cloned(),
+            context_tokens: self.context_tokens(),
+        }
+    }
+}
+
+/// What each part chooses to show the rest of the server.
+///
+/// Every one of these forwards to a method on the owning component's state;
+/// none of them reaches a field. Adding a reader means adding a method there,
+impl AgentState {
+    /// Accepted-but-undelivered things, derived from append and consume
+    /// records. This is the queue; there is no second durable container.
+    #[must_use]
+    pub fn pending_incoming(&self) -> Vec<crate::agent_loop::Incoming> {
+        let mut pending = Vec::new();
+        for entry in &self.history {
+            if let AgentDomainEvent::Received { item, .. } = &entry.record {
+                pending.push(item.clone());
+            }
+            let consumed = if let AgentDomainEvent::Consumed { ids, .. } = &entry.record {
+                Some(ids)
+            } else if let AgentDomainEvent::TurnBegan { consumed, .. } = &entry.record {
+                Some(consumed)
+            } else {
+                None
+            };
+            if let Some(ids) = consumed {
+                pending.retain(|item| !ids.iter().any(|id| id == item.id()));
+            }
+        }
+        pending
+    }
+
+    /// Questions still awaiting answers, derived from history.
+    #[must_use]
+    pub fn pending_asks(&self) -> Vec<crate::agent_loop::AskedQuestion> {
+        let mut asks = Vec::new();
+        for entry in &self.history {
+            if let AgentDomainEvent::AskRecorded { asks: recorded, .. } = &entry.record {
+                asks.clone_from(recorded);
+            }
+            if let AgentDomainEvent::RunEnded {
+                reason: RunEnd::AwaitingInput { asks: recorded },
+                ..
+            } = &entry.record
+            {
+                asks.clone_from(recorded);
+            }
+            if matches!(&entry.record, AgentDomainEvent::TurnBegan { .. }) {
+                asks.clear();
+            }
+        }
+        asks
+    }
+
+    /// The next history-backed offer, if one can run now.
+    #[must_use]
+    pub(crate) fn next_input(&self) -> Option<crate::agent_loop::PendingInput> {
+        let incoming = self.pending_incoming();
+        let asks = self.pending_asks();
+        crate::agent_loop::next_input(&incoming, &asks)
+    }
+
+    /// Whether the latest durable boundary parked on background work.
+    #[must_use]
+    pub fn parked(&self) -> bool {
+        let mut parked = false;
+        for entry in &self.history {
+            if matches!(
+                &entry.record,
+                AgentDomainEvent::Parked { .. }
+                    | AgentDomainEvent::RunEnded {
+                        reason: RunEnd::Parked,
+                        ..
+                    }
+            ) {
+                parked = true;
+            } else if matches!(
+                &entry.record,
+                AgentDomainEvent::InputMessage { .. }
+                    | AgentDomainEvent::TurnBegan { .. }
+                    | AgentDomainEvent::StepStarted {
+                        kind: StepKind::Provider,
+                    }
+            ) {
+                parked = false;
+            }
+        }
+        parked
+    }
+
+    /// True between a durable turn start and its newest boundary.
+    #[must_use]
+    pub fn turn_in_flight(&self) -> bool {
+        let mut running = false;
+        for entry in &self.history {
+            if matches!(&entry.record, AgentDomainEvent::TurnBegan { .. }) {
+                running = true;
+            } else if matches!(
+                &entry.record,
+                AgentDomainEvent::TurnCompleted { .. }
+                    | AgentDomainEvent::TurnAborted { .. }
+                    | AgentDomainEvent::TurnCancelled { .. }
+                    | AgentDomainEvent::AskRecorded { .. }
+                    | AgentDomainEvent::Parked { .. }
+                    | AgentDomainEvent::RunEnded { .. }
+            ) {
+                running = false;
+            }
+        }
+        running
+    }
+
+    /// Consecutive corrections recorded for a run that owes a result.
+    #[must_use]
+    pub fn nudges(&self) -> u32 {
+        let mut nudges = 0_u32;
+        for entry in &self.history {
+            if matches!(&entry.record, AgentDomainEvent::Nudged { .. }) {
+                nudges = nudges.saturating_add(1);
+            } else if matches!(
+                &entry.record,
+                AgentDomainEvent::Parked { .. }
+                    | AgentDomainEvent::RunEnded {
+                        reason: RunEnd::Complete { .. } | RunEnd::Parked,
+                        ..
+                    }
+            ) {
+                nudges = 0;
+            }
+        }
+        nudges
+    }
+
+    /// Active timers, durable so they re-arm on recovery.
+    #[must_use]
+    pub fn timers(&self) -> &[crate::agent_loop::components::timers::domain::TimerRecord] {
+        self.component_state::<TimerState>()
+            .map_or(&[], TimerState::records)
+    }
+
+    /// The agent's own task list.
+    #[must_use]
+    pub fn task_list(&self) -> &crate::agent_loop::components::task_list::domain::TaskListState {
+        match self.component_state::<TaskListPart>() {
+            Some(part) => part.list(),
+            None => crate::agent_loop::components::task_list::empty_list(),
+        }
+    }
+
+    /// Cumulative token usage across every provider-backed history record.
+    #[must_use]
+    pub fn usage_total(&self) -> UsageTotal {
+        self.usage_total
+    }
+
+    /// The newest completed provider step's usage.
+    #[must_use]
+    pub fn last_turn_usage(&self) -> Option<&Usage> {
+        self.last_step_usage.as_ref()
+    }
+
+    #[must_use]
+    pub fn context_tokens(&self) -> u32 {
+        self.context_tokens
+    }
+
+    pub(crate) fn bank_step_usage(&mut self, usage: Usage) {
+        self.context_tokens = usage.input_tokens;
+        self.usage_total.add(&usage);
+        self.last_step_usage = Some(usage);
+    }
+
+    pub(crate) fn bank_usage(&mut self, usage: &Usage) {
+        self.usage_total.add(usage);
+    }
+
+    pub(crate) fn context_is(&mut self, tokens: u32) {
+        self.context_tokens = tokens;
+    }
+}
+
+/// One agent's own usage + context-size snapshot, with no message/task
+/// payload — cheaper than [`AgentHistoryPage`] when only the numbers are
+/// needed. Backs the session-level usage aggregation.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentUsageSnapshot {
+    pub usage_total: UsageTotal,
+    pub last_turn_usage: Option<Usage>,
+    pub context_tokens: u32,
+}
+
+/// One agent's current values: the task list and its usage/context numbers.
+/// Everything here is a value the client re-reads, never a log it accumulates —
+/// which is why none of it rides on a history page.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentStateView {
+    pub tasks: Vec<crate::agent_loop::components::task_list::domain::TaskRecord>,
+    pub usage_total: UsageTotal,
+    pub last_turn_usage: Option<Usage>,
+    pub context_tokens: u32,
+    /// The log position these values reflect, so a consumer holding a fold can
+    /// tell whether this read is ahead of it or behind.
+    pub as_of_seq: u64,
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod params_tests {
+    use crate::agent_loop::prelude::*;
+    use crate::agent_loop::testing::*;
+    #[test]
+    fn from_def_defaults_to_non_interactive() {
+        assert!(!AgentParams::from_def(&def_fixture()).interactive);
+    }
+
+    /// Only a step owes a result. For everyone else a turn ending with plain
+    /// text *is* the answer, and nudging one would be nonsense.
+    #[test]
+    fn from_def_owes_no_result() {
+        assert!(!AgentParams::from_def(&def_fixture()).requires_result);
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod history_tests {
+    use crate::agent_loop::prelude::*;
+    use horsie_agentcore::{AgentLogBody, ContentPart, Message, Role};
+    use horsie_models::agent::{
+        ArtifactKind, ArtifactRef, ImageArtifact, TextPart, ToolCallPart, Usage,
+    };
+
+    fn fold(state: AgentState, event: AgentDomainEvent) -> AgentState {
+        AgentActor::apply_event(state, event)
+    }
+
+    fn incoming(id: &str, text: &str) -> crate::agent_loop::Incoming {
+        crate::agent_loop::Incoming::User {
+            id: id.into(),
+            text: text.into(),
+            artifacts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn tool_result_artifacts_survive_the_history_fold() {
+        let artifact = ArtifactRef {
+            id: "image-id".into(),
+            media_type: "image/png".into(),
+            kind: ArtifactKind::Image(ImageArtifact {
+                width: Some(640),
+                height: Some(480),
+            }),
+            byte_size: 12,
+            filename: Some("page.png".into()),
+        };
+        let state = fold(
+            AgentActor::initial_state(),
+            AgentDomainEvent::ToolComplete {
+                tool_call_id: "tc1".into(),
+                output: "Image loaded.".into(),
+                is_error: false,
+                artifacts: vec![artifact.clone()],
+                at_ms: 1,
+            },
+        );
+        let transcript = state.transcript();
+        let AgentLogBody::Llm(message) = &transcript.entries()[0].body else {
+            panic!("expected tool result message")
+        };
+        let ContentPart::ToolResult(result) = &message.parts[0] else {
+            panic!("expected tool result part")
+        };
+        assert_eq!(result.artifacts, vec![artifact]);
+    }
+
+    #[test]
+    fn pending_input_is_derived_from_history_without_queue_state() {
+        let state = [
+            AgentDomainEvent::Received {
+                item: incoming("one", "first"),
+                at_ms: 1,
+            },
+            AgentDomainEvent::Received {
+                item: incoming("two", "second"),
+                at_ms: 2,
+            },
+            AgentDomainEvent::TurnBegan {
+                consumed: vec!["one".into()],
+                abandoned: Vec::new(),
+                rewritten: None,
+                at_ms: 3,
+            },
+        ]
+        .into_iter()
+        .fold(AgentActor::initial_state(), fold);
+
+        assert_eq!(state.pending_incoming(), vec![incoming("two", "second")]);
+        assert!(state.turn_in_flight());
+        assert!(matches!(
+            state.next_input(),
+            Some(crate::agent_loop::PendingInput::Input(_))
+        ));
+    }
+
+    #[test]
+    fn cancellation_preserves_input_received_during_a_step() {
+        let state = [
+            AgentDomainEvent::StepStarted {
+                kind: StepKind::Provider,
+            },
+            AgentDomainEvent::Received {
+                item: incoming("later", "next run"),
+                at_ms: 1,
+            },
+            AgentDomainEvent::RunEnded {
+                reason: RunEnd::Cancelled,
+                at_ms: 2,
+            },
+        ]
+        .into_iter()
+        .fold(AgentActor::initial_state(), fold);
+
+        assert_eq!(state.pending_incoming(), [incoming("later", "next run")]);
+        assert!(matches!(
+            state.next_input(),
+            Some(crate::agent_loop::PendingInput::Input(_))
+        ));
+    }
+
+    #[test]
+    fn seeding_adopts_history_without_recording_a_recursive_snapshot() {
+        let source = fold(
+            AgentActor::initial_state(),
+            AgentDomainEvent::SystemPromptRecorded {
+                source: SystemPromptSource::Configured,
+                content: "fixed".into(),
+            },
+        );
+        let seeded = fold(
+            AgentActor::initial_state(),
+            AgentDomainEvent::Seeded {
+                state: Box::new(source.clone()),
+            },
+        );
+        assert_eq!(seeded.history().len(), source.history().len());
+        assert!(matches!(
+            &seeded.history()[0].record,
+            AgentDomainEvent::SystemPromptRecorded { content, .. } if content == "fixed"
+        ));
+    }
+
+    #[test]
+    fn step_marker_sequence_is_its_identity() {
+        let state = fold(
+            AgentActor::initial_state(),
+            AgentDomainEvent::StepStarted {
+                kind: StepKind::Provider,
+            },
+        );
+        assert_eq!(state.open_step(), Some((0, &StepKind::Provider)));
+        assert_eq!(state.next_history_seq(), 1);
+    }
+
+    #[test]
+    fn initialization_records_immutable_prompt_bytes_once() {
+        let events = [
+            AgentDomainEvent::SystemPromptRecorded {
+                source: SystemPromptSource::InitialContext,
+                content: "fixed prompt".into(),
+            },
+            AgentDomainEvent::AgentInitialized {
+                manifest: ContextManifest::default(),
+            },
+            AgentDomainEvent::StepStarted {
+                kind: StepKind::Provider,
+            },
+            AgentDomainEvent::InputMessage {
+                message: Message::user("u", "later", 1),
+            },
+        ];
+        let state = events.into_iter().fold(AgentActor::initial_state(), fold);
+        assert!(state.initialized());
+        assert_eq!(state.system_prompt(), "fixed prompt");
+    }
+
+    #[test]
+    fn every_provider_step_banks_usage_before_run_end() {
+        let message = |id: &str| Message {
+            id: id.into(),
+            role: Role::Assistant,
+            parts: vec![ContentPart::Text(TextPart { text: "ok".into() })],
+            created_at_ms: 1,
+            started_at_ms: None,
+        };
+        let state = [
+            AgentDomainEvent::MessageComplete {
+                message: message("a1"),
+                usage: Usage::without_cache(10, 2),
+            },
+            AgentDomainEvent::MessageComplete {
+                message: message("a2"),
+                usage: Usage::without_cache(20, 3),
+            },
+        ]
+        .into_iter()
+        .fold(AgentActor::initial_state(), fold);
+        assert_eq!(state.usage_total().input_tokens, 30);
+        assert_eq!(state.usage_total().output_tokens, 5);
+        assert_eq!(state.context_tokens(), 20);
+        assert!(
+            !state
+                .history()
+                .iter()
+                .any(|entry| matches!(&entry.record, AgentDomainEvent::RunEnded { .. }))
+        );
+    }
+
+    #[test]
+    fn a_completed_compaction_closes_its_step() {
+        let state = [
+            AgentDomainEvent::StepStarted {
+                kind: StepKind::Compaction,
+            },
+            AgentDomainEvent::Compacted {
+                summary: "summary".into(),
+                carried_state: String::new(),
+                retained_from_message_id: None,
+                trigger: horsie_agentcore::CompactionTrigger::Manual(
+                    horsie_agentcore::EmptyOutcome {},
+                ),
+                instructions: None,
+                tokens_before: 100,
+                tokens_after: 20,
+                usage: None,
+                at_ms: 1,
+            },
+        ]
+        .into_iter()
+        .fold(AgentActor::initial_state(), fold);
+        assert!(state.open_step_has_response());
+        assert!(!state.prompt_changed_since_compaction());
+        let changed = fold(
+            state,
+            AgentDomainEvent::InputMessage {
+                message: Message::user("u", "new input", 2),
+            },
+        );
+        assert!(changed.prompt_changed_since_compaction());
+    }
+
+    #[test]
+    fn explicit_workspace_inspection_is_ordinary_history() {
+        let initial = fold(
+            fold(
+                AgentActor::initial_state(),
+                AgentDomainEvent::SystemPromptRecorded {
+                    source: SystemPromptSource::InitialContext,
+                    content: "initial observation".into(),
+                },
+            ),
+            AgentDomainEvent::AgentInitialized {
+                manifest: ContextManifest::default(),
+            },
+        );
+        let assistant = Message {
+            id: "a".into(),
+            role: Role::Assistant,
+            parts: vec![ContentPart::ToolCall(ToolCallPart {
+                id: "scan".into(),
+                name: crate::agent_loop::INSPECT_WORKSPACE_TOOL.into(),
+                input: serde_json::json!({}),
+            })],
+            created_at_ms: 2,
+            started_at_ms: None,
+        };
+        let state = fold(
+            fold(
+                initial,
+                AgentDomainEvent::MessageComplete {
+                    message: assistant,
+                    usage: Usage::without_cache(5, 1),
+                },
+            ),
+            AgentDomainEvent::ToolComplete {
+                tool_call_id: "scan".into(),
+                output: "current workspace".into(),
+                is_error: false,
+                artifacts: Vec::new(),
+                at_ms: 3,
+            },
+        );
+        assert_eq!(state.system_prompt(), "initial observation");
+        assert!(state.prompt_messages().iter().any(|message| {
+            message.parts.iter().any(|part| {
+                matches!(
+                    part,
+                    ContentPart::ToolResult(result) if result.tool_call_id == "scan"
+                )
+            })
+        }));
+    }
+
+    #[test]
+    fn compaction_and_seed_summary_bank_usage_independently() {
+        let state = fold(
+            AgentActor::initial_state(),
+            AgentDomainEvent::Compacted {
+                summary: "summary".into(),
+                carried_state: String::new(),
+                retained_from_message_id: None,
+                trigger: horsie_agentcore::CompactionTrigger::Manual(
+                    horsie_agentcore::EmptyOutcome {},
+                ),
+                instructions: None,
+                tokens_before: 100,
+                tokens_after: 20,
+                usage: Some(Usage::without_cache(30, 4)),
+                at_ms: 1,
+            },
+        );
+        let state = fold(
+            state,
+            AgentDomainEvent::SeedSummaryTaken {
+                request_id: "seed-1".into(),
+                sub_sessions: Vec::new(),
+                result: Ok("seed".into()),
+                usage: Some(Usage::without_cache(7, 2)),
+                at_ms: 2,
+            },
+        );
+        assert_eq!(state.usage_total().input_tokens, 37);
+        assert_eq!(state.usage_total().output_tokens, 6);
+        assert_eq!(state.context_tokens(), 20);
+    }
+}

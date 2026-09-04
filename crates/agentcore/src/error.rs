@@ -2,39 +2,6 @@ use crate::events::EventSinkError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum AgentBuildError {
-    #[error("nudge_threshold ({nudge}) must be less than stuck_threshold ({stuck})")]
-    InvalidConfig { nudge: usize, stuck: usize },
-}
-
-#[derive(Debug, Error)]
-pub enum AgentError {
-    #[error("max iterations exceeded (max={max})")]
-    MaxIterationsExceeded { max: u32 },
-
-    #[error("stuck in loop: tool '{tool_name}' called identically {count} times")]
-    StuckInLoop { tool_name: String, count: usize },
-
-    #[error("provider error: {0}")]
-    Provider(#[from] LlmError),
-
-    /// An event sink failed to handle an event durably (e.g. a journal write
-    /// failed), so the run is aborted rather than proceeding on an unrecorded
-    /// history.
-    #[error("event sink error: {0}")]
-    EventSink(#[from] EventSinkError),
-
-    /// The backend stopped because it hit the output-token ceiling. The partial
-    /// text is not a valid answer, so the run fails rather than returning it as
-    /// a completed turn.
-    #[error("response truncated at the max_tokens limit ({max_tokens:?})")]
-    Truncated { max_tokens: Option<u32> },
-
-    #[error("cancelled")]
-    Cancelled,
-}
-
-#[derive(Debug, Error)]
 pub enum LlmError {
     #[error("rate limited (retry after {retry_after:?})")]
     RateLimit {
@@ -110,27 +77,6 @@ pub enum ToolCallError {
 )]
 mod tests {
     use super::*;
-
-    #[test]
-    fn agent_error_cancelled_display() {
-        assert_eq!(AgentError::Cancelled.to_string(), "cancelled");
-    }
-
-    #[test]
-    fn agent_error_max_iterations_display() {
-        let e = AgentError::MaxIterationsExceeded { max: 50 };
-        assert!(e.to_string().contains("50"));
-    }
-
-    #[test]
-    fn agent_error_stuck_display() {
-        let e = AgentError::StuckInLoop {
-            tool_name: "search".into(),
-            count: 5,
-        };
-        assert!(e.to_string().contains("search"));
-        assert!(e.to_string().contains("5"));
-    }
 
     #[test]
     fn tool_call_error_invalid_input_display() {

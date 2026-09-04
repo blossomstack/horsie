@@ -84,6 +84,7 @@ test("H3: marking a task completed updates the widget", async ({
   await createSession(page, appBase);
   await sendMessage(page, "make a plan");
   await openPlan(page);
+  await expectStatus(page, "Idle");
 
   await mock.queueToolCall("task_list", {
     action: "update_status",
