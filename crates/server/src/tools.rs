@@ -90,6 +90,14 @@ const RUNTIME: &[Row] = &[
     read("list_files", "List a directory's contents."),
     read("glob", "Find files by glob pattern."),
     read("grep", "Search file contents by regex."),
+    read(
+        "inspect_pull_request",
+        "Read compact pull-request metadata and checks.",
+    ),
+    read(
+        "inspect_pull_request_diff",
+        "List changed files or read one file's pull-request patch.",
+    ),
     write(
         "set_working_dir",
         "Set the directory later tool calls resolve against.",

@@ -9,6 +9,8 @@ export * from './replaceLinesInput';
 export * from './listFilesInput';
 export * from './globInput';
 export * from './grepInput';
+export * from './inspectPullRequestInput';
+export * from './inspectPullRequestDiffInput';
 export * from './setWorkingDirInput';
 export * from './setEnvInput';
 export * from './toolCall';

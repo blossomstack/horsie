@@ -4,6 +4,7 @@ mod find_and_replace;
 mod glob;
 mod grep;
 mod list_files;
+mod pull_request;
 mod read_file;
 mod replace_lines;
 mod set_env;
@@ -16,6 +17,7 @@ pub use find_and_replace::FindAndReplaceTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use list_files::ListFilesTool;
+pub use pull_request::{InspectPullRequestDiffTool, InspectPullRequestTool};
 pub use read_file::ReadFileTool;
 pub use replace_lines::ReplaceLinesTool;
 pub use set_env::SetEnvTool;
@@ -140,6 +142,8 @@ pub fn add_runtime_tools(toolbox: ToolboxImpl, client: RuntimeClient) -> Toolbox
         .add(ListFilesTool::new(client.clone()))
         .add(GlobTool::new(client.clone()))
         .add(GrepTool::new(client.clone()))
+        .add(InspectPullRequestTool::new(client.clone()))
+        .add(InspectPullRequestDiffTool::new(client.clone()))
         .add(SetWorkingDirTool::new(client.clone()))
         .add(SetEnvTool::new(client))
 }

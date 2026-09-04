@@ -4,6 +4,7 @@ pub mod find_and_replace;
 pub mod glob;
 pub mod grep;
 pub mod list_files;
+pub mod pull_request;
 pub mod read_file;
 pub mod read_image;
 pub mod replace_lines;
@@ -87,6 +88,14 @@ pub async fn dispatch(
         },
         ToolCall::Grep(i) => match dir {
             Ok(d) => grep::exec(&d, i).await,
+            Err(reason) => ToolResult::Err(ToolError { reason }),
+        },
+        ToolCall::InspectPullRequest(i) => match dir {
+            Ok(d) => pull_request::inspect(&d, i).await,
+            Err(reason) => ToolResult::Err(ToolError { reason }),
+        },
+        ToolCall::InspectPullRequestDiff(i) => match dir {
+            Ok(d) => pull_request::inspect_diff(&d, i).await,
             Err(reason) => ToolResult::Err(ToolError { reason }),
         },
     }
