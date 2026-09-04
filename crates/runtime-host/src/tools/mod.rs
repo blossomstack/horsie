@@ -53,6 +53,81 @@ pub(crate) fn render_output(o: ToolOutput) -> Result<Value, ToolCallError> {
     Ok(Value::String(text))
 }
 
+pub(crate) fn render_command_output(o: ToolOutput) -> Result<Value, ToolCallError> {
+    if o.exit_code == 0 {
+        return render_output(o);
+    }
+    let diagnostics = rust_diagnostics(&o.stderr);
+    let output = if diagnostics.is_empty() {
+        join_streams(o.stdout, o.stderr)
+    } else {
+        let joined = join_streams(o.stdout, o.stderr);
+        joined
+            .lines()
+            .rev()
+            .take(15)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    Err(ToolCallError::CommandFailed(
+        horsie_agentcore::CommandFailure {
+            exit_code: o.exit_code,
+            diagnostics,
+            output,
+        },
+    ))
+}
+
+fn join_streams(stdout: String, stderr: String) -> String {
+    match (stdout.is_empty(), stderr.is_empty()) {
+        (true, _) => stderr,
+        (_, true) => stdout,
+        (false, false) => format!("{stdout}\n{stderr}"),
+    }
+}
+
+fn rust_diagnostics(stderr: &str) -> Vec<horsie_agentcore::CommandDiagnostic> {
+    let lines: Vec<&str> = stderr.lines().collect();
+    let mut diagnostics = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        let parsed = trimmed
+            .strip_prefix("error[")
+            .and_then(|rest| rest.split_once("]: "))
+            .map(|(code, message)| (Some(code.to_string()), message.to_string()))
+            .or_else(|| {
+                trimmed
+                    .strip_prefix("error: ")
+                    .map(|message| (None, message.to_string()))
+            });
+        let Some((code, message)) = parsed else {
+            continue;
+        };
+        let location = lines
+            .iter()
+            .skip(index + 1)
+            .take(4)
+            .find_map(|candidate| candidate.trim().strip_prefix("--> "))
+            .map(str::to_string);
+        if location.is_none() && code.is_none() {
+            continue;
+        }
+        diagnostics.push(horsie_agentcore::CommandDiagnostic {
+            severity: "error".to_string(),
+            code,
+            message,
+            location,
+        });
+        if diagnostics.len() == 20 {
+            break;
+        }
+    }
+    diagnostics
+}
+
 /// Add all runtime-backed tools to an existing ToolboxImpl.
 pub fn add_runtime_tools(toolbox: ToolboxImpl, client: RuntimeClient) -> ToolboxImpl {
     toolbox

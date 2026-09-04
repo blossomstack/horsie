@@ -89,6 +89,50 @@ impl LlmError {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandDiagnostic {
+    pub severity: String,
+    pub code: Option<String>,
+    pub message: String,
+    pub location: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandFailure {
+    pub exit_code: i32,
+    pub diagnostics: Vec<CommandDiagnostic>,
+    pub output: String,
+}
+
+impl std::fmt::Display for CommandFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "exit code: {}", self.exit_code)?;
+        if !self.diagnostics.is_empty() {
+            writeln!(f, "diagnostics:")?;
+            for diagnostic in &self.diagnostics {
+                write!(f, "- {}", diagnostic.severity)?;
+                if let Some(code) = &diagnostic.code {
+                    write!(f, "[{code}]")?;
+                }
+                write!(f, ": {}", diagnostic.message)?;
+                if let Some(location) = &diagnostic.location {
+                    write!(f, " at {location}")?;
+                }
+                writeln!(f)?;
+            }
+        }
+        if !self.output.trim().is_empty() {
+            write!(
+                f,
+                "output:
+{}",
+                self.output.trim()
+            )?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ToolCallError {
     #[error("invalid input: {0}")]
@@ -99,6 +143,9 @@ pub enum ToolCallError {
 
     #[error("execution failed: {0}")]
     ExecutionFailed(String),
+
+    #[error("command failed: {0}")]
+    CommandFailed(CommandFailure),
 }
 
 #[cfg(test)]
