@@ -18,8 +18,9 @@ use horsie_models::session::{
     SubSessionView, UsageView,
 };
 use horsie_models::session_api::{
-    Ack, AgentDocument, CreateSessionRequest, CreateSessionResponse, GetAgentResponse,
-    SendMessageRequest, SessionAck,
+    Ack, AgentDocument, CreateSessionRequest, CreateSessionResponse, EfficiencyDiagnostic,
+    GetAgentResponse, SendMessageRequest, SessionAck, SessionEfficiencyAgent,
+    SessionEfficiencyReport,
 };
 use std::collections::BTreeMap;
 
@@ -181,6 +182,7 @@ pub(crate) fn detail(
     // does not know. They agree except in the window where the actor has folded
     // a transition it has not reported yet, and there the actor is right.
     let status = snapshot.map_or_else(|| rec.status.clone(), |s| s.status.clone());
+    let usage_total = snapshot.as_ref().map(|s| s.usage_total).unwrap_or_default();
     SessionDetail {
         id: id.to_string(),
         name: rec.name.clone(),
@@ -211,7 +213,7 @@ pub(crate) fn detail(
         // than on a history page or a separate endpoint. Both come off the same
         // snapshot as `status` — the session's actor is the only thing that
         // knows any of it, and it answers all of it at once.
-        usage_total: to_wire_usage(snapshot.as_ref().map(|s| s.usage_total).unwrap_or_default()),
+        usage_total: to_wire_usage(usage_total),
         agents: snapshot
             .map(|s| s.agents.iter().map(|a| to_wire_agent(a, windows)).collect())
             .unwrap_or_default(),
@@ -377,6 +379,128 @@ fn to_wire_stats(
     }
 }
 
+fn percent(numerator: u64, denominator: u64) -> Option<u32> {
+    (denominator > 0).then(|| {
+        u32::try_from(numerator.saturating_mul(100).saturating_div(denominator))
+            .unwrap_or(u32::MAX)
+            .min(100)
+    })
+}
+
+fn efficiency_diagnostic(
+    usage: crate::agent_loop::UsageTotal,
+    stats: crate::agent_loop::AgentEfficiencyStats,
+) -> EfficiencyDiagnostic {
+    let cache_read_percent = usage
+        .cache_read_tokens
+        .and_then(|tokens| percent(tokens, usage.input_tokens));
+    let tool_failure_percent = percent(stats.failed_tool_calls, stats.tool_calls);
+    let output_retention_percent =
+        percent(stats.tool_result_bytes, stats.original_tool_result_bytes);
+    let mut findings = Vec::new();
+    if stats.provider_calls == 0 {
+        findings.push("No provider calls have completed yet.".to_string());
+    }
+    if stats.provider_calls >= 3 && cache_read_percent.is_some_and(|ratio| ratio < 25) {
+        findings.push("Prompt-cache reads are below 25% of cumulative input tokens.".to_string());
+    }
+    if stats.tool_calls >= 5 && tool_failure_percent.is_some_and(|ratio| ratio >= 20) {
+        findings.push(
+            "At least 20% of tool calls failed; retries may be adding provider turns.".to_string(),
+        );
+    }
+    if stats.truncated_tool_result_bytes > 0 {
+        findings.push(format!(
+            "Output guards kept {} bytes out of model context; {} bytes were preserved in spill files.",
+            stats.truncated_tool_result_bytes, stats.spilled_tool_result_bytes
+        ));
+    }
+    if stats.aborted_runs > 0 {
+        findings.push(format!(
+            "{} agent run(s) aborted after starting; inspect their terminal errors.",
+            stats.aborted_runs
+        ));
+    }
+    if findings.is_empty() {
+        findings
+            .push("No obvious efficiency issue is visible in the durable counters.".to_string());
+    }
+    EfficiencyDiagnostic {
+        average_input_tokens_per_provider_call: usage
+            .input_tokens
+            .checked_div(stats.provider_calls)
+            .unwrap_or(0),
+        average_output_tokens_per_provider_call: usage
+            .output_tokens
+            .checked_div(stats.provider_calls)
+            .unwrap_or(0),
+        average_provider_generation_ms: stats
+            .provider_generation_ms
+            .checked_div(stats.provider_calls)
+            .unwrap_or(0),
+        average_tool_execution_ms: stats
+            .tool_execution_ms
+            .checked_div(stats.result_tool_calls)
+            .unwrap_or(0),
+        cache_read_percent,
+        tool_failure_percent,
+        output_retention_percent,
+        findings,
+    }
+}
+
+pub(crate) fn session_efficiency_report(
+    session_id: &str,
+    snapshot: &crate::sessions::session_actor::SessionSnapshot,
+    windows: &ContextWindows,
+) -> SessionEfficiencyReport {
+    let mut agents = snapshot
+        .agents
+        .iter()
+        .map(|agent| SessionEfficiencyAgent {
+            id: agent.id.clone(),
+            parent: agent.parent.map(|id| id.to_string()),
+            title: agent.title.clone(),
+            kind: wire_kind(agent.kind).to_string(),
+            status: agent.status.as_wire().to_string(),
+            model: agent.model.clone(),
+            usage: to_wire_usage(agent.stats.usage),
+            context_tokens: agent.stats.context_tokens,
+            context_window: agent
+                .model
+                .as_deref()
+                .and_then(|model| windows.get(model).copied()),
+            efficiency: to_wire_efficiency(agent.stats.efficiency),
+            diagnostic: efficiency_diagnostic(agent.stats.usage, agent.stats.efficiency),
+        })
+        .collect::<Vec<_>>();
+    agents.extend(snapshot.sub_sessions.iter().map(|agent| {
+        SessionEfficiencyAgent {
+            id: agent.id.to_string(),
+            parent: agent.parent.map(|id| id.to_string()),
+            title: Some(agent.title.clone()),
+            kind: "sub_session".to_string(),
+            status: agent.status.as_wire().to_string(),
+            model: agent.model.clone(),
+            usage: to_wire_usage(agent.stats.usage),
+            context_tokens: agent.stats.context_tokens,
+            context_window: agent
+                .model
+                .as_deref()
+                .and_then(|model| windows.get(model).copied()),
+            efficiency: to_wire_efficiency(agent.stats.efficiency),
+            diagnostic: efficiency_diagnostic(agent.stats.usage, agent.stats.efficiency),
+        }
+    }));
+    SessionEfficiencyReport {
+        session_id: session_id.to_string(),
+        usage_total: to_wire_usage(snapshot.usage_total),
+        efficiency_total: to_wire_efficiency(snapshot.efficiency_total),
+        diagnostic: efficiency_diagnostic(snapshot.usage_total, snapshot.efficiency_total),
+        agents,
+    }
+}
+
 fn to_wire_efficiency(
     stats: crate::agent_loop::AgentEfficiencyStats,
 ) -> horsie_models::session::EfficiencyStats {
@@ -385,6 +509,7 @@ fn to_wire_efficiency(
         provider_generation_ms: stats.provider_generation_ms,
         max_provider_generation_ms: stats.max_provider_generation_ms,
         tool_calls: stats.tool_calls,
+        result_tool_calls: stats.result_tool_calls,
         tool_execution_ms: stats.tool_execution_ms,
         max_tool_execution_ms: stats.max_tool_execution_ms,
         failed_tool_calls: stats.failed_tool_calls,
@@ -549,6 +674,132 @@ mod tests {
     use super::*;
     use crate::sessions::session_actor::AgentStatus;
     use uuid::Uuid;
+
+    #[test]
+    fn efficiency_report_turns_durable_counters_into_actionable_ratios() {
+        let report = efficiency_diagnostic(
+            crate::agent_loop::UsageTotal {
+                input_tokens: 1_000,
+                output_tokens: 100,
+                cache_creation_tokens: Some(0),
+                cache_read_tokens: Some(100),
+            },
+            crate::agent_loop::AgentEfficiencyStats {
+                provider_calls: 5,
+                provider_generation_ms: 500,
+                max_provider_generation_ms: 200,
+                tool_calls: 10,
+                result_tool_calls: 8,
+                tool_execution_ms: 80,
+                max_tool_execution_ms: 30,
+                failed_tool_calls: 2,
+                tool_result_bytes: 25,
+                original_tool_result_bytes: 100,
+                truncated_tool_result_bytes: 75,
+                spilled_tool_result_bytes: 100,
+                completed_runs: 1,
+                aborted_runs: 1,
+                compactions: 0,
+            },
+        );
+        assert_eq!(report.average_input_tokens_per_provider_call, 200);
+        assert_eq!(report.average_output_tokens_per_provider_call, 20);
+        assert_eq!(report.average_provider_generation_ms, 100);
+        assert_eq!(report.average_tool_execution_ms, 10);
+        assert_eq!(report.cache_read_percent, Some(10));
+        assert_eq!(report.tool_failure_percent, Some(20));
+        assert_eq!(report.output_retention_percent, Some(25));
+        assert_eq!(report.findings.len(), 4);
+    }
+
+    #[test]
+    fn absent_cache_telemetry_is_not_reported_as_zero_cache_reuse() {
+        let report = efficiency_diagnostic(
+            crate::agent_loop::UsageTotal {
+                input_tokens: 1_000,
+                output_tokens: 10,
+                cache_creation_tokens: None,
+                cache_read_tokens: None,
+            },
+            crate::agent_loop::AgentEfficiencyStats {
+                provider_calls: 5,
+                ..Default::default()
+            },
+        );
+        assert_eq!(report.cache_read_percent, None);
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|finding| !finding.contains("Prompt-cache"))
+        );
+    }
+
+    #[test]
+    fn session_efficiency_projection_uses_direct_agent_usage_and_banked_total() {
+        let agent = AgentEntry {
+            id: "main".into(),
+            parent: None,
+            title: Some("work".into()),
+            depth: 0,
+            agent_type: None,
+            status: AgentStatus::Idle,
+            error: None,
+            kind: crate::sessions::session_actor::AgentKind::Main,
+            input: None,
+            output: None,
+            stats: crate::sessions::session_actor::AgentStats {
+                usage: crate::agent_loop::UsageTotal {
+                    input_tokens: 200,
+                    output_tokens: 20,
+                    ..Default::default()
+                },
+                subtree_usage: crate::agent_loop::UsageTotal {
+                    input_tokens: 900,
+                    output_tokens: 90,
+                    ..Default::default()
+                },
+                context_tokens: 50,
+                efficiency: crate::agent_loop::AgentEfficiencyStats {
+                    provider_calls: 2,
+                    provider_generation_ms: 100,
+                    max_provider_generation_ms: 80,
+                    ..Default::default()
+                },
+            },
+            model: Some("model".into()),
+            preset: None,
+            started_at_ms: 0,
+            ended_at_ms: 0,
+            run: None,
+            workflow: None,
+        };
+        let snapshot = crate::sessions::session_actor::SessionSnapshot {
+            status: SessionStatus::Idle,
+            usage_total: crate::agent_loop::UsageTotal {
+                input_tokens: 1_000,
+                output_tokens: 100,
+                ..Default::default()
+            },
+            efficiency_total: crate::agent_loop::AgentEfficiencyStats {
+                provider_calls: 9,
+                provider_generation_ms: 900,
+                max_provider_generation_ms: 300,
+                ..Default::default()
+            },
+            agents: vec![agent],
+            sub_sessions: Vec::new(),
+        };
+        let report = session_efficiency_report(
+            "session",
+            &snapshot,
+            &ContextWindows::from([("model".to_string(), 10_000)]),
+        );
+        assert_eq!(report.efficiency_total.provider_calls, 9);
+        assert_eq!(report.diagnostic.average_provider_generation_ms, 100);
+        assert_eq!(report.agents[0].usage.input_tokens, 200);
+        assert_eq!(report.agents[0].context_window, Some(10_000));
+    }
 
     /// A registry row for a session that has never been branched. The two
     /// documents below are projections of this and nothing else.

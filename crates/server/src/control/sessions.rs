@@ -16,6 +16,7 @@ use horsie_models::agent::LogEntryKind;
 use horsie_models::session::SessionSummary;
 use horsie_models::session_api::{
     Ack, GetSessionResponse, ListSessionsResponse, LogSearchPage, MessagesPage,
+    SessionEfficiencyReport,
 };
 use std::sync::Arc;
 
@@ -170,6 +171,33 @@ impl Resource for Sessions {
                     Ok::<GetSessionResponse, ControlError>(GetSessionResponse {
                         session: handlers::detail(&i.id, &rec, snapshot.as_ref(), &windows),
                     })
+                },
+            ),
+            op(
+                "efficiency",
+                Method::Get,
+                "/sessions/{id}/efficiency",
+                "Compact lifetime efficiency diagnostics for a session and each agent: provider and tool latency, cache use, failures, and output truncation.",
+                Expose::ApiAndTool,
+                |s: Arc<ProjectServices>, i: SessionRef| async move {
+                    let (_, snapshot) = ask(&s, |reply| SessionSupervisorCommand::Get {
+                        id: i.id.clone(),
+                        reply,
+                    })
+                    .await?
+                    .ok_or_else(|| ControlError::NotFound(format!("no such session: {}", i.id)))?;
+                    let snapshot = snapshot.ok_or_else(|| {
+                        ControlError::Internal(
+                            "session efficiency is unavailable until its durable state is loaded"
+                                .to_string(),
+                        )
+                    })?;
+                    let windows = handlers::context_windows(&s.config_store)
+                        .await
+                        .map_err(ControlError::Internal)?;
+                    Ok::<SessionEfficiencyReport, ControlError>(
+                        handlers::session_efficiency_report(&i.id, &snapshot, &windows),
+                    )
                 },
             ),
             op(
@@ -388,7 +416,16 @@ mod tests {
         actions.sort_unstable();
         assert_eq!(
             actions,
-            ["delete", "get", "list", "read", "rename", "search", "stop"]
+            [
+                "delete",
+                "efficiency",
+                "get",
+                "list",
+                "read",
+                "rename",
+                "search",
+                "stop",
+            ]
         );
         assert_eq!(Sessions.name(), "sessions");
     }
@@ -396,6 +433,17 @@ mod tests {
     #[test]
     fn every_path_param_is_a_field_of_its_input() {
         crate::control::tests::assert_path_params_are_inputs(&operations());
+    }
+
+    #[test]
+    fn efficiency_is_a_compact_api_and_tool_read() {
+        let operation = operations()
+            .into_iter()
+            .find(|operation| operation.action == "efficiency")
+            .unwrap();
+        assert_eq!(operation.method, Method::Get);
+        assert_eq!(operation.path, "/sessions/{id}/efficiency");
+        assert_eq!(operation.expose, Expose::ApiAndTool);
     }
 
     /// The transcript read is the one operation the router must not mount: it

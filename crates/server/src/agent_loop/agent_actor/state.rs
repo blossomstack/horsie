@@ -119,6 +119,7 @@ pub struct AgentEfficiencyStats {
     pub provider_generation_ms: u64,
     pub max_provider_generation_ms: u64,
     pub tool_calls: u64,
+    pub result_tool_calls: u64,
     pub tool_execution_ms: u64,
     pub max_tool_execution_ms: u64,
     pub failed_tool_calls: u64,
@@ -132,6 +133,45 @@ pub struct AgentEfficiencyStats {
 }
 
 impl AgentEfficiencyStats {
+    #[must_use]
+    pub fn combine(self, other: Self) -> Self {
+        Self {
+            provider_calls: self.provider_calls.saturating_add(other.provider_calls),
+            provider_generation_ms: self
+                .provider_generation_ms
+                .saturating_add(other.provider_generation_ms),
+            max_provider_generation_ms: self
+                .max_provider_generation_ms
+                .max(other.max_provider_generation_ms),
+            tool_calls: self.tool_calls.saturating_add(other.tool_calls),
+            result_tool_calls: self
+                .result_tool_calls
+                .saturating_add(other.result_tool_calls),
+            tool_execution_ms: self
+                .tool_execution_ms
+                .saturating_add(other.tool_execution_ms),
+            max_tool_execution_ms: self.max_tool_execution_ms.max(other.max_tool_execution_ms),
+            failed_tool_calls: self
+                .failed_tool_calls
+                .saturating_add(other.failed_tool_calls),
+            tool_result_bytes: self
+                .tool_result_bytes
+                .saturating_add(other.tool_result_bytes),
+            original_tool_result_bytes: self
+                .original_tool_result_bytes
+                .saturating_add(other.original_tool_result_bytes),
+            truncated_tool_result_bytes: self
+                .truncated_tool_result_bytes
+                .saturating_add(other.truncated_tool_result_bytes),
+            spilled_tool_result_bytes: self
+                .spilled_tool_result_bytes
+                .saturating_add(other.spilled_tool_result_bytes),
+            completed_runs: self.completed_runs.saturating_add(other.completed_runs),
+            aborted_runs: self.aborted_runs.saturating_add(other.aborted_runs),
+            compactions: self.compactions.saturating_add(other.compactions),
+        }
+    }
+
     pub(super) fn observe(&mut self, event: &AgentDomainEvent) {
         match event {
             AgentDomainEvent::MessageComplete { message }
@@ -161,6 +201,7 @@ impl AgentEfficiencyStats {
                 at_ms,
                 ..
             } => {
+                self.result_tool_calls = self.result_tool_calls.saturating_add(1);
                 let execution_ms = at_ms.saturating_sub(*started_at_ms);
                 self.tool_execution_ms = self.tool_execution_ms.saturating_add(execution_ms);
                 self.max_tool_execution_ms = self.max_tool_execution_ms.max(execution_ms);

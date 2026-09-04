@@ -169,6 +169,7 @@ struct EfficiencyStats {
     provider_generation_ms: u64,
     max_provider_generation_ms: u64,
     tool_calls: u64,
+    result_tool_calls: u64,
     tool_execution_ms: u64,
     max_tool_execution_ms: u64,
     failed_tool_calls: u64,
