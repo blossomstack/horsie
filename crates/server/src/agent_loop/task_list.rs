@@ -37,6 +37,14 @@ impl TaskStatus {
             TaskStatus::Completed => "x",
         }
     }
+
+    fn label(self) -> &'static str {
+        match self {
+            TaskStatus::Pending => "pending",
+            TaskStatus::InProgress => "in_progress",
+            TaskStatus::Completed => "completed",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +124,40 @@ impl TaskListState {
         }
         out.pop(); // drop trailing newline
         out
+    }
+
+    /// Render the model-facing result without repeating the full list after
+    /// every small mutation. The durable lifecycle event still carries the
+    /// complete snapshot for clients.
+    pub fn render_result(&self, action: &TaskListAction) -> String {
+        match action {
+            TaskListAction::Create { .. } | TaskListAction::List => self.render(),
+            TaskListAction::Insert { tasks, .. } => {
+                let first = self.next_id.saturating_sub(tasks.len() as u32);
+                let ids = (first..self.next_id)
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("Inserted task(s) {ids}. {}", self.progress())
+            }
+            TaskListAction::UpdateStatus { ids, status } => {
+                let ids = ids
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("Task(s) {ids} → {}. {}", status.label(), self.progress())
+            }
+        }
+    }
+
+    fn progress(&self) -> String {
+        let done = self
+            .tasks
+            .iter()
+            .filter(|task| task.status == TaskStatus::Completed)
+            .count();
+        format!("Progress: {done}/{} complete.", self.tasks.len())
     }
 
     /// Apply one action, atomically: on error, `self` is left unchanged (no
@@ -228,7 +270,7 @@ pub fn task_list_tool_spec() -> ToolSpec {
             'insert' adds one or more new tasks at a position (default: end). \
             'update_status' marks one or more tasks by id as pending, \
             in_progress, or completed. 'list' returns the current state. \
-            Every action returns the full current list. New tasks always start \
+            'create' and 'list' return the full state; mutations return a compact summary. New tasks always start \
             as pending; move them with 'update_status'. \
             Example — create: {\"action\": \"create\", \"tasks\": [\"write tests\", \"ship it\"]}. \
             Example — mark done: {\"action\": \"update_status\", \"ids\": [1], \"status\": \"completed\"}."
@@ -531,6 +573,21 @@ mod tests {
     fn update_status_rejects_missing_status() {
         let err = parse(json!({"action": "update_status", "ids": [1]})).unwrap_err();
         assert!(matches!(err, ToolCallError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn mutation_results_are_compact_but_list_results_are_complete() {
+        let mut state = TaskListState::default();
+        create(&mut state, &["a", "b"]);
+        let action = TaskListAction::UpdateStatus {
+            ids: vec![1],
+            status: TaskStatus::Completed,
+        };
+        state.apply(action.clone()).unwrap();
+        let result = state.render_result(&action);
+        assert_eq!(result, "Task(s) 1 → completed. Progress: 1/2 complete.");
+        assert!(!result.contains("2. b"));
+        assert!(state.render_result(&TaskListAction::List).contains("2. b"));
     }
 
     #[test]
