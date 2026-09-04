@@ -55,7 +55,7 @@ impl Tool for BashTool {
             )
             .await
             .map_err(|e: RuntimeCallError| ToolCallError::ExecutionFailed(e.to_string()))
-            .and_then(super::render_output)
+            .and_then(super::render_command_output)
     }
 }
 
@@ -71,10 +71,6 @@ mod tests {
     use crate::testkit::MockTransport;
     use horsie_models::runtime::ToolOutput;
 
-    /// The system prompt owns the full sticky-state rule, but this description
-    /// is what the model reads at the moment it writes the command — the point
-    /// where the `cd <dir> && …` reflex fires. The prohibition is worth its ten
-    /// tokens here even though it is stated once already.
     #[test]
     fn the_description_names_the_cwd_tool_and_forbids_cd() {
         let tool = BashTool::new(RuntimeClient::detached(MockTransport::ok(""), "test-agent"));
@@ -116,11 +112,38 @@ mod tests {
             .await
             .unwrap_err();
         match err {
-            ToolCallError::ExecutionFailed(msg) => {
-                assert!(msg.contains("status 1"), "msg: {msg}");
-                assert!(msg.contains("boom"), "msg: {msg}");
+            ToolCallError::CommandFailed(failure) => {
+                assert_eq!(failure.exit_code, 1);
+                assert!(failure.to_string().contains("boom"));
             }
-            other => panic!("expected ExecutionFailed, got {other:?}"),
+            other => panic!("expected CommandFailed, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn extracts_rust_diagnostics_from_cargo_output() {
+        let tool = BashTool::new(RuntimeClient::detached(
+            MockTransport::output(ToolOutput {
+                stdout: String::new(),
+                stderr: "error[E0425]: cannot find value `x` in this scope\n  --> src/lib.rs:12:5\n   |\n12 | x;\n   | ^ not found\nerror: could not compile `demo`"
+                    .into(),
+                exit_code: 101,
+                artifacts: Vec::new(),
+            }),
+            "test-agent",
+        ));
+        let err = tool
+            .execute(json!({"command": "cargo check"}), "tc1")
+            .await
+            .unwrap_err();
+        let ToolCallError::CommandFailed(failure) = err else {
+            panic!("expected command failure");
+        };
+        assert_eq!(failure.diagnostics.len(), 1);
+        assert_eq!(failure.diagnostics[0].code.as_deref(), Some("E0425"));
+        assert_eq!(
+            failure.diagnostics[0].location.as_deref(),
+            Some("src/lib.rs:12:5")
+        );
     }
 }

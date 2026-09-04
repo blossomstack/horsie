@@ -13,7 +13,9 @@ pub use agent::{Agent, AgentBuilder, AgentConfig};
 pub use compaction::{
     CompactionBudget, CompactionPlan, CompactionPolicy, CompactionResult, PreCompactDecision,
 };
-pub use error::{AgentBuildError, AgentError, LlmError, ToolCallError};
+pub use error::{
+    AgentBuildError, AgentError, CommandDiagnostic, CommandFailure, LlmError, ToolCallError,
+};
 pub use events::{EventSink, EventSinkError};
 pub use provider::{
     ArtifactBytes, ArtifactSource, CompletionRequest, CompletionResponse, LlmProvider, StopReason,
