@@ -32,6 +32,19 @@ Everything in that loop is written to the session as it happens, which is why
 the transcript shows tool calls arriving one at a time rather than appearing
 once the turn is over.
 
+### Progress during interactive work
+
+An agent that can call `ask_user` is working in an interactive context: a person
+may be watching while it uses tools. The horsie harness gives those agents a static
+instruction to include a brief visible sentence before substantial tool work
+and at meaningful phase changes. The sentence says what the agent is doing and
+why; it is not raw chain-of-thought or a command-by-command log.
+
+The instruction is part of the session context assembled alongside the
+`ask_user` capability and remains unchanged between turns, preserving the
+provider's system-prompt cache. Subagents, unattended sessions, and
+non-interactive workflow steps remain quiet.
+
 ## The harness is the only part that decides
 
 This is the load-bearing rule, and it is why permissions do not live in a
