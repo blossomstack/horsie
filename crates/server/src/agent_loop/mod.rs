@@ -9,7 +9,7 @@
 //!
 //! - [`actor`] — persistence, recovery, and observation.
 //! - [`run_loop`] — command routing and the one ordered next-step decision.
-//! - [`step_run`] — all process-local foreground execution.
+//! - [`step`] — durable and live step types in one place.
 //! - [`state`] — chronological durable history and compact projections.
 //! - [`transcript`] — the pure user-facing projection of history.
 //! - [`commands`] and [`events`] — the exhaustive vocabulary.
@@ -32,7 +32,7 @@ mod read_image_toolbox;
 mod run_loop;
 pub mod shared;
 mod state;
-mod step_run;
+mod step;
 #[cfg(test)]
 pub(crate) mod testing;
 mod transcript;
@@ -57,8 +57,7 @@ pub use context::{
     StopHookRequest, StopHookResult, ToolboxFactory, TurnPreparation,
 };
 pub use events::{
-    AgentDomainEvent, AgentHistoryEntry, RunEnd, StepFailure, StepKind, StopHookOutcome,
-    SystemPromptSource,
+    AgentDomainEvent, AgentHistoryEntry, RunEnd, StopHookOutcome, SystemPromptSource,
 };
 pub use params::AgentParams;
 pub use read_image_toolbox::{READ_IMAGE_TOOL, ReadImageToolbox};
@@ -77,5 +76,5 @@ pub use shared::workspace::{
     compose_system_prompt, scan as scan_workspace,
 };
 pub use state::{AgentState, AgentStateView, AgentUsageSnapshot, UsageTotal};
-pub use step_run::ExecutionContext;
+pub use step::{ExecutionContext, StepFailure, StepKind};
 pub use transcript::{Transcript, hook_entry, hook_entry_id, project_transcript};

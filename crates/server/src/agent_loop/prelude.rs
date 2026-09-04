@@ -18,7 +18,7 @@ pub(crate) use crate::agent_loop::components::{
 };
 pub(crate) use crate::agent_loop::context::ContextManifest;
 pub(crate) use crate::agent_loop::events::{
-    AgentDomainEvent, RunEnd, StepFailure, StepKind, StopHookOutcome, SystemPromptSource,
+    AgentDomainEvent, RunEnd, StopHookOutcome, SystemPromptSource,
 };
 pub(crate) use crate::agent_loop::params::AgentParams;
 pub(crate) use crate::agent_loop::run_loop::RunLoop;
@@ -26,7 +26,7 @@ pub(crate) use crate::agent_loop::shared::repair::{
     missing_tool_results, parked_call_ids, repair_unanswered_tool_calls,
 };
 pub(crate) use crate::agent_loop::state::{AgentState, new_message_id};
-pub(crate) use crate::agent_loop::step_run::{ExecutionContext, StepRun};
+pub(crate) use crate::agent_loop::step::{ExecutionContext, StepFailure, StepKind, StepRun};
 pub(crate) use crate::agent_loop::transcript::{Transcript, carry_transcript, project_transcript};
 #[cfg(test)]
 pub(crate) use horsie_actor::EventSourcedActor;

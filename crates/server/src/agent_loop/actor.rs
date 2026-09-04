@@ -5,6 +5,10 @@
 //! open step after recovery. Provider, tool, hook, compaction, seed-summary,
 //! and connection work run off-mailbox so reads and cancellation remain live.
 //! Residency still belongs to the session or workflow that spawned the actor.
+//!
+//! Every transition follows one path:
+//! `command -> RunLoop::handle -> persist -> RunLoop::apply -> Advance -> next_action`.
+//! Async work returns as another command carrying the marker that started it.
 
 use crate::agent_loop::context::{AgentOutcome, AgentRuntimeContext};
 use crate::agent_loop::prelude::*;

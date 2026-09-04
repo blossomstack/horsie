@@ -4,7 +4,7 @@
 //! actor mailbox are named separately so handlers cannot confuse their owners.
 
 use crate::agent_loop::params::AgentParams;
-use crate::agent_loop::step_run::StepRun;
+use crate::agent_loop::step::StepRun;
 use crate::agent_loop::{AgentCommand, AgentState, CoreCommand};
 use horsie_actor::ActorContext;
 

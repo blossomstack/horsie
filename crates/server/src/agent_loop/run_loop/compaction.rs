@@ -110,122 +110,115 @@ impl AgentState {
 /// boundary, at a moment where every tool call is answered so nothing can be
 /// cut across, and invisible to everything else: the next provider call simply
 /// reads a shorter history.
-pub(crate) struct CompactionStep;
-
-impl CompactionStep {
-    /// Whether the context has grown past the trigger — read off the budget
-    /// the contexts publish. A fresh agent has no budget yet and never
-    /// compacts before its first call, which is right: there is nothing to
-    /// fold.
-    pub(crate) fn due(cx: &CommandContext<'_>) -> bool {
-        cx.state.prompt_changed_since_compaction()
-            && cx.step_run.execution.as_ref().is_some_and(|context| {
-                context
-                    .budget
-                    .is_some_and(|budget| cx.state.context_tokens() >= budget.trigger_tokens())
-            })
-    }
-
-    /// Take the summary on a spawned task.
-    pub(crate) fn start(marker_seq: u64, job: CompactJob, cx: &mut CommandContext<'_>) {
-        let Some(execution) = cx.step_run.execution.clone() else {
-            return;
-        };
-        let cancel = cx.step_run.begin_compaction(marker_seq);
-        // The history and the carried state are read here, at handling time: a
-        // task-list change earlier in the same turn is already folded, so a
-        // compaction between two calls carries it verbatim.
-        let history = repair_unanswered_tool_calls(cx.state.prompt_messages_through(marker_seq));
-        let carried_state =
-            crate::agent_loop::shared::carried_state::render_carried_state(cx.state);
-        let self_ref = cx.actor.self_ref();
-        tokio::spawn(async move {
-            let (outcome, usage) = tokio::select! {
-                biased;
-                () = cancel.cancelled() => return,
-                outcome = run_compaction(&job, &execution, history, carried_state, &cancel) => outcome,
-            };
-            let _ = self_ref
-                .tell(AgentCommand::Compaction(CompactionCommand::Landed(
-                    Box::new(CompactLanding {
-                        marker_seq,
-                        consumed: job.consumed,
-                        usage,
-                        outcome,
-                    }),
-                )))
-                .await;
-        });
-    }
+/// Whether the context has grown past the trigger — read off the budget
+/// the contexts publish. A fresh agent has no budget yet and never
+/// compacts before its first call, which is right: there is nothing to
+/// fold.
+pub(crate) fn due(cx: &CommandContext<'_>) -> bool {
+    cx.state.prompt_changed_since_compaction()
+        && cx.step_run.execution.as_ref().is_some_and(|context| {
+            context
+                .budget
+                .is_some_and(|budget| cx.state.context_tokens() >= budget.trigger_tokens())
+        })
 }
 
-impl CompactionStep {
-    pub(crate) async fn handle(
-        cmd: CompactionCommand,
-        cx: &mut CommandContext<'_>,
-    ) -> CommandEffect<AgentDomainEvent> {
-        let CompactionCommand::Landed(landing) = cmd;
-        let CompactLanding {
-            marker_seq,
-            consumed,
-            usage,
-            outcome,
-        } = *landing;
-        let marker_is_open = cx
-            .state
-            .open_step()
-            .is_some_and(|(seq, kind)| seq == marker_seq && *kind == StepKind::Compaction);
-        if !marker_is_open || !cx.step_run.finish_compaction(marker_seq) {
-            tracing::warn!(
-                marker_seq,
-                "dropping a callback for a closed compaction step"
-            );
-            return CommandEffect::none();
-        }
-        let mut events = match outcome {
-            CompactOutcome::Compacted(data) => vec![AgentDomainEvent::Compacted {
-                summary: data.summary,
-                carried_state: data.carried_state,
-                retained_from_message_id: data.retained_from_message_id,
-                trigger: data.trigger,
-                instructions: data.instructions,
-                tokens_before: data.tokens_before,
-                tokens_after: data.tokens_after,
-                usage,
-                at_ms: now_ms(),
-            }],
-            CompactOutcome::Skipped {
-                notice: true,
-                context_tokens,
-                retain_tokens,
-            } => vec![AgentDomainEvent::LifecycleRecorded {
-                event: horsie_agentcore::LifecycleEvent::CompactionSkipped(
-                    horsie_models::agent::CompactionSkippedLifecycle {
-                        context_tokens,
-                        retain_tokens,
-                    },
-                ),
-                at_ms: now_ms(),
-            }],
-            CompactOutcome::Skipped { notice: false, .. } => Vec::new(),
+/// Take the summary on a spawned task.
+pub(crate) fn start(marker_seq: u64, job: CompactJob, cx: &mut CommandContext<'_>) {
+    let Some(execution) = cx.step_run.execution.clone() else {
+        return;
+    };
+    let cancel = cx.step_run.begin_compaction(marker_seq);
+    // The history and the carried state are read here, at handling time: a
+    // task-list change earlier in the same turn is already folded, so a
+    // compaction between two calls carries it verbatim.
+    let history = repair_unanswered_tool_calls(cx.state.prompt_messages_through(marker_seq));
+    let carried_state = crate::agent_loop::shared::carried_state::render_carried_state(cx.state);
+    let self_ref = cx.actor.self_ref();
+    tokio::spawn(async move {
+        let (outcome, usage) = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return,
+            outcome = run_compaction(&job, &execution, history, carried_state, &cancel) => outcome,
         };
-        // The `/compact` that asked for this is crossed off now rather than
-        // when it was taken: a crash in between replays it, and compacting
-        // twice is cheaper than silently not compacting at all.
-        if !consumed.is_empty() {
-            events.push(AgentDomainEvent::Consumed {
-                ids: consumed,
-                at_ms: now_ms(),
-            });
-        }
-        // Nothing is told that this happened. If a turn was owed a call, the
-        // advance that follows this write makes it — over the compacted
-        // history, which is the whole point.
-        if events.is_empty() {
-            cx.advance().await;
-        }
-        CommandEffect::persist(events)
+        let _ = self_ref
+            .tell(AgentCommand::Compaction(CompactionCommand::Landed(
+                Box::new(CompactLanding {
+                    marker_seq,
+                    consumed: job.consumed,
+                    usage,
+                    outcome,
+                }),
+            )))
+            .await;
+    });
+}
+
+pub(crate) async fn handle(
+    cmd: CompactionCommand,
+    cx: &mut CommandContext<'_>,
+) -> CommandEffect<AgentDomainEvent> {
+    let CompactionCommand::Landed(landing) = cmd;
+    let CompactLanding {
+        marker_seq,
+        consumed,
+        usage,
+        outcome,
+    } = *landing;
+    let marker_is_open = cx
+        .state
+        .open_step()
+        .is_some_and(|(seq, kind)| seq == marker_seq && *kind == StepKind::Compaction);
+    if !marker_is_open || !cx.step_run.finish_compaction(marker_seq) {
+        tracing::warn!(
+            marker_seq,
+            "dropping a callback for a closed compaction step"
+        );
+        return CommandEffect::none();
     }
+    let mut events = match outcome {
+        CompactOutcome::Compacted(data) => vec![AgentDomainEvent::Compacted {
+            summary: data.summary,
+            carried_state: data.carried_state,
+            retained_from_message_id: data.retained_from_message_id,
+            trigger: data.trigger,
+            instructions: data.instructions,
+            tokens_before: data.tokens_before,
+            tokens_after: data.tokens_after,
+            usage,
+            at_ms: now_ms(),
+        }],
+        CompactOutcome::Skipped {
+            notice: true,
+            context_tokens,
+            retain_tokens,
+        } => vec![AgentDomainEvent::LifecycleRecorded {
+            event: horsie_agentcore::LifecycleEvent::CompactionSkipped(
+                horsie_models::agent::CompactionSkippedLifecycle {
+                    context_tokens,
+                    retain_tokens,
+                },
+            ),
+            at_ms: now_ms(),
+        }],
+        CompactOutcome::Skipped { notice: false, .. } => Vec::new(),
+    };
+    // The `/compact` that asked for this is crossed off now rather than
+    // when it was taken: a crash in between replays it, and compacting
+    // twice is cheaper than silently not compacting at all.
+    if !consumed.is_empty() {
+        events.push(AgentDomainEvent::Consumed {
+            ids: consumed,
+            at_ms: now_ms(),
+        });
+    }
+    // Nothing is told that this happened. If a turn was owed a call, the
+    // advance that follows this write makes it — over the compacted
+    // history, which is the whole point.
+    if events.is_empty() {
+        cx.advance().await;
+    }
+    CommandEffect::persist(events)
 }
 
 /// The compaction run itself, on its own task: decide the cut, fire the
@@ -322,20 +315,18 @@ async fn run_compaction(
     )
 }
 
-impl CompactionStep {
-    /// Fold compaction usage and the new context size. The transcript boundary
-    /// is projected directly from this event.
-    pub(crate) fn apply(state: &mut AgentState, event: AgentDomainEvent) {
-        if let AgentDomainEvent::Compacted {
-            usage,
-            tokens_after,
-            ..
-        } = event
-        {
-            if let Some(usage) = &usage {
-                state.bank_usage(usage);
-            }
-            state.context_is(tokens_after);
+/// Fold compaction usage and the new context size. The transcript boundary
+/// is projected directly from this event.
+pub(crate) fn apply(state: &mut AgentState, event: AgentDomainEvent) {
+    if let AgentDomainEvent::Compacted {
+        usage,
+        tokens_after,
+        ..
+    } = event
+    {
+        if let Some(usage) = &usage {
+            state.bank_usage(usage);
         }
+        state.context_is(tokens_after);
     }
 }

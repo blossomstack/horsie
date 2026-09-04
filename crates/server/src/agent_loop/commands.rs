@@ -149,7 +149,7 @@ pub enum CompactionCommand {
 
 /// What a compaction run needs and only its requester knows. Everything
 /// shared — the provider, the budget, the hooks, the cancel token — is read
-/// from [`StepRun`](crate::agent_loop::step_run::StepRun)'s [`ExecutionContext`],
+/// from [`StepRun`](crate::agent_loop::step::StepRun)'s [`ExecutionContext`],
 /// so the command carries no duplicate live context.
 pub struct CompactJob {
     /// Incoming records this compaction answers — a typed `/compact`. Empty when

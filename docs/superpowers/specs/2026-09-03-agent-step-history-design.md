@@ -112,19 +112,19 @@ A run identity is the sequence of the first normal `StepStarted` after the previ
 
 ## Transient `StepRun`
 
-`StepRun` is an `AgentActor` field, not part of event-sourced `AgentState`. It contains every process-local execution detail and does not duplicate pending input, provider iterations, repeated-tool fingerprints, or forced-tool decisions that history can derive.
+`StepRun` is an `AgentActor` field, not part of event-sourced `AgentState`. `step.rs` places it beside `StepKind` and a table mapping every durable marker to its live variant and callback. It contains every process-local execution detail and does not duplicate pending input, provider iterations, repeated-tool fingerprints, or forced-tool decisions that history can derive.
 
 ```rust
 struct StepRun {
     runtime_ready: bool,
-    foreground: ForegroundStep,
+    active: ActiveStep,
     execution: Option<ExecutionContext>,
     reconnect_required: bool,
     start_hooks_ran: bool,
     streamed_text: Vec<String>,
 }
 
-enum ForegroundStep {
+enum ActiveStep {
     Idle,
     Initializing { marker_seq, cancel },
     Connecting { marker_seq, cancel },
@@ -139,7 +139,7 @@ enum ForegroundStep {
 
 The assistant message stays whole in durable history because thinking, text, and tool calls may be interleaved. Queries derive those parts without rearranging them.
 
-There is no separate `Scratch`, `ActiveWork`, provider-flight, generation, or tool-call registry. Every callback carries `marker_seq` and can finish only its matching `ForegroundStep` variant while that sequence is still the open durable step.
+There is no separate `Scratch`, `ActiveWork`, provider-flight, generation, or tool-call registry. Every callback carries `marker_seq` and can finish only its matching `ActiveStep` variant while that sequence is still the open durable step.
 
 The tagged variants make illegal combinations unrepresentable: idle state cannot retain a marker or cancellation token, provider retry state exists only during a provider call, and only tool execution can retain dispatched calls.
 
@@ -266,15 +266,24 @@ Seed summary is keyed by a durable request ID. It reads a stable history prefix,
 
 ## Code organization
 
-The module tree mirrors ownership rather than execution mechanics:
+Read the actor flow in this order:
+
+1. `AgentActor::handle_command` passes one mailbox command to `RunLoop::handle`.
+2. `run_loop/machine.rs` routes it and returns a `CommandEffect`.
+3. The actor journals that effect and `RunLoop::apply` folds it into `AgentState`.
+4. `AgentActor::on_events_persisted` sends `Advance` only after the write succeeds.
+5. `RunLoop::next_action` derives one `NextAction`; `advance` executes it.
+6. Async work returns through the callback listed beside its durable and live types in `step.rs`.
+
+The module tree mirrors ownership:
 
 - `actor.rs`: persistence, recovery, observation, and actor lifecycle only.
-- `run_loop/decision.rs`: the single ordered next-step decision.
+- `run_loop/machine.rs`: command routing, a pure `NextAction` decision, and execution of that one transition.
 - `run_loop/provider/`: one provider call plus interpretation of its ending.
-- `run_loop/context_step.rs`, `compaction_step.rs`, and `seed_step.rs`: fenced special steps.
+- `run_loop/context.rs`, `compaction.rs`, and `seed.rs`: fenced special steps.
 - `run_loop/incoming.rs`: incoming types and pure pending/model-input projections.
 - `run_loop/reads.rs`: state-only reads.
-- `step_run.rs`: all process-local foreground state.
+- `step.rs`: every durable and process-local step type, with their callback map.
 - `state.rs` and `events.rs`: durable history, usage projections, and component state.
 - `transcript.rs`: the pure history-to-transcript projection and branch-context conversion.
 - `components/`: only stateful tools.

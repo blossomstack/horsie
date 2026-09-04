@@ -14,9 +14,9 @@
 //! tool execution remains pending until that step and all its tool results are
 //! durable.
 
-use super::{CompactionStep, ContextStep, ProviderStep, SeedStep};
+use super::{compaction, context, provider, seed};
 use crate::agent_loop::prelude::*;
-use crate::agent_loop::step_run::DispatchedCall;
+use crate::agent_loop::step::DispatchedCall;
 use horsie_actor::{ActorRef, CommandEffect, ReplyTo};
 use horsie_agentcore::{StoppedCall, ToolOutcome, Toolbox};
 use serde_json::Value;
@@ -25,51 +25,245 @@ use tokio_util::sync::CancellationToken;
 
 const MAX_STOP_CONTINUATIONS: usize = 3;
 
-/// Why the next provider call cannot happen yet.
-#[derive(Debug)]
-pub(crate) enum Blocked {
-    /// Tool calls the model made are still being executed. Naming them makes
-    /// a stuck turn diagnosable from a log line.
-    ToolCalls(Vec<String>),
-    /// The agent is parked on questions and nothing queued may abandon them.
-    Parked,
+/// The complete set of transitions the actor-owned loop can take.
+enum NextAction {
+    Wait,
+    EnsureContexts,
+    Start(StepKind),
+    Prepare(crate::agent_loop::TurnInput),
+    CallProvider,
+    RunTools(Vec<String>),
+    RunStopHook(u64),
+    RunCompaction {
+        marker_seq: u64,
+        job: CompactJob,
+    },
+    RunSeedSummary {
+        marker_seq: u64,
+        consumed: Vec<String>,
+        sub_sessions: Vec<uuid::Uuid>,
+    },
 }
 
-fn cap_stop_records(records: &mut [horsie_models::hooks::HookRecord]) {
-    use horsie_models::hooks::{HookAction, StopOutcome, SubagentStopOutcome};
-    for record in records {
-        match &mut record.action {
-            HookAction::Stop(stop) => {
-                if let StopOutcome::Blocked(blocked) = &stop.outcome {
-                    stop.outcome = StopOutcome::CapReached(blocked.clone());
-                }
-            }
-            HookAction::SubagentStop(stop) => {
-                if let SubagentStopOutcome::Blocked(blocked) = &stop.outcome {
-                    stop.outcome = SubagentStopOutcome::CapReached(blocked.clone());
-                }
-            }
-            HookAction::PreToolUse(_)
-            | HookAction::PostToolUse(_)
-            | HookAction::PostToolUseFailure(_)
-            | HookAction::PostToolBatch(_)
-            | HookAction::SessionStart(_)
-            | HookAction::SessionEnd(_)
-            | HookAction::UserPromptSubmit(_)
-            | HookAction::UserPromptExpansion(_)
-            | HookAction::StopFailure(_)
-            | HookAction::SubagentStart(_)
-            | HookAction::TaskCreated(_)
-            | HookAction::TaskCompleted(_)
-            | HookAction::Notification(_)
-            | HookAction::PreCompact(_)
-            | HookAction::PostCompact(_)
-            | HookAction::CwdChanged(_) => {}
-        }
+fn runtime_readiness(event: &horsie_agentcore::LifecycleEvent) -> Option<bool> {
+    use horsie_agentcore::LifecycleEvent;
+    match event {
+        LifecycleEvent::Runtime(runtime) => Some(match runtime.status {
+            horsie_agentcore::RuntimeStatus::Ready(_) => true,
+            horsie_agentcore::RuntimeStatus::Acquiring(_)
+            | horsie_agentcore::RuntimeStatus::Failed(_) => false,
+        }),
+        LifecycleEvent::SessionFailed(_) => Some(false),
+        LifecycleEvent::Preparing(_)
+        | LifecycleEvent::MessageQueued(_)
+        | LifecycleEvent::TurnBegan(_)
+        | LifecycleEvent::TurnEnded(_)
+        | LifecycleEvent::AskRecorded(_)
+        | LifecycleEvent::SubAgent(_)
+        | LifecycleEvent::SubSession(_)
+        | LifecycleEvent::CompactionSkipped(_)
+        | LifecycleEvent::Step(_)
+        | LifecycleEvent::TaskList(_) => None,
     }
 }
 
 impl RunLoop {
+    /// Route every command into the same transition machine.
+    pub async fn handle(
+        &mut self,
+        cmd: AgentCommand,
+        cx: &mut CommandContext<'_>,
+    ) -> Option<CommandEffect<AgentDomainEvent>> {
+        Some(match cmd {
+            AgentCommand::Incoming(command) => self.handle_incoming(command, cx).await,
+            AgentCommand::Provider(command) => provider::handle(command, cx).await,
+            AgentCommand::Timer(command) => self.timers.handle(command, cx).await,
+            AgentCommand::Query(command) => super::reads::query(command, cx).await,
+            AgentCommand::History(command) => Self::record_history(command, cx),
+            AgentCommand::Seed(command) => seed::handle(command, cx).await,
+            AgentCommand::TaskList(command) => self.task_lists.handle(command, cx).await,
+            AgentCommand::Context(command) => context::handle(command, cx).await,
+            AgentCommand::Compaction(command) => compaction::handle(command, cx).await,
+            AgentCommand::Core(CoreCommand::StopHookReturned { marker_seq, result }) => {
+                self.stop_hook_returned(marker_seq, result, cx)
+            }
+            AgentCommand::Core(CoreCommand::ToolReturned {
+                marker_seq,
+                tool_call_id,
+                outcome,
+            }) => {
+                self.tool_returned(marker_seq, tool_call_id, outcome, cx)
+                    .await
+            }
+            AgentCommand::Core(CoreCommand::Advance) => self.advance(cx).await,
+            AgentCommand::Core(CoreCommand::Cancel { ack }) => self.cancel(ack, cx).await,
+            AgentCommand::Core(CoreCommand::Shutdown) => return None,
+        })
+    }
+
+    /// Derive one transition without performing it.
+    fn next_action(&self, cx: &CommandContext<'_>) -> NextAction {
+        if cx.step_run.is_running() || !cx.step_run.runtime_ready {
+            return NextAction::Wait;
+        }
+
+        let work_due = cx.state.turn_in_flight() || cx.state.next_input().is_some();
+        if work_due && (cx.step_run.reconnect_required || cx.step_run.execution.is_none()) {
+            return NextAction::EnsureContexts;
+        }
+
+        if let Some(action) = self.blocked_action(cx) {
+            return action;
+        }
+
+        if let Some(input) = cx.state.next_input() {
+            return match input {
+                crate::agent_loop::PendingInput::Input(turn) => NextAction::Prepare(*turn),
+                crate::agent_loop::PendingInput::Summary {
+                    consumed,
+                    sub_sessions,
+                } => {
+                    let kind = StepKind::SeedSummary {
+                        request_id: consumed.join(":"),
+                    };
+                    match cx.state.open_step().filter(|(_, open)| **open == kind) {
+                        Some((marker_seq, _)) => NextAction::RunSeedSummary {
+                            marker_seq,
+                            consumed,
+                            sub_sessions,
+                        },
+                        None => NextAction::Start(kind),
+                    }
+                }
+                crate::agent_loop::PendingInput::Compact {
+                    consumed,
+                    instructions,
+                } => match cx
+                    .state
+                    .open_step()
+                    .filter(|(_, kind)| **kind == StepKind::Compaction)
+                {
+                    Some((marker_seq, _)) => NextAction::RunCompaction {
+                        marker_seq,
+                        job: CompactJob {
+                            consumed,
+                            manual: true,
+                            instructions,
+                            tokens_before: cx.state.context_tokens(),
+                        },
+                    },
+                    None => NextAction::Start(StepKind::Compaction),
+                },
+            };
+        }
+
+        if !cx.state.turn_in_flight() {
+            return match cx.state.open_step() {
+                Some((_, StepKind::Provider)) if cx.state.open_step_has_response() => {
+                    NextAction::Start(StepKind::StopHook)
+                }
+                Some((marker_seq, StepKind::StopHook)) if !cx.state.open_step_has_response() => {
+                    NextAction::RunStopHook(marker_seq)
+                }
+                _ => NextAction::Wait,
+            };
+        }
+
+        if compaction::due(cx) {
+            match cx
+                .state
+                .open_step()
+                .filter(|(_, kind)| **kind == StepKind::Compaction)
+            {
+                None => return NextAction::Start(StepKind::Compaction),
+                Some((marker_seq, _)) if !cx.state.open_step_has_response() => {
+                    return NextAction::RunCompaction {
+                        marker_seq,
+                        job: CompactJob {
+                            consumed: Vec::new(),
+                            manual: false,
+                            instructions: None,
+                            tokens_before: cx.state.context_tokens(),
+                        },
+                    };
+                }
+                Some(_) => {}
+            }
+        }
+
+        let provider_ready = cx
+            .state
+            .open_step()
+            .is_some_and(|(_, kind)| *kind == StepKind::Provider)
+            && !cx.state.open_step_has_response();
+        match provider_ready {
+            true => NextAction::CallProvider,
+            false => NextAction::Start(StepKind::Provider),
+        }
+    }
+
+    /// Execute the one transition selected from durable and live state.
+    pub(crate) async fn advance(
+        &mut self,
+        cx: &mut CommandContext<'_>,
+    ) -> CommandEffect<AgentDomainEvent> {
+        match self.next_action(cx) {
+            NextAction::Wait => CommandEffect::none(),
+            NextAction::EnsureContexts => {
+                self.ensure_contexts(cx).unwrap_or_else(CommandEffect::none)
+            }
+            NextAction::Start(kind) => {
+                CommandEffect::persist(vec![AgentDomainEvent::StepStarted { kind }])
+            }
+            NextAction::Prepare(input) => self.prepare_input(input, cx),
+            NextAction::CallProvider => provider::run_step(cx).await,
+            NextAction::RunTools(open) => {
+                self.dispatch_tools(open, cx);
+                CommandEffect::none()
+            }
+            NextAction::RunStopHook(marker_seq) => {
+                self.start_stop_hook(marker_seq, cx);
+                CommandEffect::none()
+            }
+            NextAction::RunCompaction { marker_seq, job } => {
+                compaction::start(marker_seq, job, cx);
+                CommandEffect::none()
+            }
+            NextAction::RunSeedSummary {
+                marker_seq,
+                consumed,
+                sub_sessions,
+            } => {
+                seed::take_summary(marker_seq, consumed, sub_sessions, cx);
+                CommandEffect::none()
+            }
+        }
+    }
+
+    fn record_history(
+        command: HistoryCommand,
+        cx: &mut CommandContext<'_>,
+    ) -> CommandEffect<AgentDomainEvent> {
+        match command {
+            HistoryCommand::RecordLifecycle { event, at_ms } => {
+                if let Some(ready) =
+                    runtime_readiness(&event).filter(|ready| *ready != cx.step_run.runtime_ready)
+                {
+                    cx.step_run.runtime_ready = ready;
+                }
+                CommandEffect::persist(vec![AgentDomainEvent::LifecycleRecorded { event, at_ms }])
+            }
+            HistoryCommand::HooksRan { records } => {
+                let at_ms = horsie_models::now_ms();
+                let events = (cx.state.hook_entry_count()..)
+                    .zip(records)
+                    .map(|(seq, record)| AgentDomainEvent::HookRan { record, seq, at_ms })
+                    .collect();
+                CommandEffect::persist(events)
+            }
+        }
+    }
+
     pub(crate) async fn handle_incoming(
         &mut self,
         cmd: IncomingCommand,
@@ -135,7 +329,7 @@ impl RunLoop {
                 let marker_is_open = cx.state.open_step().is_some_and(|(seq, kind)| {
                     seq == marker_seq && *kind == StepKind::PrepareInput
                 });
-                if !marker_is_open || !cx.step_run.finish_start_hooks(marker_seq) {
+                if !marker_is_open || !cx.step_run.finish_input_preparation(marker_seq) {
                     return CommandEffect::none();
                 }
                 CommandEffect::persist(Self::input_events(
@@ -222,7 +416,7 @@ impl RunLoop {
                 kind: StepKind::PrepareInput,
             }]);
         };
-        let cancel = cx.step_run.begin_start_hooks(marker_seq);
+        let cancel = cx.step_run.begin_input_preparation(marker_seq);
         cx.step_run.mark_start_hooks_ran();
         let provider = cx.runtime.context_provider.clone();
         let self_ref = cx.actor.self_ref();
@@ -255,155 +449,6 @@ impl RunLoop {
         CommandEffect::none()
     }
 
-    /// Decide what happens next, and start it.
-    pub(crate) async fn advance(
-        &mut self,
-        cx: &mut CommandContext<'_>,
-    ) -> CommandEffect<AgentDomainEvent> {
-        // 1. One thing at a time. Whatever is running reports back, and the
-        //    handler that takes the report advances again.
-        if cx.step_run.is_running() {
-            return CommandEffect::none();
-        }
-        // No runtime, no work. The `Runtime` lifecycle record the owner sends
-        // is what moves this, and it advances again when it does.
-        if !cx.step_run.runtime_ready {
-            return CommandEffect::none();
-        }
-        // 2. Live clients are needed only when durable work is waiting.
-        let work_due = cx.state.turn_in_flight() || cx.state.next_input().is_some();
-        if work_due && let Some(effect) = self.ensure_contexts(cx) {
-            return effect;
-        }
-        // 3. Resolve open tool calls, or hold an unanswered question. A call
-        //    with no live task is dispatched here from durable history.
-        if let Some(blocked) = self.blocked(cx) {
-            match blocked {
-                Blocked::ToolCalls(open) => self.dispatch_tools(open, cx),
-                Blocked::Parked => tracing::trace!("holding: parked on a question"),
-            }
-            return CommandEffect::none();
-        }
-        // 4. The next history-derived input, in its defined precedence.
-        match cx.state.next_input() {
-            Some(crate::agent_loop::PendingInput::Summary {
-                consumed,
-                sub_sessions,
-            }) => {
-                let request_id = consumed.join(":");
-                let expected = StepKind::SeedSummary { request_id };
-                let marker = cx
-                    .state
-                    .open_step()
-                    .filter(|(_, kind)| **kind == expected)
-                    .map(|(seq, _)| seq);
-                let Some(marker_seq) = marker else {
-                    return CommandEffect::persist(vec![AgentDomainEvent::StepStarted {
-                        kind: expected,
-                    }]);
-                };
-                SeedStep::take_summary(marker_seq, consumed, sub_sessions, cx);
-                return CommandEffect::none();
-            }
-            Some(crate::agent_loop::PendingInput::Compact {
-                consumed,
-                instructions,
-            }) => {
-                let marker = cx
-                    .state
-                    .open_step()
-                    .filter(|(_, kind)| **kind == StepKind::Compaction)
-                    .map(|(seq, _)| seq);
-                let Some(marker_seq) = marker else {
-                    return CommandEffect::persist(vec![AgentDomainEvent::StepStarted {
-                        kind: StepKind::Compaction,
-                    }]);
-                };
-                CompactionStep::start(
-                    marker_seq,
-                    CompactJob {
-                        consumed,
-                        manual: true,
-                        instructions,
-                        tokens_before: cx.state.context_tokens(),
-                    },
-                    cx,
-                );
-                return CommandEffect::none();
-            }
-            // Journaled, not run: taking the input is a write, and the write
-            // is what makes this agent owe the provider a call. The advance
-            // that follows the persist is what runs it.
-            Some(crate::agent_loop::PendingInput::Input(turn)) => {
-                return self.prepare_input(*turn, cx);
-            }
-            None => {}
-        }
-        // A settled provider step with no continuation input proposes an end
-        // through a distinct Stop-hook step. Incoming records that arrived
-        // before this point were offered above and win automatically.
-        if !cx.state.turn_in_flight() {
-            match cx.state.open_step() {
-                Some((_, StepKind::Provider)) if cx.state.open_step_has_response() => {
-                    return CommandEffect::persist(vec![AgentDomainEvent::StepStarted {
-                        kind: StepKind::StopHook,
-                    }]);
-                }
-                Some((marker_seq, StepKind::StopHook)) if !cx.state.open_step_has_response() => {
-                    self.start_stop_hook(marker_seq, cx);
-                    return CommandEffect::none();
-                }
-                _ => return CommandEffect::none(),
-            }
-        }
-        // Between calls is the only safe place to fold history away — every
-        // tool call is answered, so nothing can be cut across — and it is also
-        // the last chance before the call that would overflow the window. The
-        // turn is never told: its next call simply reads a shorter history.
-        if CompactionStep::due(cx) {
-            let marker = cx
-                .state
-                .open_step()
-                .filter(|(_, kind)| **kind == StepKind::Compaction)
-                .map(|(seq, _)| seq);
-            match marker {
-                None => {
-                    return CommandEffect::persist(vec![AgentDomainEvent::StepStarted {
-                        kind: StepKind::Compaction,
-                    }]);
-                }
-                Some(_) if cx.state.open_step_has_response() => {
-                    // Recovery recorded an interrupted compaction. Keep the
-                    // unchanged history and continue; never replay the call.
-                }
-                Some(marker_seq) => {
-                    CompactionStep::start(
-                        marker_seq,
-                        CompactJob {
-                            consumed: Vec::new(),
-                            manual: false,
-                            instructions: None,
-                            tokens_before: cx.state.context_tokens(),
-                        },
-                        cx,
-                    );
-                    return CommandEffect::none();
-                }
-            }
-        }
-        let marker_is_ready = cx
-            .state
-            .open_step()
-            .is_some_and(|(_, kind)| *kind == StepKind::Provider)
-            && !cx.state.open_step_has_response();
-        if !marker_is_ready {
-            return CommandEffect::persist(vec![AgentDomainEvent::StepStarted {
-                kind: StepKind::Provider,
-            }]);
-        }
-        ProviderStep::run_step(cx).await
-    }
-
     /// Open or run initialization/connection before foreground work. The
     /// marker's history sequence is the callback fence.
     fn ensure_contexts(
@@ -431,11 +476,45 @@ impl RunLoop {
         };
         let toolboxes = self.toolboxes(cx.actor.self_ref());
         if initializing {
-            ContextStep::initialize(marker_seq, toolboxes, cx);
+            context::initialize(marker_seq, toolboxes, cx);
         } else {
-            ContextStep::reconnect(marker_seq, toolboxes, cx);
+            context::reconnect(marker_seq, toolboxes, cx);
         }
         Some(CommandEffect::none())
+    }
+
+    fn cap_stop_records(records: &mut [horsie_models::hooks::HookRecord]) {
+        use horsie_models::hooks::{HookAction, StopOutcome, SubagentStopOutcome};
+        for record in records {
+            match &mut record.action {
+                HookAction::Stop(stop) => {
+                    if let StopOutcome::Blocked(blocked) = &stop.outcome {
+                        stop.outcome = StopOutcome::CapReached(blocked.clone());
+                    }
+                }
+                HookAction::SubagentStop(stop) => {
+                    if let SubagentStopOutcome::Blocked(blocked) = &stop.outcome {
+                        stop.outcome = SubagentStopOutcome::CapReached(blocked.clone());
+                    }
+                }
+                HookAction::PreToolUse(_)
+                | HookAction::PostToolUse(_)
+                | HookAction::PostToolUseFailure(_)
+                | HookAction::PostToolBatch(_)
+                | HookAction::SessionStart(_)
+                | HookAction::SessionEnd(_)
+                | HookAction::UserPromptSubmit(_)
+                | HookAction::UserPromptExpansion(_)
+                | HookAction::StopFailure(_)
+                | HookAction::SubagentStart(_)
+                | HookAction::TaskCreated(_)
+                | HookAction::TaskCompleted(_)
+                | HookAction::Notification(_)
+                | HookAction::PreCompact(_)
+                | HookAction::PostCompact(_)
+                | HookAction::CwdChanged(_) => {}
+            }
+        }
     }
 
     fn start_stop_hook(&mut self, marker_seq: u64, cx: &mut CommandContext<'_>) {
@@ -494,7 +573,7 @@ impl RunLoop {
         if matches!(outcome, StopHookOutcome::Continue { .. })
             && cx.state.stop_continuations() >= MAX_STOP_CONTINUATIONS
         {
-            cap_stop_records(&mut records);
+            Self::cap_stop_records(&mut records);
             outcome = StopHookOutcome::Allow;
         }
         let mut events: Vec<_> = (cx.state.hook_entry_count()..)
@@ -642,20 +721,20 @@ impl RunLoop {
         if let Some(stopped) = settled
             && !stopped.is_empty()
         {
-            return ProviderStep::ended_by_tools(events, stopped, cx).await;
+            return provider::ended_by_tools(events, stopped, cx).await;
         }
         CommandEffect::persist(events)
     }
 
-    fn blocked(&self, cx: &CommandContext<'_>) -> Option<Blocked> {
+    fn blocked_action(&self, cx: &CommandContext<'_>) -> Option<NextAction> {
         if cx.state.turn_in_flight() {
             let open = cx.state.open_tool_calls();
             if !open.is_empty() {
-                return Some(Blocked::ToolCalls(open));
+                return Some(NextAction::RunTools(open));
             }
         }
         let asks = cx.state.pending_asks();
-        (!asks.is_empty() && cx.state.next_input().is_none()).then_some(Blocked::Parked)
+        (!asks.is_empty() && cx.state.next_input().is_none()).then_some(NextAction::Wait)
     }
 
     /// Stop current foreground work. Acknowledgement follows the durable
@@ -667,7 +746,7 @@ impl RunLoop {
     ) -> CommandEffect<AgentDomainEvent> {
         cx.step_run.stop();
         let effect = if cx.state.turn_in_flight() {
-            ProviderStep::cancelled(cx).await
+            provider::cancelled(cx).await
         } else if let Some((_, kind)) = cx.state.open_step() {
             let at_ms = horsie_models::now_ms();
             let mut events = Vec::new();

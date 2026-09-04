@@ -6,7 +6,7 @@
 //! down recovery for every session that ever journaled one, so fields are
 //! added with `#[serde(default)]` and never renamed or repurposed.
 
-use crate::agent_loop::AgentState;
+use crate::agent_loop::{AgentState, StepFailure, StepKind};
 use horsie_agentcore::{LifecycleEvent, Message, Usage};
 use serde::{Deserialize, Serialize};
 
@@ -14,33 +14,6 @@ use serde::{Deserialize, Serialize};
 pub enum SystemPromptSource {
     Configured,
     InitialContext,
-}
-
-/// A durable foreground-step boundary. The record's history sequence is its
-/// identity and callback fence.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum StepKind {
-    /// First semantic setup: provision, scan, and freeze prompt meaning.
-    Initialize,
-    /// Rebuild live clients from the initialization manifest.
-    Connect,
-    /// Run pre-turn hooks while accepted input remains pending.
-    PrepareInput,
-    /// One provider request and its resulting assistant message.
-    Provider,
-    /// Decide whether a settled provider result may end the run.
-    StopHook,
-    /// Summarise old history behind a compaction boundary.
-    Compaction,
-    /// Summarise a branch point for one or more sub sessions.
-    SeedSummary { request_id: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum StepFailure {
-    Interrupted,
-    Provider(String),
-    TimedOut,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

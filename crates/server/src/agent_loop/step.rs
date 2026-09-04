@@ -1,14 +1,41 @@
-//! Transient foreground-step state and the narrow contract for stateful tool
-//! components.
+//! Every durable and process-local step type.
 //!
-//! The actor-owned loop uses [`StepRun`] for process-only execution state. Its
-//! durable counterpart is always reconstructed from [`AgentState`] history.
-//! Timer and task-list components receive the same command context and may
-//! change durable state only by returning events; they do not call each other.
-//! Provider calls and special steps are actor-loop phases, not components.
+//! The complete flow is:
+//!
+//! | durable marker | live variant | completion command |
+//! |---|---|---|
+//! | `Initialize` | `Initializing` | `Context::InitializationReady` |
+//! | `Connect` | `Connecting` | `Context::ConnectionReady` |
+//! | `PrepareInput` | `PreparingInput` | `Incoming::InputPrepared` |
+//! | `Provider` | `CallingProvider` | `Provider::StepDone` / `StepFailed` |
+//! | `Provider` | `RunningTools` | `Core::ToolReturned` |
+//! | `StopHook` | `RunningStopHook` | `Core::StopHookReturned` |
+//! | `Compaction` | `Compacting` | `Compaction::Landed` |
+//! | `SeedSummary` | `SummarisingSeed` | `Seed::SummaryTaken` |
 
-use crate::agent_loop::prelude::*;
+use crate::agent_loop::ContextManifest;
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
+
+/// A durable step boundary. Its history sequence is its identity and callback
+/// fence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StepKind {
+    Initialize,
+    Connect,
+    PrepareInput,
+    Provider,
+    StopHook,
+    Compaction,
+    SeedSummary { request_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StepFailure {
+    Interrupted,
+    Provider(String),
+    TimedOut,
+}
 
 /// One tool call dispatched by this process and not yet answered.
 #[derive(Clone)]
@@ -24,7 +51,7 @@ pub(crate) struct DispatchedCall {
 /// a compaction callback, even when both happen to carry the same history
 /// sequence. Only tool execution can hold dispatched calls; only provider work
 /// can hold a retry attempt.
-enum ForegroundStep {
+pub(crate) enum ActiveStep {
     Idle,
     Initializing {
         marker_seq: u64,
@@ -63,18 +90,50 @@ enum ForegroundStep {
     },
 }
 
-/// The complete process-local complement to durable [`AgentState`] history.
+impl ActiveStep {
+    fn marker_seq(&self) -> Option<u64> {
+        match self {
+            Self::Idle => None,
+            Self::Initializing { marker_seq, .. }
+            | Self::Connecting { marker_seq, .. }
+            | Self::PreparingInput { marker_seq, .. }
+            | Self::CallingProvider { marker_seq, .. }
+            | Self::RunningTools { marker_seq, .. }
+            | Self::RunningStopHook { marker_seq, .. }
+            | Self::Compacting { marker_seq, .. }
+            | Self::SummarisingSeed { marker_seq, .. } => Some(*marker_seq),
+        }
+    }
+
+    fn belongs_to(&self, kind: &StepKind) -> bool {
+        match kind {
+            StepKind::Initialize => matches!(self, Self::Initializing { .. }),
+            StepKind::Connect => matches!(self, Self::Connecting { .. }),
+            StepKind::PrepareInput => matches!(self, Self::PreparingInput { .. }),
+            StepKind::Provider => {
+                matches!(
+                    self,
+                    Self::CallingProvider { .. } | Self::RunningTools { .. }
+                )
+            }
+            StepKind::StopHook => matches!(self, Self::RunningStopHook { .. }),
+            StepKind::Compaction => matches!(self, Self::Compacting { .. }),
+            StepKind::SeedSummary { .. } => matches!(self, Self::SummarisingSeed { .. }),
+        }
+    }
+}
+
+/// The complete process-local complement to durable [`crate::agent_loop::AgentState`] history.
 ///
 /// Recovery always starts idle and derives what is owed from history. Nothing
-/// outside this type may retain foreground progress across actor commands.
+/// outside this type may retain active progress across actor commands.
 pub(crate) struct StepRun {
     pub runtime_ready: bool,
-    foreground: ForegroundStep,
+    active: ActiveStep,
     pub execution: Option<std::sync::Arc<ExecutionContext>>,
     pub reconnect_required: bool,
     start_hooks_ran: bool,
-    /// Streamed text stays here so cancellation can salvage it after moving
-    /// the foreground back to `Idle`.
+    /// Streamed text stays here so cancellation can salvage it after the step returns to `Idle`.
     pub streamed_text: Vec<String>,
 }
 
@@ -82,7 +141,7 @@ impl StepRun {
     pub fn new(runtime_ready: bool) -> Self {
         Self {
             runtime_ready,
-            foreground: ForegroundStep::Idle,
+            active: ActiveStep::Idle,
             execution: None,
             reconnect_required: true,
             start_hooks_ran: false,
@@ -91,7 +150,7 @@ impl StepRun {
     }
 
     pub fn is_running(&self) -> bool {
-        !matches!(self.foreground, ForegroundStep::Idle)
+        !matches!(self.active, ActiveStep::Idle)
     }
 
     pub fn start_hooks_ran(&self) -> bool {
@@ -109,25 +168,25 @@ impl StepRun {
 
     pub fn begin_initialization(&mut self, marker_seq: u64) -> CancellationToken {
         let (returned, cancel) = Self::token();
-        self.foreground = ForegroundStep::Initializing { marker_seq, cancel };
+        self.active = ActiveStep::Initializing { marker_seq, cancel };
         returned
     }
 
     pub fn begin_connection(&mut self, marker_seq: u64) -> CancellationToken {
         let (returned, cancel) = Self::token();
-        self.foreground = ForegroundStep::Connecting { marker_seq, cancel };
+        self.active = ActiveStep::Connecting { marker_seq, cancel };
         returned
     }
 
-    pub fn begin_start_hooks(&mut self, marker_seq: u64) -> CancellationToken {
+    pub fn begin_input_preparation(&mut self, marker_seq: u64) -> CancellationToken {
         let (returned, cancel) = Self::token();
-        self.foreground = ForegroundStep::PreparingInput { marker_seq, cancel };
+        self.active = ActiveStep::PreparingInput { marker_seq, cancel };
         returned
     }
 
     pub fn begin_provider(&mut self, marker_seq: u64, attempt: u32) -> CancellationToken {
         let (returned, cancel) = Self::token();
-        self.foreground = ForegroundStep::CallingProvider {
+        self.active = ActiveStep::CallingProvider {
             marker_seq,
             attempt,
             cancel,
@@ -137,30 +196,30 @@ impl StepRun {
 
     pub fn begin_stop_hook(&mut self, marker_seq: u64) -> CancellationToken {
         let (returned, cancel) = Self::token();
-        self.foreground = ForegroundStep::RunningStopHook { marker_seq, cancel };
+        self.active = ActiveStep::RunningStopHook { marker_seq, cancel };
         returned
     }
 
     pub fn begin_compaction(&mut self, marker_seq: u64) -> CancellationToken {
         let (returned, cancel) = Self::token();
-        self.foreground = ForegroundStep::Compacting { marker_seq, cancel };
+        self.active = ActiveStep::Compacting { marker_seq, cancel };
         returned
     }
 
     pub fn begin_seed_summary(&mut self, marker_seq: u64) -> CancellationToken {
         let (returned, cancel) = Self::token();
-        self.foreground = ForegroundStep::SummarisingSeed { marker_seq, cancel };
+        self.active = ActiveStep::SummarisingSeed { marker_seq, cancel };
         returned
     }
 
-    /// Claim the foreground slot for a whole tool batch.
+    /// Claim the active slot for a whole tool batch.
     pub fn begin_tools(
         &mut self,
         marker_seq: u64,
         calls: Vec<DispatchedCall>,
     ) -> CancellationToken {
         let (returned, cancel) = Self::token();
-        self.foreground = ForegroundStep::RunningTools {
+        self.active = ActiveStep::RunningTools {
             marker_seq,
             cancel,
             calls,
@@ -170,9 +229,9 @@ impl StepRun {
     }
 
     pub fn push_delta(&mut self, marker_seq: u64, text: String) -> bool {
-        let ForegroundStep::CallingProvider {
+        let ActiveStep::CallingProvider {
             marker_seq: open, ..
-        } = &self.foreground
+        } = &self.active
         else {
             return false;
         };
@@ -183,56 +242,35 @@ impl StepRun {
         true
     }
 
-    fn finish_matching(
-        &mut self,
-        marker_seq: u64,
-        matches: impl FnOnce(&ForegroundStep) -> bool,
-    ) -> bool {
-        if !matches(&self.foreground) {
+    fn finish_matching(&mut self, marker_seq: u64, kind: &StepKind) -> bool {
+        if !self.active.belongs_to(kind) {
             return false;
         }
-        let open = match &self.foreground {
-            ForegroundStep::Idle => return false,
-            ForegroundStep::Initializing { marker_seq, .. }
-            | ForegroundStep::Connecting { marker_seq, .. }
-            | ForegroundStep::PreparingInput { marker_seq, .. }
-            | ForegroundStep::CallingProvider { marker_seq, .. }
-            | ForegroundStep::RunningTools { marker_seq, .. }
-            | ForegroundStep::RunningStopHook { marker_seq, .. }
-            | ForegroundStep::Compacting { marker_seq, .. }
-            | ForegroundStep::SummarisingSeed { marker_seq, .. } => *marker_seq,
-        };
-        if open != marker_seq {
+        if self.active.marker_seq() != Some(marker_seq) {
             return false;
         }
-        self.foreground = ForegroundStep::Idle;
+        self.active = ActiveStep::Idle;
         true
     }
 
     pub fn finish_initialization(&mut self, marker_seq: u64) -> bool {
-        self.finish_matching(marker_seq, |step| {
-            matches!(step, ForegroundStep::Initializing { .. })
-        })
+        self.finish_matching(marker_seq, &StepKind::Initialize)
     }
 
     pub fn finish_connection(&mut self, marker_seq: u64) -> bool {
-        self.finish_matching(marker_seq, |step| {
-            matches!(step, ForegroundStep::Connecting { .. })
-        })
+        self.finish_matching(marker_seq, &StepKind::Connect)
     }
 
-    pub fn finish_start_hooks(&mut self, marker_seq: u64) -> bool {
-        self.finish_matching(marker_seq, |step| {
-            matches!(step, ForegroundStep::PreparingInput { .. })
-        })
+    pub fn finish_input_preparation(&mut self, marker_seq: u64) -> bool {
+        self.finish_matching(marker_seq, &StepKind::PrepareInput)
     }
 
     pub fn finish_provider(&mut self, marker_seq: u64) -> Option<u32> {
-        let ForegroundStep::CallingProvider {
+        let ActiveStep::CallingProvider {
             marker_seq: open,
             attempt,
             ..
-        } = &self.foreground
+        } = &self.active
         else {
             return None;
         };
@@ -240,41 +278,41 @@ impl StepRun {
             return None;
         }
         let attempt = *attempt;
-        self.foreground = ForegroundStep::Idle;
+        self.active = ActiveStep::Idle;
         Some(attempt)
     }
 
     pub fn finish_stop_hook(&mut self, marker_seq: u64) -> bool {
-        self.finish_matching(marker_seq, |step| {
-            matches!(step, ForegroundStep::RunningStopHook { .. })
-        })
+        self.finish_matching(marker_seq, &StepKind::StopHook)
     }
 
     pub fn finish_compaction(&mut self, marker_seq: u64) -> bool {
-        self.finish_matching(marker_seq, |step| {
-            matches!(step, ForegroundStep::Compacting { .. })
-        })
+        self.finish_matching(marker_seq, &StepKind::Compaction)
     }
 
     pub fn finish_seed_summary(&mut self, marker_seq: u64) -> bool {
-        self.finish_matching(marker_seq, |step| {
-            matches!(step, ForegroundStep::SummarisingSeed { .. })
-        })
+        if !matches!(self.active, ActiveStep::SummarisingSeed { .. })
+            || self.active.marker_seq() != Some(marker_seq)
+        {
+            return false;
+        }
+        self.active = ActiveStep::Idle;
+        true
     }
 
     pub fn tools_are_running(&self, marker_seq: u64) -> bool {
         matches!(
-            &self.foreground,
-            ForegroundStep::RunningTools { marker_seq: open, .. } if *open == marker_seq
+            &self.active,
+            ActiveStep::RunningTools { marker_seq: open, .. } if *open == marker_seq
         )
     }
 
     pub fn take_tool(&mut self, marker_seq: u64, tool_call_id: &str) -> Option<DispatchedCall> {
-        let ForegroundStep::RunningTools {
+        let ActiveStep::RunningTools {
             marker_seq: open,
             calls,
             ..
-        } = &mut self.foreground
+        } = &mut self.active
         else {
             return None;
         };
@@ -288,7 +326,7 @@ impl StepRun {
     }
 
     pub fn push_stopped(&mut self, stopped_call: horsie_agentcore::StoppedCall) {
-        if let ForegroundStep::RunningTools { stopped, .. } = &mut self.foreground {
+        if let ActiveStep::RunningTools { stopped, .. } = &mut self.active {
             stopped.push(stopped_call);
         }
     }
@@ -296,19 +334,19 @@ impl StepRun {
     /// Finish an empty tool batch and return every stopper it collected.
     /// `None` means other calls are still running or this is not a tool step.
     pub fn settle_tools(&mut self, marker_seq: u64) -> Option<Vec<horsie_agentcore::StoppedCall>> {
-        let ForegroundStep::RunningTools {
+        let ActiveStep::RunningTools {
             marker_seq: open,
             calls,
             ..
-        } = &self.foreground
+        } = &self.active
         else {
             return None;
         };
         if *open != marker_seq || !calls.is_empty() {
             return None;
         }
-        let ForegroundStep::RunningTools { stopped, .. } =
-            std::mem::replace(&mut self.foreground, ForegroundStep::Idle)
+        let ActiveStep::RunningTools { stopped, .. } =
+            std::mem::replace(&mut self.active, ActiveStep::Idle)
         else {
             return None;
         };
@@ -317,23 +355,23 @@ impl StepRun {
 
     /// Stop everything and make callbacks for the old marker stale.
     pub fn stop(&mut self) {
-        match &self.foreground {
-            ForegroundStep::Idle => {}
-            ForegroundStep::Initializing { cancel, .. }
-            | ForegroundStep::Connecting { cancel, .. }
-            | ForegroundStep::PreparingInput { cancel, .. }
-            | ForegroundStep::CallingProvider { cancel, .. }
-            | ForegroundStep::RunningTools { cancel, .. }
-            | ForegroundStep::RunningStopHook { cancel, .. }
-            | ForegroundStep::Compacting { cancel, .. }
-            | ForegroundStep::SummarisingSeed { cancel, .. } => cancel.cancel(),
+        match &self.active {
+            ActiveStep::Idle => {}
+            ActiveStep::Initializing { cancel, .. }
+            | ActiveStep::Connecting { cancel, .. }
+            | ActiveStep::PreparingInput { cancel, .. }
+            | ActiveStep::CallingProvider { cancel, .. }
+            | ActiveStep::RunningTools { cancel, .. }
+            | ActiveStep::RunningStopHook { cancel, .. }
+            | ActiveStep::Compacting { cancel, .. }
+            | ActiveStep::SummarisingSeed { cancel, .. } => cancel.cancel(),
         }
-        self.foreground = ForegroundStep::Idle;
+        self.active = ActiveStep::Idle;
         self.reconnect_required = true;
     }
 }
 
-/// Live provider, toolbox, and hook clients shared by foreground steps.
+/// Live provider, toolbox, and hook clients shared by active steps.
 /// Reconnection replaces this value without changing durable prompt meaning.
 pub struct ExecutionContext {
     pub provider: std::sync::Arc<dyn horsie_agentcore::LlmProvider>,
@@ -366,7 +404,7 @@ mod tests {
         }
     }
     #[test]
-    fn a_stale_marker_cannot_finish_foreground_work() {
+    fn a_stale_marker_cannot_finish_active_work() {
         let mut step = StepRun::new(true);
         let cancel = step.begin_provider(7, 0);
         assert!(step.is_running());
@@ -395,6 +433,80 @@ mod tests {
         assert!(step.take_tool(9, "b").is_some());
         assert_eq!(step.settle_tools(9).map(|stopped| stopped.len()), Some(0));
         assert!(!step.is_running());
+    }
+
+    #[test]
+    fn every_durable_step_names_its_live_phase() {
+        let token = CancellationToken::new;
+        let cases = [
+            (
+                StepKind::Initialize,
+                ActiveStep::Initializing {
+                    marker_seq: 1,
+                    cancel: token(),
+                },
+            ),
+            (
+                StepKind::Connect,
+                ActiveStep::Connecting {
+                    marker_seq: 1,
+                    cancel: token(),
+                },
+            ),
+            (
+                StepKind::PrepareInput,
+                ActiveStep::PreparingInput {
+                    marker_seq: 1,
+                    cancel: token(),
+                },
+            ),
+            (
+                StepKind::Provider,
+                ActiveStep::CallingProvider {
+                    marker_seq: 1,
+                    attempt: 0,
+                    cancel: token(),
+                },
+            ),
+            (
+                StepKind::Provider,
+                ActiveStep::RunningTools {
+                    marker_seq: 1,
+                    cancel: token(),
+                    calls: Vec::new(),
+                    stopped: Vec::new(),
+                },
+            ),
+            (
+                StepKind::StopHook,
+                ActiveStep::RunningStopHook {
+                    marker_seq: 1,
+                    cancel: token(),
+                },
+            ),
+            (
+                StepKind::Compaction,
+                ActiveStep::Compacting {
+                    marker_seq: 1,
+                    cancel: token(),
+                },
+            ),
+            (
+                StepKind::SeedSummary {
+                    request_id: "request".into(),
+                },
+                ActiveStep::SummarisingSeed {
+                    marker_seq: 1,
+                    cancel: token(),
+                },
+            ),
+        ];
+
+        for (kind, active) in cases {
+            assert!(active.belongs_to(&kind), "{kind:?}");
+            assert_eq!(active.marker_seq(), Some(1));
+        }
+        assert!(!ActiveStep::Idle.belongs_to(&StepKind::Provider));
     }
 
     #[test]
