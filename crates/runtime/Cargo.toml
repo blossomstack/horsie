@@ -50,7 +50,7 @@ zip           = { workspace = true }
 tempfile      = "3"
 # Upstream nono. The macOS SecurityServer TLS allow is injected as a capability rule
 # (see server/src/default_capabilities.json), not a fork. default-features=false drops system-keyring.
-nono          = { version = "0.74", default-features = false, optional = true }
+nono          = { version = "0.75", default-features = false, optional = true }
 
 [dev-dependencies]
 horsie-runtime-host = { path = "../runtime-host" }
