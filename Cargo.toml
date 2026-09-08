@@ -59,7 +59,7 @@ reqwest           = { version = "0.12", default-features = false, features = ["j
 eventsource-stream    = "0.2.3"
 reqwest-eventsource = "0.6.0"
 tempfile          = "3"
-jsonschema        = "0.52"
+jsonschema        = "0.53"
 # 11 made the crypto backend opt-in: with neither feature on, every sign/verify
 # panics at runtime asking for a provider, and with both the selection is
 # ambiguous. `aws_lc_rs` rather than `rust_crypto` because the pure-Rust backend
